@@ -2,17 +2,41 @@
 
 ## 项目
 
-实现 **mlx5_prism.ko**——ConnectX-4 Lx 智能网卡的控制面内核驱动。从零完成 PCIe 探测、CMDQ 引擎、7 步固件引导、PHY 诊断和硬件冒烟测试。
+实现 **mlx5_prism.ko**——ConnectX-4 Lx 智能网卡的控制面内核驱动。从零完成 PCIe 探测、CMDQ 引擎、7 步固件引导、PHY 诊断、硬件冒烟测试和**最小 netdev 骨架**（register_netdev + NAPI + ndo_start_xmit，覆盖 JD 关键词）。
 
 完整技术设计见 **DESIGN.md**。先读 DESIGN.md，然后拆任务、写代码、逐个验证。
 
 ## 硬件环境
 
-- **网卡**: Mellanox ConnectX-4 Lx, `15b3:1015`, PCI `08:00.0`, 双口 25GbE
+### 网卡
+
+- **型号**: Mellanox ConnectX-4 Lx, `15b3:1015`, PCI `08:00.0`, 双口 25GbE
 - **BAR0**: 32MB, UAR doorbell 寄存器
-- **内核源码**: `/home/zqc/code/linux` (自编译 7.0.0, 驱动源码 ~8000 行可供阅读)
+
+### GPU（分析 CUDA/RDMA 交互用）
+
+- **型号**: NVIDIA RTX 3080 Ti (12GB)
+- **驱动**: 580.126.09, CUDA 13.0
+
+### RDMA 栈
+
+- **libibverbs**: 39.0
+- **rdma-core**: 已安装
+- **mlx5_ib**: 已加载，RoCEv2 已激活
+- **nvidia-peermem**: 模块已编译但加载失败（CX-4 Lx + GeForce 消费卡组合上 GPUDirect RDMA 不支持）
+
+### 内核
+
+- **运行内核**: `5.15.0-174-generic` (Ubuntu 22.04)
 - **构建用 headers**: `/lib/modules/$(uname -r)/build` (5.15.0-174-generic)
-- **运行内核**: `5.15.0-174-generic`，headers 已安装
+- **内核源码**: `/home/zqc/code/linux` (自编译 7.0.0, mlx5_core 驱动源码 ~8000 行可供阅读)
+- **内核配置**: `CONFIG_PCI_P2PDMA` 未启用，IOMMU 未在启动参数中启用
+
+### GPUDirect RDMA 硬件限制（已知）
+
+ConnectX-4 Lx 硬件不支持 GPUDirect RDMA——NVIDIA 官方要求 ConnectX-5+。
+GPUDirect RDMA 当前做不了，但不影响 mlx5_prism（纯控制面，不需要 GPU）。
+RoCEv2 + cudaHostRegister pinned memory 路径在当前硬件上完全可行。
 
 ## 构建方式
 
@@ -147,3 +171,4 @@ sudo modprobe mlx5_core
 3. **每做一个模块，先去读对应的 mlx5_core 源文件**（见上方对照表）
 4. 每完成一个任务，编译验证、加载测试、git commit
 5. 遇到设计文档与实际硬件行为不一致时，修正 DESIGN.md（commit 时注明原因）
+6. 全部完成后，写一篇 **mlx5 架构总结** 文档（CMDQ 协议 / 固件引导 / QP-CQ 数据结构 / DMA 一致性 / doorbell-UAR 机制），作为知识沉淀和面试弹药

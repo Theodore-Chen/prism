@@ -68,18 +68,24 @@ ftrace CMDQ 命令追踪                   rte_rdtsc 用户态 profiling
 交付物：mlx5_prism.ko ~2000 行
 ```
 
-### 为什么不做数据面
+### 为什么只做最小 netdev（不做完整转发）
 
-| 原因 | 说明 |
-|------|------|
-| **不重复造轮子** | DPDK PMD 已有的数据面能力不需要在内核态重写 |
-| **控制面是更稀缺的能力** | 会写 ndo_start_xmit 的人很多，理解固件引导协议的人很少 |
-| **CMDQ 本身就是完整工程** | 从 `pci_probe` 到 `INIT_HCA` 完成，已经覆盖 PCIe/DMA/中断/锁/固件协议——足够证明内核能力 |
-| **代码量可控** | 砍掉 TX/RX/NAPI/netdev/ethtool（~600 行），~2000 行交付 |
+**不做完整数据面转发**（GRO/GSO/TSO/multiqueue/RSS/ethtool offload）——那是 mlx5_core 的成熟代码，重写没有工程价值。
 
-### 为什么不需要注册 netdev
+**但做最小 netdev 骨架**（~300 行）——覆盖 JD 硬性要求"Linux 网络子系统（register_netdev/NAPI/ndo_start_xmit）"，证明你懂 API 链路。
 
-netdev 的本质是向 Linux 网络栈暴露收发包接口：`ndo_start_xmit`（发包）、`napi_gro_receive`（收包）、ethtool 回调（统计信息）。mlx5_prism 不打算让 ping / iperf / nginx 通过这块网卡通信——从硬件采集到的数据通过 sysfs、ftrace、dmesg 直接暴露给用户。7 项内核能力验证，零项需要 netdev。
+| 做什么 | 不做什么 | 理由 |
+|--------|---------|------|
+| `register_netdev` + `net_device_ops` | GRO/GSO/TSO offload | mlx5_core 成熟功能，重写无 ROI |
+| `ndo_start_xmit`（SQ 单包路径） | multiqueue / RSS / ethtool | 生产级功能，非面试考点 |
+| NAPI poll（RQ 单包回收 + `napi_gro_receive`） | 线速转发 / 中断自适应 | 目的是 JD 关键词覆盖 |
+| `ndo_open/stop`（CMDQ 创建/销毁 RQ/SQ） | XDP / tc offload | 超出项目范围 |
+
+**面试话术**："我没有重写 mlx5_core 的 netdev——它有 GRO/GSO/TSO/multiqueue 全套 offload，重写没有工程价值。但我注册了最小 netdev 骨架（NAPI + ndo_start_xmit），用 CMDQ 创建 RQ/SQ 实现单包收发——证明我理解 Linux 网络子系统的完整 API 链路。差异化在控制面和可观测性。"
+
+### netdev 在 Prism 中的角色：最小骨架，不是转发引擎
+
+netdev 在 Prism 中**只做最小验证**：注册 netdev + 实现 `ndo_start_xmit`（单包 SQ 路径）+ NAPI poll（单包 RQ 回收）。目的不是让 ping/iperf 跑线速，而是覆盖 JD 关键词"Linux 网络子系统"。用户态数据采集仍通过 sysfs / ftrace / dmesg。
 
 ### 为什么不需要对接 libibverbs
 
@@ -111,6 +117,60 @@ CMDQ 不是 Mellanox 写的一个软件框架。它是 ConnectX-4 固件对外�
 | 引导固件 | ENABLE_HCA (0x104) / INIT_HCA (0x102) |
 
 ---
+
+### 跨平台 DMA 记忆：ION/DMA-BUF 到 CMDQ
+
+CMDQ 需要的 DMA 内存分配和其他场景中的 DMA 管理是同一套原理。理解这种统一性有助于降低学习曲线的陡峭度。
+
+#### ION 与 CMDQ 的 DMA 同构
+
+| 场景 | 分配接口 | 消费者 | 共享方式 | 零拷贝思想 | 内存屏障 |
+|------|---------|--------|---------|----------|---------|
+| Android ION (NPU) | `ion_alloc`（用户态） | NPU DMA 引擎 | fd → Binder → mmap（进程间） | 两个进程共享物理页 | `wmb()` → NPU 可见 |
+| 嵌入式 ZYNQ | `dma_alloc_coherent`（内核态） | 片内外设 DMA | 内核内部直接访问 | CPU↔外设直接 DMA | `wmb()` → 外设可见 |
+| mlx5 CMDQ | `dma_alloc_coherent`（内核态） | 网卡固件 DMA（PCIe） | 内核内部 + MMIO doorbell | 主机↔固件共享 mailbox | `wmb()` → doorbell 前固件可见 |
+
+**关键认知**：不同硬件平台上的 DMA 内存管理本质相同——分配物理连续内存 → 通知消费者 → 内存屏障保证可见性 → 消费者 DMA 读写。区别只在作用域（单机进程间 / 片内 / PCIe 跨总线）。
+
+#### ION 零拷贝与 RDMA MR 的同构性
+
+ION 是 Android 的物理连续内存分配器，解决 NPU/GPU/摄像头需要大块物理连续内存做 DMA 的问题。其核心机制和 mlx5 的 RDMA Memory Region 注册完全同构：
+
+```
+ION 分配 -> struct file -> fd -> Binder 传递 -> mmap 零拷贝（单机进程间）
+                                                      |
+                                             同一套思想，不同作用域
+                                                      v
+ibv_reg_mr -> rkey 交换 -> RDMA WRITE/READ -> 零拷贝（跨机器 PCIe）
+```
+
+**ION 进程间零拷贝链路**：
+1. 进程 A `ion_alloc` -> 内核分配物理连续页 -> 创建 `struct file` -> 返回 fd
+2. 进程 A 通过 Binder 把 fd 传给进程 B（传的是文件描述符，不是数据，20MB 数据从未被拷贝）
+3. 内核把同一个 `struct file` 安装到进程 B 的 fd 表
+4. 进程 B `mmap(fd)` -> 虚拟地址指向同一块物理内存
+5. 之后两个进程直接读写 —— CPU MMU 查页表翻译，不经过内核，零拷贝
+
+#### system cache 热冷分离的迁移
+
+ION 场景中的做法：`mmap MAP_FIXED` 将 8MB system cache + 12MB 普通内存拼接成连续 20MB 虚拟地址空间。上层看到连续数组，底层是两块不同物理内存池——热数据访问延迟 ~几 ns（SRAM），冷数据 ~几百 ns（DRAM）。
+
+在 mlx5 驱动中可以应用的思想：
+- CMDQ descriptor ring（热，每毫秒读写） -> `dma_alloc_coherent`，coherent 内存
+- 固件镜像区（冷，初始化后只读） -> streaming DMA，`dma_map_single` 按需映射
+
+`dma_alloc_coherent` 比 streaming DMA 更消耗系统资源（绕过 cache、需要 UC/WC 映射），不该把冷数据也放进 coherent 区。mlx5_prism 的实现中，CMDQ mailbox 用 coherent，固件镜像区用 streaming——这是热冷分离思想的直接迁移。
+
+#### CMDQ 与 ION 共享内存的对位
+
+| 概念 | ION（单机进程间） | CMDQ（主机<->固件） |
+|------|-----------------|-----------------|
+| 共享内存 | ION heap 分配的物理页 | `dma_alloc_coherent` 分配的 mailbox |
+| 生产者通知 | `wmb()` + `eventfd` / Binder 消息 | `wmb()` + doorbell MMIO write |
+| 消费者通知 | `eventfd` / 原子变量轮询 | MSI-X 中断 |
+| 访问控制 | fd 权限（谁能 mmap） | BAR 空间 MMIO 映射（内核独占） |
+| 同步原语 | 原子变量 / futex | `spin_lock`（CMDQ 临界区 < 10μs） |
+
 
 ## 2. 技术架构
 
@@ -694,13 +754,14 @@ p99 比 mlx5_core 低 12.8%——因为 mlx5_core 有 20+ 个并发 CMDQ 消费�
 | S3 CMDQ 引擎 | mailbox 数据结构 → doorbell 写 → spin_lock → EQ handler 读响应 → completion | 完整 CMDQ 往返：issue → doorbell → MSI-X → complete |
 | S4 固件引导 | poll iseg → ENABLE_HCA → QUERY_PAGES → MANAGE_PAGES → QUERY_HCA_CAP → INIT_HCA | **M1 里程碑：HCA OPERATIONAL** |
 | S5 PHY 诊断 + 冒烟测试 | ACCESS_REG PPCNT → sysfs → CREATE_QP → WQE → doorbell → CQE 验证 | sysfs PHY 可读 + 硬件自检通过 |
-| S6 收尾 | ftrace tracepoint 完善 → verify.sh → 双层对比报告 → bpftrace 基准采集 | **M2 里程碑：完整交付** |
+| S5.5 最小 netdev 骨架 | `register_netdev` + `ndo_start_xmit`（SQ 单包）+ NAPI poll（RQ 单包 `napi_gro_receive`）+ `ndo_open/stop`（CMDQ 创建/销毁 RQ/SQ） | `ip link` 能看到 prism0 + 单包收发验证通过 |
+| S6 收尾 | ftrace tracepoint 完善 → verify.sh → 双层对比报告 → bpftrace 基准采集 → **mlx5 架构总结文档** | **M2 里程碑：完整交付** |
 
 ### 关键里程碑
 
 ```
 M0 (初始)              M1 (固件引导完成)      M2 (完整交付)
-mlx5_prism.ko 可加载     HCA OPERATIONAL        15 项验收通过
+mlx5_prism.ko 可加载     HCA OPERATIONAL        18 项验收通过
 BAR0 可读                QUERY_HCA_CAP 完成      双层对比报告
                          dmesg 完整引导日志
                          冒烟测试通过
@@ -718,12 +779,12 @@ $ sudo rmmod mlx5_core && sudo insmod mlx5_prism.ko && dmesg | tail -15
 **M2 验证**：
 ```bash
 $ sudo ./verify.sh
-ALL 15/15 PASSED
+ALL 18/18 PASSED
 ```
 
 ---
 
-## 9. 验收标准（15 项）
+## 9. 验收标准（18 项）
 
 ### 必须全部通过
 
@@ -738,6 +799,9 @@ ALL 15/15 PASSED
 | 7 | **CMDQ p99 延迟** | ftrace/perf 采集 | ≤ 30μs（mlx5_core 基准 ~15μs） |
 | 8 | **引导时间** | dmesg 第一条 poll 到 `INIT_HCA complete` 的时间戳差值 | ≤ 300ms（mlx5_core 基准 ~200ms） |
 | 9 | **硬件冒烟测试** | 内置 `mlx5_prism_smoke()` 自动执行 | `dmesg` 显示 `Hardware datapath smoke test: PASSED`，CQE.opcode=MLX5_CQE_RESP_SEND, status=0 |
+| 9a | **netdev 注册** | `ip link show prism0` | 显示 prism0 接口，state=DOWN |
+| 9b | **单包发送（SQ 路径）** | ftrace `mlx5_prism:sq_xmit` | skb → DMA map → WQE → doorbell → CQE 回收 → `dev_kfree_skb` |
+| 9c | **NAPI 收包（RQ 路径）** | ftrace `mlx5_prism:rq_poll` | CQE → skb 构造 → `napi_gro_receive` → `napi_complete` |
 | 10 | **PHY sysfs 可读** | `cat /sys/class/misc/mlx5_prism0/pre_fec_ber` | 输出有效数值（量级 1e-15 ~ 1e-5） |
 | 11 | **PHY 数据一致性** | `cat /sys/class/misc/mlx5_prism0/pre_fec_ber` vs `ethtool -S eth0` (mlx5_core 加载时) | 同数量级 |
 | 12 | **PHY 告警触发** | 拔松光纤或衰减器 | `cat /sys/class/misc/mlx5_prism0/status` 从 `ok` → `degraded`，dmesg 有 WARNING |
@@ -813,16 +877,77 @@ echo "=== $((PASS+FAIL)) tests: $PASS passed, $FAIL failed ==="
 
 ---
 
-## 11. 硬件要求
+## 11. 硬件环境
 
-- 1 台 Linux 主机 (x86_64) + Mellanox ConnectX-4 Lx (25Gbps)
-- 不需要对端设备，不需要光纤连接——mlx5_prism 是纯控制面，固件引导、PHY 寄存器读取和硬件冒烟测试都不需要 link up
-- 光衰减器（可选，用于 PHY 告警触发验证）
-- Intel E810-XXVDA2（远期，用于 `e810_prism`——同一项目线的 E810 版本，用户态 VFIO 程序）
+### 11.1 开发平台（sunrise-studio）
 
-**E810 上的对应项目 (`e810_prism`)**：技术栈完全不同（VFIO + 用户态 Admin Queue 引擎），与 mlx5_prism 共享项目名后缀 `_prism` 表示控制面学习定位，前缀区分硬件平台。
+| 组件 | 型号/版本 | 状态 |
+|------|----------|------|
+| GPU | NVIDIA RTX 3080 Ti (12GB) | 驱动 580.126.09, CUDA 13.0 |
+| RDMA NIC | Mellanox ConnectX-4 Lx [15b3:1015] 双口 | RoCEv2 已激活, 端口 ACTIVE |
+| RDMA 栈 | libibverbs 39.0, rdma-core, mlx5_ib | 全部正常工作 |
+| 内核 | 5.15.0-174-generic (Ubuntu 22.04) | — |
+| 内核源码 | /home/zqc/code/linux (自编译 7.0.0) | mlx5 驱动源码 ~8000 行可参考 |
+| nvidia-peermem | 模块已编译 (.ko 存在) | 加载失败 (Operation not permitted) |
+| IOMMU | 未在启动参数中启用 | 缺少 `intel_iommu=on` |
+| MFT 工具 | 未安装 | 无法查询/配置网卡固件 |
 
----
+### 11.2 项目硬件需求匹配
+
+| 项目 | 需要的硬件能力 | 当前环境 | 结论 |
+|------|-------------|---------|------|
+| mlx5_prism：CMDQ + 固件引导 + PHY 监控 | ConnectX-4/5 任意，PCIe 访问 | CX-4 Lx，RoCEv2 已激活 | ✅ 完全满足 |
+| RoCEv2 协议栈（用户态） | RoCEv2 网卡 + DPDK | CX-4 Lx，libibverbs 正常 | ✅ 完全满足 |
+| cudaHostRegister + RDMA | CUDA 卡 + RDMA 网卡 | RTX 3080 Ti + CX-4 Lx | ✅ pinned memory 路径满足 |
+| GPUDirect RDMA（GPU 显存直通网卡） | CX-5+ + Tesla/Quadro | CX-4 Lx + RTX 3080 Ti | ❌ 三个硬性障碍 |
+
+### 11.3 GPUDirect RDMA 硬件门槛
+
+GPUDirect RDMA 允许网卡直接 DMA 到 GPU 显存，绕过 CPU 内存：
+
+```
+GPU 显存 --PCIe P2P--> NIC --RDMA--> 远端
+        （不经过 CPU 和系统内存）
+```
+
+**硬件要求**（NVIDIA 官方文档）：
+1. **网卡**：Mellanox ConnectX-5 及以上（ConnectX-4 Lx 不支持）
+2. **GPU**：数据中心 GPU（Tesla/A100/H100），`nvidia_p2p_get_pages()` API 官方仅对数据中心 GPU 开放
+3. **内核**：`CONFIG_PCI_P2PDMA` 已启用，IOMMU 已配置
+4. **驱动**：`nvidia-peermem.ko` 已加载
+
+**pinned memory 替代路径**（当前硬件支持）：
+```
+GPU 显存 -> cudaMemcpy -> CPU pinned memory -> ibv_post_send RDMA -> 远端
+```
+虽然没有绕过 CPU，但 pinned memory 避免了内核的 `copy_from_user`，且 `cudaMemcpy` 走 PCIe 带宽（~16 GB/s），对绝大多数场景够用。
+
+### 11.4 环境验证命令
+
+```bash
+# 确认 RDMA 栈正常
+ibv_devinfo | grep -E "hca_id|link_layer|state"
+
+# 确认 RoCEv2 端口激活
+rdma link show
+
+# 确认 nvidia-peermem 状态（CX-4 Lx 消费卡上预计加载失败）
+lsmod | grep nvidia_peermem
+dmesg | grep peermem
+
+# 确认 PCI P2P 支持
+cat /boot/config-$(uname -r) | grep PCI_P2PDMA
+```
+
+### 11.5 远期硬件（暂不购入）
+
+| 设备 | 用途 | 触发条件 |
+|------|------|---------|
+| Mellanox ConnectX-5 | GPUDirect RDMA 真机验证 | RoCEv2 协议栈完成后，需要验证 GPU 显存直通时再买 |
+| Intel E810-XXVDA2 | e810_prism（VFIO 用户态 Admin Queue 引擎） | 完成 mlx5_prism 后，需要证明跨厂商控制面理解时再买 |
+
+不需要对端设备。不需要光纤连接。mlx5_prism 是纯控制面——固件引导、PHY 寄存器读取和硬件冒烟测试都不需要 link up。
+
 
 ## 12. 与原始方案对比
 
