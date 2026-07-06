@@ -104,6 +104,12 @@ T09 硬件冒烟测试
     → 先读 cmd.c 中 CREATE_QP 的调用方式
     → 理解 QP 创建 → RTS → WQE → doorbell → CQE 这条链
 
+T09.5 最小 netdev 骨架 (register_netdev + ndo_start_xmit + NAPI poll)
+    → 先读 en/main.c 中 alloc_etherdev_mq / register_netdev / net_device_ops 的注册方式
+    → ndo_start_xmit: skb → DMA map → WQE → doorbell → 等 CQE → dev_kfree_skb
+    → NAPI poll: CQE → skb 构造 → napi_gro_receive → napi_complete
+    → 不做 offload，单包验证即可
+
 T10 ftrace tracepoint
     → 参考内核 samples/trace_events/ 示例
     → 插桩位置: cmdq_issue (doorbell 前) 和 cmdq_complete (响应回来)
@@ -116,7 +122,7 @@ T11 verify.sh + 对比报告
 ### 可以忽略的 mlx5_core 代码
 
 - RDMA 相关 (SRIOV, eswitch, flow steering, TLS)
-- 以太网数据面 (en_*.c, ethtool, netdev)
+- 以太网数据面 offload (en_tx.c 的 GSO/TSO, en_rx.c 的 GRO, RSS, multiqueue)——但 en/main.c 的 netdev 注册部分需参考（S5.5）
 - 调试功能 (debugfs, health, dpll, devlink)
 
 ### E810/冰湖驱动对比学习 (只读，不需要 E810 硬件)
@@ -134,11 +140,11 @@ E810 的核心差异：没有 UAR 硬件隔离，控制面和数据面都在 VFI
 
 ## 关键约束
 
-1. **不注册 netdev**——不实现 `ndo_start_xmit` / `napi_gro_receive` / ethtool 回调
+1. **只做最小 netdev 骨架**——注册 netdev + `ndo_start_xmit`（SQ 单包）+ NAPI poll（RQ 单包），但不做 GRO/GSO/TSO/multiqueue/RSS/ethtool offload（那是 mlx5_core 的成熟功能，重写无 ROI）
 2. **不依赖 mlx5_core**——不 `#include` mlx5_core 的任何头文件，独立实现 CMDQ
 3. **不导出用户态接口**——不创建 `/dev/` 设备，不使用 `mmap`
 4. **与 mlx5_core 互斥**——加载前必须先 `rmmod mlx5_ib && rmmod mlx5_core`
-5. **sysfs 挂在 `/sys/class/misc/`**——不注册 `struct net_device`
+5. **PHY 诊断 sysfs 挂在 `/sys/class/misc/`**——独立于 netdev 接口（netdev 是网络栈入口，PHY 监控是诊断功能，两者职责不同）
 6. **代码风格**: Linux 内核 coding style (`scripts/checkpatch.pl --no-tree --strict`)
 
 ## 验证命令
