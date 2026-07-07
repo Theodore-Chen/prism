@@ -14,7 +14,7 @@
 
 | Task ID | 标题 | 阶段 | 里程碑 | 状态 | Commit | 完成日期 |
 |---------|------|------|--------|------|--------|---------|
-| T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | (本 commit) | 2026-07-07 |
+| T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | M0 | pending | — | — |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | pending | — | — |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
@@ -50,7 +50,7 @@
 - **状态**: completed
 - **开始时间**: 2026-07-07
 - **完成时间**: 2026-07-07
-- **Commit**: (本 commit)
+- **Commit**: 8d446c9
 - **读过源码**: 无（CLAUDE.md 明确 T01 不需要读 mlx5_core，写自己的 module_init/exit 即可）
 - **关键决策**:
   - Makefile 用 `mlx5_prism-y := mlx5_prism_main.o` 的多文件模块语法（而非 `obj-m := mlx5_prism.o` + 单一 `mlx5_prism.c`），方便 T02+ 直接追加 `.o` 文件
