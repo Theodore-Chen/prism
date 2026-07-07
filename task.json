@@ -1,0 +1,940 @@
+{
+  "project": {
+    "name": "mlx5_prism",
+    "goal": "从零实现 ConnectX-4 Lx 智能网卡的控制面内核驱动 mlx5_prism.ko (~2000 行 C)：PCIe 探测 + CMDQ 引擎 + 7 步固件引导 + PHY 诊断 + 硬件冒烟测试 + 最小 netdev 骨架，与 mlx5_core 做双层对比验证。",
+    "codebase": "/home/zqc/code/prism",
+    "kernel_headers_runtime": "/lib/modules/$(uname -r)/build",
+    "kernel_headers_700": "/home/zqc/code/linux",
+    "mlx5_core_source": "/home/zqc/code/linux/drivers/net/ethernet/mellanox/mlx5/core",
+    "target_device": {
+      "vendor_id": "15b3",
+      "device_id": "1015",
+      "pci_address": "08:00.0",
+      "model": "Mellanox ConnectX-4 Lx (dual 25GbE)",
+      "bar0_size": "32MB (UAR doorbell)"
+    }
+  },
+
+  "principles": [
+    "学习优先：每个 task 必须先读 mlx5_core 对应源码，理解 Mellanox 的实现再做精简版，不能闭门造车",
+    "增量验证：每个 task 有明确可执行的出口条件（编译/加载/dmesg/sysfs），不达标不算完成",
+    "每次提交：每完成一个 task 编译通过并加载测试后立即 git commit",
+    "不依赖 mlx5_core：不 include 任何 mlx5_core 头文件，独立实现 CMDQ",
+    "互斥加载：加载 mlx5_prism 前必须 sudo modprobe -r mlx5_ib mlx5_core",
+    "内核 coding style：通过 scripts/checkpatch.pl --no-tree --strict",
+    "如实记录：遇到设计与硬件行为不一致时，修正 DESIGN.md 并在 commit message 注明原因",
+    "代码无注释：除非用户明确要求，否则遵循 opencode 规范不添加注释"
+  ],
+
+  "milestones": {
+    "M0": {
+      "name": "模块可加载 + BAR0 可读",
+      "task": "T02-pci-probe",
+      "criteria": "lspci -k -d 15b3:1015 显示 Kernel driver in use: mlx5_prism；dmesg 显示 BAR0 映射地址和 fw_rev"
+    },
+    "M1": {
+      "name": "HCA OPERATIONAL (固件引导完成)",
+      "task": "T10-fw-init-hca",
+      "criteria": "加载后 dmesg 输出完整 7 步引导流程并显示 HCA operational；QUERY_HCA_CAP 关键字段与 mlx5_core 一致；引导时间 <= 300ms"
+    },
+    "M2": {
+      "name": "完整交付",
+      "task": "T16-verify-report",
+      "criteria": "sudo ./verify.sh 显示 ALL 18/18 PASSED；产出双层对比报告"
+    }
+  },
+
+  "workflow": {
+    "how_to_execute_each_task": [
+      "1. 读本 task 的 learning.mlx5_reference 列出的 mlx5_core 源文件，理解 Mellanox 实现",
+      "2. 读 learning.concepts 涉及的内核子系统文档（必要时去 Documentation/ 或网上查）",
+      "3. 按 steps 实现，每个 step 编译验证",
+      "4. 完成后执行 exit_criteria 所有命令，必须全部通过",
+      "5. 回答 learning.reflection_questions（口头或写在 progress.md 该 task 节）",
+      "6. git add + commit（commit message 含 task id 和出口条件验证结果）",
+      "7. 在 progress.md 该 task 节填写完成记录"
+    ],
+    "verification_commands": {
+      "unload_mlx5_core": "sudo modprobe -r mlx5_ib && sudo modprobe -r mlx5_core",
+      "build": "make -C /lib/modules/$(uname -r)/build M=$(pwd) clean && make -C /lib/modules/$(uname -r)/build M=$(pwd) modules",
+      "load": "sudo insmod mlx5_prism.ko",
+      "unload": "sudo rmmod mlx5_prism",
+      "check_binding": "lspci -k -d 15b3:1015",
+      "check_dmesg": "dmesg | tail -30 | grep mlx5_prism",
+      "check_style": "scripts/checkpatch.pl --no-tree --strict -f *.c *.h",
+      "restore_mlx5_core": "sudo modprobe mlx5_core"
+    }
+  },
+
+  "tasks": [
+    {
+      "id": "T01-hello-module",
+      "title": "内核模块骨架 + Makefile",
+      "phase": "S0",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [],
+      "estimated_loc": 40,
+      "learning": {
+        "objective": "理解 Linux 内核模块的加载/卸载生命周期，掌握 Kbuild 构建系统",
+        "concepts": [
+          "module_init / module_exit 宏的本质（链接段 .initcall）",
+          "__init / __exit 标记的内存回收机制",
+          "Kbuild Makefile 语法（obj-m, xxx-objs）",
+          "MODULE_LICENSE / MODULE_AUTHOR / MODULE_DESCRIPTION",
+          "printk 和 pr_info / pr_err 的日志级别"
+        ],
+        "keywords": ["内核模块", "module_init", "Kbuild", "MODULE_LICENSE"],
+        "mlx5_reference": [
+          {"file": "main.c", "focus": "文件末尾 module_init/module_exit 调用模式，不读实现细节"}
+        ],
+        "reflection_questions": [
+          "module_init 是函数还是宏？它把函数指针放在哪个链接段？内核怎么找到它？",
+          "__init 标记的函数加载完成后会发生什么？为什么这样设计？",
+          "为什么 MODULE_LICENSE(\"GPL\") 必须写？不写会怎样？写 \"Proprietary\" 又会怎样？"
+        ]
+      },
+      "goal": "创建 mlx5_prism.ko 骨架，可加载/卸载，dmesg 打印加载卸载日志",
+      "context": "这是整个项目的地基。CLAUDE.md 明确说 T01 不需要读 mlx5_core，写自己的 module_init/exit 即可。",
+      "steps": [
+        "1. 创建 Makefile：obj-m := mlx5_prism.o；目标内核 /lib/modules/$(uname -r)/build",
+        "2. 创建 mlx5_prism_main.c：定义 MODULE_LICENSE/VERSION/AUTHOR/DESCRIPTION",
+        "3. 实现 mlx5_prism_init() 打印 \"mlx5_prism loaded\"",
+        "4. 实现 mlx5_prism_exit() 打印 \"mlx5_prism unloaded\"",
+        "5. 编译验证、加载验证、卸载验证"
+      ],
+      "exit_criteria": {
+        "compile": "make -C /lib/modules/$(uname -r)/build M=$(pwd) modules 无错误无警告",
+        "load": "sudo insmod mlx5_prism.ko 成功；lsmod | grep mlx5_prism 显示一行",
+        "functional": [
+          "加载后 dmesg 含 'mlx5_prism loaded'",
+          "sudo rmmod mlx5_prism 成功；dmesg 含 'mlx5_prism unloaded'"
+        ],
+        "manual_checks": [
+          "100 次连续 insmod/rmmod 不报错（for i in $(seq 100); do sudo insmod mlx5_prism.ko && sudo rmmod mlx5_prism; done）",
+          "dmesg 全程无 WARNING/BUG/Oops/panic"
+        ]
+      }
+    },
+
+    {
+      "id": "T02-pci-probe",
+      "title": "PCI probe + BAR0 映射 + 设备结构体",
+      "phase": "S1",
+      "milestone": "M0",
+      "status": "pending",
+      "prerequisites": ["T01-hello-module"],
+      "estimated_loc": 120,
+      "learning": {
+        "objective": "掌握 Linux PCI 子系统的驱动注册、设备探测、BAR 映射模型",
+        "concepts": [
+          "pci_register_driver / module_pci_driver 宏",
+          "struct pci_device_id（VENDOR/DEVICE/SUBVENDOR/SUBDEVICE/CLASS/CLASS_MASK）",
+          "pcim_ 前缀的托管资源（devres）机制——probe 失败自动释放",
+          "pcim_enable_device vs pci_enable_device",
+          "pcim_iomap / pcim_iomap_regions——BAR 到 __iomem 内存的映射",
+          "pci_set_drvdata / pci_get_drvdata——probe 上下文在多函数间的传递",
+          "BAR (Base Address Register)：MMIO vs Port I/O",
+          "ioread32 / iowrite32——__iomem 内存访问"
+        ],
+        "keywords": ["PCI 驱动", "pci_device_id", "pcim_iomap", "BAR0", "pci_set_drvdata", "MMIO"],
+        "mlx5_reference": [
+          {"file": "main.c", "focus": "mlx5_init_one / mlx5_pci_probe / mlx5_remove_one，关注资源分配的顺序和错误回滚路径"},
+          {"file": "main.c", "focus": "pci_device_id 表（mlx5_core_pci_table）的写法"}
+        ],
+        "reflection_questions": [
+          "pcim_ 前缀函数和裸 pci_ 函数有什么本质区别？devres 是怎么实现自动释放的？",
+          "pci_set_drvdata 存的指针后续在哪些场景被取出来？（提示：sysfs、中断 handler、remove）",
+          "ConnectX-4 Lx 的 BAR0 是 32MB，里面装的是什么？为什么控制面用 BAR0 而不是 BAR2？",
+          "如果 probe 中途失败（比如第 3 步出错），前两步分配的资源怎么释放？"
+        ]
+      },
+      "goal": "mlx5_prism 绑定 15b3:1015，BAR0 映射成功并可读硬件寄存器",
+      "context": "本 task 达成 M0 里程碑。读 main.c 时关注 Mellanox 怎么组织 probe 的资源分配顺序，mlx5_prism 只需要最小版本（enable + iomap + set_drvdata + 读 fw_rev）。",
+      "steps": [
+        "1. 定义 struct mlx5_prism_dev（pdev + bar0 __iomem 指针）",
+        "2. 定义 MODULE_DEVICE_TABLE(pci, ...) 含 15b3:1015",
+        "3. 实现 mlx5_prism_probe: pcim_enable_device → pci_set_master → pcim_iomap_regions(BAR0) → pci_set_drvdata",
+        "4. 在 probe 末尾读 BAR0 偏移 0 的 hca_command_enum 验证映射正确（应非全 0/全 F）",
+        "5. 实现 mlx5_prism_remove: 反向释放（pcim 自动管，但 drvdata 要清空）",
+        "6. module_pci_driver 注册"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过，checkpatch.pl 无 ERROR",
+        "load": "sudo insmod mlx5_prism.ko 后 lspci -k -d 15b3:1015 显示 'Kernel driver in use: mlx5_prism'",
+        "functional": [
+          "dmesg 含 'BAR0 mapped at <addr>'",
+          "dmesg 含 'hca_command_enum=0x...'（一个合理非零值，说明映射可读）",
+          "sudo rmmod mlx5_prism 成功，dmesg 含 'unloaded'"
+        ],
+        "manual_checks": [
+          "100 次 load/unload 无 dmesg WARNING/Oops",
+          "kmemleak 无报告（如果开启）"
+        ]
+      }
+    },
+
+    {
+      "id": "T03-dma-eq-alloc",
+      "title": "DMA mailbox + Event Queue 内存分配",
+      "phase": "S2",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T02-pci-probe"],
+      "estimated_loc": 180,
+      "learning": {
+        "objective": "掌握 Linux DMA 内存模型、coherent vs streaming、PCIe 设备的地址空间",
+        "concepts": [
+          "dma_alloc_coherent 返回两个地址：CPU 虚拟地址 + dma_addr_t 总线地址",
+          "coherent（一致性）DMA：硬件保证 CPU 和设备看到的内存永远一致，无需显式 flush",
+          "streaming DMA：dma_map_single / dma_unmap_single，配合 wmb/rmb 显式同步",
+          "dma_set_mask_and_coherent / DMA_BIT_MASK(64)——告诉内核设备寻址能力",
+          "物理地址 vs 总线地址（dma_addr_t）vs 虚拟地址的区别",
+          "cache coherency 在 PCIe 上的实现（snooping vs 显式 flush）",
+          "Event Queue 的 ring buffer 数据结构"
+        ],
+        "keywords": ["dma_alloc_coherent", "DMA 一致性", "dma_set_mask", "mailbox", "Event Queue"],
+        "mlx5_reference": [
+          {"file": "cmd.c", "focus": "前 200 行：mlx5_cmd_pool_alloc / alloc_cmd mailbox 的 dma_alloc_coherent 调用参数（size, align, flags）"},
+          {"file": "eq.c", "focus": "前 200 行：mlx5_eq_alloc / alloc_eq 入口的 dma_alloc_coherent，关注 EQE 大小和 EQ 容量"}
+        ],
+        "reflection_questions": [
+          "dma_alloc_coherent 返回的两个地址为什么不相同？各自的消费者是谁（CPU 还是设备）？",
+          "为什么 mlx5 把 mailbox 和 EQ 都用 coherent 而不是 streaming？性能损失在哪？",
+          "dma_set_mask_and_coherent 不调用会怎样？默认 mask 是多少？",
+          "mailbox 大小如何确定？固件有最小要求吗？"
+        ]
+      },
+      "goal": "struct mlx5_prism_dev 中分配好 CMDQ mailbox 和 EQ buffer，dmesg 打印 DMA 地址",
+      "context": "CLAUDE.md 提示：mlx5_core 分配了大得多的结构体，mlx5_prism 只需最小版本。注意 mlx5 的 mailbox 是 16 字节命令 + inline data + mailbox 大块（4096 字节），EQ 是 4KB / 64 EQE。先按 PRM 的最小尺寸分配，后续 CMDQ 引擎直接用。",
+      "steps": [
+        "1. pci_set_dma_mask_and_coherent(pdev, DMA_BIT_MASK(64))",
+        "2. 定义 struct mlx5_prism_cmdq（mailbox, mailbox_dma, lock, head/tail）",
+        "3. 实现 mlx5_prism_cmdq_alloc：dma_alloc_coherent 分配 mailbox（按 4KB * 命令槽数）",
+        "4. 定义 struct mlx5_prism_eq（buf, buf_dma, irq, consumer_index）",
+        "5. 实现 mlx5_prism_eq_alloc：dma_alloc_coherent 分配 EQ buffer（4KB）",
+        "6. probe 接入；remove 反向 dma_free_coherent"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "insmod 后 dmesg 含 'mailbox: cpu=<ptr> dma=<0x...>' 和 'eq: cpu=<ptr> dma=<0x...>'",
+        "functional": [
+          "dma 地址在 4GB 以下还是以上？为什么？（看是否真启用了 64-bit DMA）",
+          "rmmod 后无 'WARNING: CPU leak' 或 kmemleak 报告"
+        ],
+        "manual_checks": ["100 次 load/unload 无内存泄漏"]
+      }
+    },
+
+    {
+      "id": "T04-msix-irq",
+      "title": "MSI-X 中断向量分配 + request_irq",
+      "phase": "S2",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T03-dma-eq-alloc"],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "掌握 PCI MSI-X 中断机制和 Linux IRQ 框架",
+        "concepts": [
+          "INTx → MSI → MSI-X 的演进，MSI-X 的 per-vector Masked/unmasked",
+          "pci_alloc_irq_vectors(API, MSI-X) vs pci_enable_msix_range（旧）",
+          "request_irq / free_irq / irq_handler_t 签名（return irqreturn_t）",
+          "IRQF_SHARED / IRQF_NO_THREAD / IRQF_NO_AUTOEN 的含义",
+          "中断 handler 为什么不能睡眠（atomic context）",
+          "top half vs bottom half：中断里能做什么、不能做什么",
+          "中断亲和性 /proc/irq/<n>/smp_affinity"
+        ],
+        "keywords": ["MSI-X", "pci_alloc_irq_vectors", "request_irq", "irq_handler", "中断处理"],
+        "mlx5_reference": [
+          {"file": "pci_irq.c", "focus": "mlx5_irq_table_alloc / pci_alloc_irq_vectors 调用，关注如何决定向量数和把 EQ 绑到 IRQ"},
+          {"file": "eq.c", "focus": "request_irq 调用、irq_handler 实现（mlx5_irq_handler_int_in）"}
+        ],
+        "reflection_questions": [
+          "MSI-X 相比 INTx 在 PCIe 上有哪些优势？为什么智能网卡必须用 MSI-X？",
+          "request_irq 的 handler 在哪个上下文执行？硬中断、软中断还是进程？",
+          "为什么 handler 不能调用 mutex_lock？如果非要睡眠怎么办？（tasklet/workqueue）",
+          "mlx5 为什么要分配多个 EQ 而不是一个？跟 IRQ affinity 有什么关系？"
+        ]
+      },
+      "goal": "/proc/interrupts 看到 mlx5_prism 的 MSI-X 向量，handler 能被触发",
+      "context": "T04 只做最小中断框架——分配 1 个 MSI-X 向量给 EQ，handler 暂时只做 ack + 计数器自增（T06 会扩展为读 EQE 和唤醒）。注意 disable 中断直到 EQ 初始化完成，避免 spurious interrupt。",
+      "steps": [
+        "1. pci_alloc_irq_vectors(pdev, 1, N, PCI_IRQ_MSIX) 分配最少 1 个向量",
+        "2. 实现 mlx5_prism_irq_handler(int irq, void *dev_id)：读 EQE header, ack, 计数器++，return IRQ_HANDLED",
+        "3. pci_request_irq 或 request_irq 绑定到 dev（用 dev_id 做 cookie）",
+        "4. probe 末尾启用中断；remove 反向 free_irq + pci_free_irq_vectors",
+        "5. 加 /proc 计数器或 trace_printk 观察"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "insmod 后 /proc/interrupts 出现 'mlx5_prism' 行",
+        "functional": [
+          "多次 cat /proc/interrupts，计数稳定（没有 spurious interrupt 风暴）",
+          "rmmod 时 free_irq 不阻塞、不警告"
+        ],
+        "manual_checks": [
+          "dmesg 含 'MSI-X enabled, N vectors'",
+          "100 次 load/unload 无资源泄漏（grep 'irq' /proc/interrupts 不残留）"
+        ]
+      }
+    },
+
+    {
+      "id": "T05-cmdq-submit",
+      "title": "CMDQ 命令提交（mailbox 写 + doorbell）",
+      "phase": "S3",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T04-msix-irq"],
+      "estimated_loc": 220,
+      "learning": {
+        "objective": "理解 CMDQ 协议的核心：命令描述符格式、mailbox 写入、doorbell 通知、内存屏障",
+        "concepts": [
+          "mlx5 命令描述符 16 字节 layout（type/op_mod/in/out mailbox size 等）",
+          "wmb() vs smp_wmb() vs dma_wmb()——不同屏障的语义",
+          "为什么 wmb() 必须在 writeq(doorbell) 之前（确保 mailbox 内容先于 doorbell 可见）",
+          "writeq / iowrite64——64-bit MMIO 原子写",
+          "UAR (User Access Region) 和 doorbell 寄存器的作用",
+          "spin_lock / spin_lock_irqsave——CMDQ 临界区是否要关中断",
+          "command queue 的 ring 结构 + cmd_head 维护"
+        ],
+        "keywords": ["CMDQ", "doorbell", "MMIO", "内存屏障", "wmb", "spin_lock", "mailbox"],
+        "mlx5_reference": [
+          {"file": "cmd.c", "focus": "cmd_work_handler / mlx5_cmd_invoke_core：命令描述符填充、mailbox 拷贝、wmb() 的精确位置、cmd doorbell 写入"},
+          {"file": "uar.c", "focus": "整个文件（327 行）：UAR 偏移计算、doorbell 页映射"}
+        ],
+        "reflection_questions": [
+          "wmb() 阻止 CPU 什么样的重排？为什么这里不能用 smp_wmb()（提示：跨 PCIe DMA）？",
+          "spin_lock 和 spin_lock_irqsave 在 CMDQ 临界区用哪个？为什么？",
+          "doorbell 寄存器在 BAR0 的哪个偏移？为什么是 writeq 不是 writel？",
+          "为什么 cmd_head 只由驱动更新，cmd_tail 只由固件更新（单写者原则）？"
+        ]
+      },
+      "goal": "实现 mlx5_prism_cmdq_submit()：填充命令描述符、写 mailbox、wmb、敲 doorbell",
+      "context": "本 task 是 CMDQ 协议的核心难点之一。读 cmd.c 时重点抓 wmb() 的精确位置——这是 Mellanox 工程师经过硬件踩坑得出的。T05 不处理响应（T06 做），所以命令发出去后没人等，但 dmesg 应能看到 doorbell 已写。",
+      "steps": [
+        "1. 定义命令描述符 struct mlx5_prism_cmd_layout（16 字节，按 PRM）",
+        "2. 定义 mailbox struct mlx5_prism_cmd_mailbox（block 4096 字节 + next 指针）",
+        "3. 实现 cmdq_alloc_inbox / cmdq_alloc_outbox（基于 T03 的 mailbox pool）",
+        "4. 实现 mlx5_prism_cmdq_submit(opcode, op_mod, in_buf, in_len, out_buf, out_len)：填充 desc → memcpy 到 mailbox slot → spin_lock → wmb → writeq(doorbell) → spin_unlock",
+        "5. 加 trace_printk 或 pr_info 打印 doorbell 写入",
+        "6. 单元测试：构造一个 QUERY_FW 命令提交（响应在 T06 处理）"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过，checkpatch 无 ERROR",
+        "load": "insmod 后 dmesg 显示 'doorbell written for opcode=0x...'",
+        "functional": [
+          "提交一个命令后 /proc/interrupts 计数自增（说明固件真的被触发并回了中断）",
+          "无 lockdep 警告、无 spinlock 死锁"
+        ],
+        "manual_checks": ["doorbell 地址计算正确（对照 PRM 文档）"]
+      }
+    },
+
+    {
+      "id": "T06-cmdq-complete",
+      "title": "CMDQ 响应处理（EQE 解析 + completion）",
+      "phase": "S3",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T05-cmdq-submit"],
+      "estimated_loc": 250,
+      "learning": {
+        "objective": "理解异步通知机制、等待完成、EQE 解析、状态码处理",
+        "concepts": [
+          "EQE (Event Queue Entry) 64 字节 layout + owner bit（轮转所有权）",
+          "owner bit 怎么判断新 EQE 到达（owner == expected → 新事件）",
+          "struct completion + init_completion + wait_for_completion_timeout",
+          "wait_for_completion vs wait_event——前者专门为一次性触发设计",
+          "命令状态码（0=OK, 0x1x=内部错误, 0x2x=参数错误, ...）",
+          "中断 handler 的工作量边界：只做 ack + 唤醒，重活交给 wait 方",
+          "consumer_index 在 ring buffer 上的回绕"
+        ],
+        "keywords": ["EQE", "owner bit", "completion", "wait_for_completion", "中断下半部", "ring buffer"],
+        "mlx5_reference": [
+          {"file": "cmd.c", "focus": "后半段：mlx5_cmd_comp_handler / poll_command 的 EQE 读取、status 解析、complete() 唤醒"},
+          {"file": "eq.c", "focus": "mlx5_eq_async_int / mlx5_irq_handler_int_in：EQE 消费循环、owner bit 判断"}
+        ],
+        "reflection_questions": [
+          "EQE 的 owner bit 怎么解决 'ring 满了还是空了' 的歧义？",
+          "wait_for_completion_timeout 必须设吗？不设会怎样？",
+          "为什么中断 handler 里不能直接解析命令响应（必须只做最小工作）？",
+          "consumer_index 怎么处理回绕？为什么用位掩码而不是取模？"
+        ]
+      },
+      "goal": "实现 mlx5_prism_cmdq_invoke()：submit → wait → 读响应 → 解析 status，跑通完整往返",
+      "context": "本 task 完成后 CMDQ 完整可用，是 T07-T10 固件引导的基础。在 T05 的 submit 基础上加 completion 等待机制，handler 从最小版本扩展为读 EQE → 找到对应 token → complete()。建议在 probe 中发一个 QUERY_FW 验证整条链路。",
+      "steps": [
+        "1. 给每个 in-flight 命令加 struct mlx5_prism_cmd_work（含 completion, ret, out_buf）",
+        "2. 扩展 T04 的 irq_handler：读 EQE → 检查 owner bit → 解析 event type → 唤醒对应 work → 更新 consumer_index → 写 EQ doorbell ack",
+        "3. 实现 mlx5_prism_cmdq_invoke：submit → wait_for_completion_timeout(2s) → 检查 status → 拷贝 out_buf",
+        "4. probe 中调用 QUERY_FW (opcode 0x103) 端到端验证",
+        "5. 添加 trace_printk 在 issue 和 complete 两个点（T11 会换成正式 tracepoint）"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "insmod 后 dmesg 显示 'QUERY_FW complete: fw_rev=... irisc=...'",
+        "functional": [
+          "连续发 100 次 QUERY_FW，全部 status=0",
+          "中断计数与命令计数匹配",
+          "无 wait_for_completion 超时"
+        ],
+        "manual_checks": [
+          "断点测试：故意写错的 opcode，应该返回错误 status 而不是超时挂起"
+        ]
+      }
+    },
+
+    {
+      "id": "T07-fw-poll-enable",
+      "title": "固件引导 part 1：poll iseg + ENABLE_HCA",
+      "phase": "S4",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T06-cmdq-complete"],
+      "estimated_loc": 130,
+      "learning": {
+        "objective": "理解固件就绪检测和 HCA 启用协议",
+        "concepts": [
+          "init segment (iseg)：BAR0 起始的一段寄存器，固件用来报告状态",
+          "iseg.initializing 位：固件启动完成的指示",
+          "polling pattern：usleep_range + retry + timeout（内核推荐的轮询方式）",
+          "ENABLE_HCA (opcode 0x104)：告诉固件'驱动来了'",
+          "固件的多状态：NIC_IFC_DISABLED → PRE_INIT → INIT → OPERATIONAL"
+        ],
+        "keywords": ["init segment", "固件引导", "ENABLE_HCA", "polling", "usleep_range"],
+        "mlx5_reference": [
+          {"file": "fw.c", "focus": "mlx5_fw_init / wait_fw_init：poll iseg.initializing 的实现"},
+          {"file": "main.c", "focus": "mlx5_init_one 开头：第一次 CMDQ 之前的初始化序列"}
+        ],
+        "reflection_questions": [
+          "为什么 poll 而不是中断？固件启动期间中断可能还没就绪。",
+          "usleep_range 相比 msleep / udelay 的优势？",
+          "ENABLE_HCA 之前能发命令吗？为什么？"
+        ]
+      },
+      "goal": "dmesg 显示固件就绪 + ENABLE_HCA status=0",
+      "context": "固件引导 7 步的第 1-2 步。实现 mlx5_prism_fw_bootstrap() 的开头。poll 最多 100 次（每次 10ms = 1 秒超时）。",
+      "steps": [
+        "1. 定义 iseg 寄存器 layout（initializing 位、fw_rev、cmdq base）",
+        "2. 实现 wait_fw_init：poll iseg.initializing 直到清零",
+        "3. 实现 ENABLE_HCA：opcode 0x104, op_mod 0",
+        "4. 接入 probe，在 CMDQ 初始化后调用"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "insmod 后 dmesg 含 'FW initializing: ready (attempt N/100)' 和 'ENABLE_HCA complete, status=0'",
+        "functional": [
+          "dmesg 没有 timeout 警告",
+          "ENABLE_HCA status=0（不是其他值）"
+        ],
+        "manual_checks": ["attempts 次数应 < 20（固件通常 100-300ms 内就绪）"]
+      }
+    },
+
+    {
+      "id": "T08-fw-pages",
+      "title": "固件引导 part 2：QUERY_PAGES + MANAGE_PAGES (boot)",
+      "phase": "S4",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T07-fw-poll-enable"],
+      "estimated_loc": 140,
+      "learning": {
+        "objective": "理解固件 DMA 页面供给协议",
+        "concepts": [
+          "boot pages vs init pages 的区别（不同阶段需要的不同内存）",
+          "QUERY_PAGES (0x106, op_mod 0x1=boot / 0x2=init)：固件告知需要多少页",
+          "MANAGE_PAGES (0x107, op_mod 0x1=alloc)：驱动分配并交给固件",
+          "页面大小 4KB，必须 dma_alloc（固件要 DMA 访问）",
+          "页面物理地址列表在 mailbox 中的 layout"
+        ],
+        "keywords": ["QUERY_PAGES", "MANAGE_PAGES", "DMA 页面供给", "boot pages", "固件引导"],
+        "mlx5_reference": [
+          {"file": "fw.c", "focus": "mlx5_cmd_query_pages / mlx5_cmd_manage_pages：参数构造、page list 填充、op_mod 区分"}
+        ],
+        "reflection_questions": [
+          "为什么是固件主动请求页，而不是驱动一次性给一堆？",
+          "boot pages 和 init pages 给的内容有什么不同？固件在什么阶段要什么？",
+          "MANAGE_PAGES 失败回滚怎么做？给出去的页要不要回收？"
+        ]
+      },
+      "goal": "dmesg 显示 boot pages 分配并被固件接受",
+      "context": "固件引导 7 步的第 3-4 步。boot pages 通常很少（1-2 页）。",
+      "steps": [
+        "1. 实现 mlx5_prism_query_pages(op_mod=BOOT)：解析返回的 num_pages",
+        "2. 实现 mlx5_prism_manage_pages(op_mod=ALLOC, list)：分配 N 个 dma page + 填 mailbox + 提交",
+        "3. probe 中调用：query boot → alloc → manage",
+        "4. 错误处理：分配失败回滚已分配的页"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "dmesg 含 'QUERY_PAGES(boot): N pages' 和 'MANAGE_PAGES(boot): accepted'",
+        "functional": ["status=0", "分配的页数与固件请求一致"],
+        "manual_checks": ["无内存泄漏（rmmod 后 kmemleak 干净）"]
+      }
+    },
+
+    {
+      "id": "T09-fw-caps",
+      "title": "固件引导 part 3：QUERY_HCA_CAP + 与 mlx5_core 对比",
+      "phase": "S4",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T08-fw-pages"],
+      "estimated_loc": 200,
+      "learning": {
+        "objective": "理解 HCA 能力集结构、固件能力上报、数据交叉验证",
+        "concepts": [
+          "QUERY_HCA_CAP (opcode 0x100) op_mod 区分 current/max capability",
+          "能力位字段在 mailbox 中的位级 layout（mlx5_ifc.h 中定义）",
+          "关键字段：log_max_qp, log_max_cq, num_ports, port_type, link_speed",
+          "大块 mailbox 数据读取（>inline 时要用 mailbox 链表）",
+          "对比验证方法论：从两个独立代码路径拿同一份硬件状态"
+        ],
+        "keywords": ["QUERY_HCA_CAP", "能力集", "bit-exact 对比", "mailbox"],
+        "mlx5_reference": [
+          {"file": "fw.c", "focus": "mlx5_cmd_query_hca_cap / handle_hca_cap：op_mod 用法、字段提取"},
+          {"file": "mlx5_ifc.h（不在 core/，在 include/linux/mlx5/）", "focus": "能力位字段的位级定义，找 max_qp/num_ports 的位偏移"}
+        ],
+        "reflection_questions": [
+          "max_qp 字段是 log_max_qp（log2 形式），为什么这么设计？",
+          "如何在没有 mlx5_core 的情况下拿到对照数据？（提示：先用 mlx5_core 加载跑 ethtool，再切到 mlx5_prism）",
+          "如果某个字段不一致，是哪一方的问题？怎么定位？"
+        ]
+      },
+      "goal": "dmesg 打印 max_qp/num_ports/port_speed 等，与 mlx5_core 加载时 dmesg 一致",
+      "context": "本 task 是验证 #1 第一层（CMDQ 读能力）的关键。CLAUDE.md 第 11 项要求做 mlx5 vs prism 对比，先在这里建好对比脚本框架，T16 完善。",
+      "steps": [
+        "1. 实现 mlx5_prism_query_hca_cap(op_mod=CURRENT)：分配大 mailbox + 解析",
+        "2. 提取关键字段：log_max_qp → max_qp, num_ports, port_type, speed",
+        "3. dmesg 打印能力集摘要",
+        "4. 编写 scripts/collect_mlx5_caps.sh：用 mlx5_core 加载后从 sysfs/dmesg 采集对照数据存 /tmp/mlx5_caps.txt",
+        "5. 编写对比脚本对比 mlx5_prism 的 dmesg 和 /tmp/mlx5_caps.txt"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "dmesg 含 'QUERY_HCA_CAP: max_qp=..., num_ports=..., port1_speed=...'",
+        "functional": [
+          "max_qp, num_ports, port_speed 与 mlx5_core 加载时 dmesg bit-exact 一致"
+        ],
+        "manual_checks": [
+          "对比脚本输出 'CAPS MATCH: all fields identical' 或标出不一致字段"
+        ]
+      }
+    },
+
+    {
+      "id": "T10-fw-init-hca",
+      "title": "固件引导 part 4：INIT_HCA → OPERATIONAL（达成 M1）",
+      "phase": "S4",
+      "milestone": "M1",
+      "status": "pending",
+      "prerequisites": ["T09-fw-caps"],
+      "estimated_loc": 180,
+      "learning": {
+        "objective": "理解 HCA 最终初始化和 OPERATIONAL 状态达成",
+        "concepts": [
+          "第二轮 QUERY_PAGES(init) + MANAGE_PAGES(init)：固件给出初始化阶段需要的页",
+          "INIT_HCA (opcode 0x102)：携带初始化参数（HCA cap 写回 + 配置）",
+          "NIC_IFC 状态查询：怎么验证进入 OPERATIONAL",
+          "整体引导性能：dmesg 时间戳测量 bootstrap 耗时"
+        ],
+        "keywords": ["INIT_HCA", "OPERATIONAL", "固件引导", "M1 里程碑"],
+        "mlx5_reference": [
+          {"file": "fw.c", "focus": "mlx5_cmd_init_hca / handle_pcie_entry：完整引导末段"},
+          {"file": "main.c", "focus": "mlx5_init_one 末尾：引导完成后的状态检查、dmesg 输出"}
+        ],
+        "reflection_questions": [
+          "init pages 比 boot pages 多多少？固件拿这些页做什么？",
+          "INIT_HCA 之前 HCA 处于什么状态？为什么不能直接创建 QP？",
+          "引导耗时主要由哪几部分组成？怎么优化？"
+        ]
+      },
+      "goal": "dmesg 显示 'HCA operational'，7 步引导全部完成，达成 M1",
+      "context": "本 task 完成 M1 里程碑。完成后 HCA 完全可用，可以创建 QP/CQ，T08 的 PHY、T09 smoke test 才有前提。",
+      "steps": [
+        "1. 实现 mlx5_prism_query_pages(INIT) + mlx5_prism_manage_pages(INIT)",
+        "2. 实现 mlx5_prism_init_hca()（带 cap 回写）",
+        "3. 引导时间测量：ktime_get_boottime_ns() 记录开始/结束",
+        "4. 引导完成后打印完整摘要",
+        "5. 错误回滚：任何一步失败都做反向清理"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "dmesg 含完整 7 步引导序列 + 'HCA operational. Bootstrap time: Xms'",
+        "functional": [
+          "INIT_HCA status=0",
+          "bootstrap time <= 300ms（mlx5_core 基准 ~200ms）",
+          "全部能力集字段与 mlx5_core 一致"
+        ],
+        "manual_checks": [
+          "对比 mlx5_core 加载 dmesg，确认序列一致",
+          "100 次 load/unload 引导成功率 100%"
+        ]
+      }
+    },
+
+    {
+      "id": "T11-tracepoints",
+      "title": "ftrace tracepoint 插桩（cmdq_issue / cmdq_complete）",
+      "phase": "S6",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T06-cmdq-complete"],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "理解内核 tracepoint 机制和 perf_event 集成",
+        "concepts": [
+          "DECLARE_TRACE / DEFINE_TRACE / CREATE_TRACE_POINTS 宏",
+          "TRACE_EVENT 宏的多段：TP_PROTO/TP_ARGS/TP_STRUCT__entry/TP_fast_assign/TP_printk",
+          "tracepoint vs kprobe：编译期 vs 运行期插桩，性能开销差异",
+          "perf record -e mlx5_prism:*：tracepoint 如何暴露给 perf",
+          "static_key / jump_label：tracepoint 关闭时零开销的原理"
+        ],
+        "keywords": ["tracepoint", "ftrace", "perf", "DECLARE_TRACE", "static_key"],
+        "mlx5_reference": [
+          {"file": "diagnostics/traces（如有）或 lib/trace.*", "focus": "Mellanox 自己的 tracepoint 写法"},
+          {"file": "内核 samples/trace_events/", "focus": "内核官方 tracepoint 示例，最权威的参考"}
+        ],
+        "reflection_questions": [
+          "tracepoint 在关闭状态下为什么零开销？（static_key/jump_label 原理）",
+          "tracepoint 和 kprobe 都能采集 CMDQ 延迟，区别在哪？为什么生产环境用 tracepoint？",
+          "TP_printk 是给谁看的？为什么要在 tracepoint 定义里写格式字符串？"
+        ]
+      },
+      "goal": "perf record 能采集 mlx5_prism:cmdq_issue 和 cmdq_complete 事件",
+      "context": "把 T06 临时用的 trace_printk/pr_info 换成正式 tracepoint。提前到 T11 做（不一定要等到 S6）是因为 tracepoint 一旦定义好，后续 task 调试时就能用 perf 观察时序，比 printk 准确得多。",
+      "steps": [
+        "1. 创建 mlx5_prism_trace.h：按 DESIGN.md 第 3 节定义 TRACE_EVENT(cmdq_issue) 和 TRACE_EVENT(cmdq_complete)",
+        "2. 创建 mlx5_prism_trace.c：#define CREATE_TRACE_POINTS + include 自己的 .h",
+        "3. 在 T05 的 submit 和 T06 的 complete 处插桩：trace_mlx5_prism_cmdq_issue(...) / trace_mlx5_prism_cmdq_complete(...)",
+        "4. Makefile 加 mlx5_prism-objs += mlx5_prism_trace.o",
+        "5. 验证 perf 能采集"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过，tracepoint 定义无 ERROR",
+        "load": "sudo perf list | grep mlx5_prism 显示两个事件",
+        "functional": [
+          "sudo perf record -a -e mlx5_prism:cmdq_issue -e mlx5_prism:cmdq_complete sleep 5 && sudo perf script 显示成对事件"
+        ],
+        "manual_checks": ["issue 和 complete 成对出现，零丢失"]
+      }
+    },
+
+    {
+      "id": "T12-phy-access-reg",
+      "title": "PHY 监控 part 1：ACCESS_REG PPCNT 读取",
+      "phase": "S5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T10-fw-init-hca"],
+      "estimated_loc": 200,
+      "learning": {
+        "objective": "理解 ACCESS_REG 协议和 PHY 寄存器间接访问",
+        "concepts": [
+          "ACCESS_REG (opcode 0x805)：通用寄存器间接访问命令",
+          "PPCNT (register ID 0x5008)：Port Physical Counter register",
+          "为什么 PHY 计数器不能 MMIO（在 NIC 内部寄存器空间，不暴露给 BAR）",
+          "ACCESS_REG 的 in/out mailbox layout（reg_id + reg_data）",
+          "pre-FEC BER / FEC corrected/uncorrected 字段的语义"
+        ],
+        "keywords": ["ACCESS_REG", "PPCNT", "PHY 计数器", "pre-FEC BER", "FEC"],
+        "mlx5_reference": [
+          {"file": "cmd.c", "focus": "mlx5_access_reg 调用方式（如 port_ptys / port_ppcnt）"},
+          {"file": "port.c（如有）或 en/port.c", "focus": "Mellanox 怎么读 PHY 计数器并暴露给 ethtool"}
+        ],
+        "reflection_questions": [
+          "为什么 PHY 计数器不能 MMIO？硬件设计上的考量？",
+          "pre-FEC BER vs post-FEC BER 的意义？哪个更能反映链路质量？",
+          "ACCESS_REG 怎么区分读 vs 写（op_mod）？"
+        ]
+      },
+      "goal": "通过 ACCESS_REG 读到 PPCNT 数据，dmesg 打印 pre_fec_ber 等数值",
+      "context": "本 task 是验证 #1 第二层（CMDQ 读寄存器）。注意 PPCNT 是 0x5008，不是任意寄存器号。读出的数值要和 ethtool -S 交叉验证。",
+      "steps": [
+        "1. 实现 mlx5_prism_access_reg(reg_id, in_buf, in_len, out_buf, out_len, write)",
+        "2. 构造 PPCNT 请求（指定 port、counter group）",
+        "3. 解析响应：pre_fec_ber, symbol_error, fec_corrected, fec_uncorrectable",
+        "4. probe 末尾调用一次验证",
+        "5. 与 ethtool -S（mlx5_core 加载时）对比"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "dmesg 含 'PHY PPCNT: pre_fec_ber=X, fec_corrected=Y'",
+        "functional": [
+          "数值在合理范围（pre_fec_ber 量级 1e-15 到 1e-5）",
+          "与 mlx5_core ethtool -S 同数量级"
+        ],
+        "manual_checks": ["数值非全 0 / 全 F（确认真的读到了数据）"]
+      }
+    },
+
+    {
+      "id": "T13-phy-sysfs",
+      "title": "PHY 监控 part 2：sysfs 接口 + 定时器 + 阈值告警",
+      "phase": "S5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T12-phy-access-reg"],
+      "estimated_loc": 250,
+      "learning": {
+        "objective": "掌握 sysfs attribute、内核定时器、状态机告警",
+        "concepts": [
+          "struct misc_device / misc_register——不挂 netdev 时的设备注册",
+          "struct attribute + sysfs_ops + DEVICE_ATTR_RO/RW 宏",
+          "show 函数为什么不能用 mutex（被 sysfs 调用时持有 kernfs mutex）",
+          "timer_list + mod_timer + del_timer_sync——内核定时器 API",
+          "状态机实现：ok → degraded → critical，含滞回（hysteresis）防抖"
+        ],
+        "keywords": ["sysfs", "misc_device", "DEVICE_ATTR", "timer_list", "状态机", "阈值告警"],
+        "mlx5_reference": [
+          {"file": "内核 Documentation/filesystems/sysfs.rst", "focus": "sysfs 编写规范"},
+          {"file": "core/health.c 或类似", "focus": "Mellanox 的健康监控定时器模式（如有）"}
+        ],
+        "reflection_questions": [
+          "为什么 sysfs 挂在 /sys/class/misc/ 而不是 /sys/class/net/？",
+          "show 函数里能 sleep 吗？（提示：cat 时持有 kernfs_lock）",
+          "timer callback 在哪个上下文？能调用 sleeping API 吗？",
+          "状态滞回（hysteresis）是什么？为什么阈值告警需要它？"
+        ]
+      },
+      "goal": "/sys/class/misc/mlx5_prism0/* 可读，定时器持续采样，阈值超限触发告警",
+      "context": "DESIGN.md 第 6 节有完整 sysfs 接口定义。监控周期 100ms（用 timer_list，不用 delayed_work，因为是简单轮询）。",
+      "steps": [
+        "1. 定义 struct mlx5_prism_phy（timer, counters, status, prev_ber）",
+        "2. 实现 misc_device 注册：mlx5_prism0",
+        "3. 创建 sysfs attributes：pre_fec_ber, symbol_error_rate, fec_corrected, fec_uncorrectable, link_quality, status, monitor_interval_ms",
+        "4. 实现 timer_list callback：每 100ms 调用 T12 的 ACCESS_REG + 更新字段",
+        "5. 实现阈值状态机：ber < 1e-10 ok, 1e-10~1e-7 degraded, > 1e-7 critical",
+        "6. 状态变化时 dmesg WARNING/ERR",
+        "7. probe 启动 timer, remove del_timer_sync"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "ls /sys/class/misc/mlx5_prism0/ 显示所有 attribute 文件",
+        "functional": [
+          "cat /sys/class/misc/mlx5_prism0/pre_fec_ber 输出数值",
+          "cat status 输出 ok/degraded/critical 之一",
+          "cat monitor_interval_ms 显示 100，写入 200 后下次采样周期变化"
+        ],
+        "manual_checks": [
+          "100ms 间隔采样正常工作（数值在变化或稳定）",
+          "rmmod 时 del_timer_sync 不挂起"
+        ]
+      }
+    },
+
+    {
+      "id": "T14-smoke-test",
+      "title": "硬件冒烟测试（CREATE_QP → RTS → WQE → CQE）",
+      "phase": "S5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T10-fw-init-hca"],
+      "estimated_loc": 300,
+      "learning": {
+        "objective": "理解数据面硬件协议：QP/CQ 对象生命周期、WQE 格式、doorbell、CQE",
+        "concepts": [
+          "CREATE_CQ (0x400) + CREATE_QP (0x500)：CMDQ 创建硬件对象",
+          "QP 状态机：RESET → INIT → RTR → RTS（先 Receive Ready 再 Ready To Send）",
+          "MODIFY_QP 命令切换状态",
+          "WQE (Work Queue Element)：包含 ctrl segment + eth segment + data segment",
+          "Send WQE 的 doorbell：BF (BlueFlame) 寄存器写",
+          "CQE (Completion Queue Entry) owner bit 轮询",
+          "硬件 DMA 路径：WQE 在主机内存，硬件 DMA 读 → 执行 → 写 CQE"
+        ],
+        "keywords": ["CREATE_QP", "MODIFY_QP", "WQE", "CQE", "doorbell", "QP 状态机", "数据面"],
+        "mlx5_reference": [
+          {"file": "cmd.c", "focus": "CREATE_QP 调用方式（mlx5_core 借给 RDMA 子系统的接口）"},
+          {"file": "qp.c（在 drivers/infiniband/hw/mlx5/，不在 core/）", "focus": "如果需要参考 QP 状态机和 WQE 构造"}
+        ],
+        "reflection_questions": [
+          "为什么 QP 必须先 RTR 再 RTS？不能直接 RTS 吗？",
+          "CQE owner bit 解决什么问题？没有它会怎样？",
+          "为什么 WQE 要在 coherent DMA 内存，不能 kmalloc？",
+          "smoke test 通过说明了什么？没通过说明什么？"
+        ]
+      },
+      "goal": "probe 末尾自动跑一次冒烟测试，dmesg 显示 PASSED",
+      "context": "DESIGN.md 第 5 节有完整代码框架（mlx5_prism_smoke.c ~150 行）。这是验证 #1 第三层（数据路径电路测试），证明硬件真的能 DMA、能 doorbell、能写回 CQE。注意 loopback mode——自己发自己收，不需要对端。",
+      "steps": [
+        "1. 实现 mlx5_prism_create_cq / mlx5_prism_destroy_cq",
+        "2. 实现 mlx5_prism_create_qp / mlx5_prism_modify_qp / mlx5_prism_destroy_qp",
+        "3. MODIFY_QP 到 RTS（loopback：port=1, source_qpn=自己）",
+        "4. 分配 DMA 内存写最小以太网帧（64 字节）",
+        "5. 构造 Send WQE：ctrl + eth + data segment，DMA 地址指向帧",
+        "6. wmb() + writeq(BF doorbell)",
+        "7. 轮询 CQE（最多 100 次，每次 udelay(10)），检查 owner + opcode + status",
+        "8. probe 末尾调用，PASSED/FAILED 打印"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "dmesg 含 'Hardware datapath smoke test: PASSED'",
+        "functional": [
+          "CQE.opcode = MLX5_CQE_RESP_SEND",
+          "CQE.status = 0",
+          "smoke test 完成后 DESTROY_QP/CQ 都 status=0"
+        ],
+        "manual_checks": [
+          "100 次 load/unload smoke test 全部 PASSED",
+          "DESTROY 路径无资源泄漏"
+        ]
+      }
+    },
+
+    {
+      "id": "T15-netdev-skeleton",
+      "title": "最小 netdev 骨架（register_netdev + ndo_start_xmit + NAPI）",
+      "phase": "S5.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T14-smoke-test"],
+      "estimated_loc": 350,
+      "learning": {
+        "objective": "掌握 Linux 网络子系统的 net_device 框架、NAPI、SKB",
+        "concepts": [
+          "alloc_etherdev_mq(sizeof_priv, txqs) 分配 net_device + 私有数据",
+          "register_netdev / unregister_netdev——加入网络栈",
+          "struct net_device_ops：ndo_open/ndo_stop/ndo_start_xmit",
+          "ndo_start_xmit 返回值 NETDEV_TX_OK / NETDEV_TX_BUSY",
+          "NAPI (New API)：中断 + 轮询混合模式，减少高 pps 下的中断开销",
+          "napi_schedule / napi_complete / napi_gro_receive",
+          "struct sk_buff (SKB)：网络栈的统一数据载体",
+          "skb → DMA map → WQE data segment 的转换"
+        ],
+        "keywords": ["register_netdev", "ndo_start_xmit", "NAPI", "napi_gro_receive", "net_device_ops", "SKB"],
+        "mlx5_reference": [
+          {"file": "en/main.c（在 core/en/）", "focus": "mlx5e_open / mlx5e_close / mlx5e_init_netdev：netdev 注册、net_device_ops 表"},
+          {"file": "en/tx.cxx 或 en/tx.c", "focus": "mlx5e_sq_xmit：ndo_start_xmit 的实现，关注 skb → WQE 的转换"},
+          {"file": "en/rx.c", "focus": "mlx5e_rx_napi_poll：NAPI poll，CQE → skb → napi_gro_receive"}
+        ],
+        "reflection_questions": [
+          "NAPI 为什么能减少中断？高 pps 下传统中断模型有什么问题？",
+          "ndo_start_xmit 返回 NETDEV_TX_BUSY 表示什么？什么时候会触发？",
+          "skb 在 ndo_start_xmit 里什么时候 kfree？为什么不能立即 kfree？",
+          "为什么 mlx5_prism 只做单包不做 multiqueue？工程上的取舍？"
+        ]
+      },
+      "goal": "ip link 看到 prism0 接口，单包收发链路通",
+      "context": "DESIGN.md 明确要求做最小 netdev（不做 GRO/GSO/TSO/multiqueue/RSS）。目的：覆盖 JD 关键词 'register_netdev/NAPI/ndo_start_xmit'，证明 API 链路理解。复用 T14 的 SQ/RQ/CQ 创建逻辑。",
+      "steps": [
+        "1. 实现 mlx5_prism_netdev_register：alloc_etherdev_mq + 填 net_device_ops + register_netdev",
+        "2. 实现 ndo_open：CMDQ 创建 RQ/SQ/CQ + napi_enable + 打开接口",
+        "3. 实现 ndo_stop：napi_disable + CMDQ 销毁 RQ/SQ/CQ",
+        "4. 实现 ndo_start_xmit：skb → dma_map_single → 构造 WQE → wmb → doorbell → 等 CQE → dma_unmap → dev_kfree_skb → 返回 TX_OK",
+        "5. 实现 napi_poll：从 RQ 拿 CQE → 构造 skb → napi_gro_receive → 更新 consumer_idx → napi_complete",
+        "6. probe 中调用 netdev_register",
+        "7. 添加 trace_mlx5_prism_sq_xmit / rq_poll（用 T11 的 tracepoint 框架）"
+      ],
+      "exit_criteria": {
+        "compile": "make modules 通过",
+        "load": "ip link show 显示 prism0 接口（state=DOWN）",
+        "functional": [
+          "ip link set prism0 up 成功（ndo_open 跑通）",
+          "ip link set prism0 down 成功（ndo_stop 跑通）",
+          "用 ping 或 scapy 发一个包，perf/ftrace 看到 sq_xmit 链路"
+        ],
+        "manual_checks": [
+          "ndo_start_xmit 路径中 dma_map 和 dma_unmap 配对",
+          "无 skb 泄漏（kmemleak 干净）"
+        ]
+      }
+    },
+
+    {
+      "id": "T16-verify-report",
+      "title": "verify.sh + 双层对比报告（达成 M2）",
+      "phase": "S6",
+      "milestone": "M2",
+      "status": "pending",
+      "prerequisites": ["T11-tracepoints", "T13-phy-sysfs", "T14-smoke-test", "T15-netdev-skeleton"],
+      "estimated_loc": 400,
+      "learning": {
+        "objective": "掌握自动化验证方法论、对比测试、性能基准采集",
+        "concepts": [
+          "shell 测试框架：check() 函数封装 PASS/FAIL",
+          "bpftrace 采集 kprobe 数据做基准",
+          "一致性对比 vs 性能对比的判据差异",
+          "p99 延迟 vs avg 的解读",
+          "性能差异的合理解释（不能只说'差不多'）"
+        ],
+        "keywords": ["自动化测试", "verify.sh", "bpftrace", "对比报告", "p99 延迟"],
+        "mlx5_reference": [
+          {"file": "DESIGN.md 第 7、9 节", "focus": "验证脚本框架和 18 项验收清单"}
+        ],
+        "reflection_questions": [
+          "为什么对比验证比单方面自测更有说服力？",
+          "p99 比 avg 更能说明什么？什么场景下要看 p99？",
+          "mlx5_prism 的 CMDQ 延迟会比 mlx5_core 高还是低？为什么？"
+        ]
+      },
+      "goal": "./verify.sh 18/18 PASSED，产出对比报告 markdown",
+      "context": "DESIGN.md 第 9 节有 18 项验收清单和 verify.sh 框架。本 task 完成所有验收项的脚本化 + 生成对比报告。完成即 M2。",
+      "steps": [
+        "1. 编写 verify.sh：覆盖 DESIGN.md 18 项验收（1 模块加载/2 驱动绑定/3 引导/4 caps/5 CMDQ 成功率/6-7 延迟/8 引导时间/9 smoke/9a netdev/9b 单包发/9c NAPI 收/10 PHY sysfs/11 PHY 一致/12 PHY 告警/13 tracepoint 完整/14 无泄漏/15 mlx5_core 切换）",
+        "2. 编写 collect_mlx5_baseline.sh：bpftrace 采集 mlx5_core 的 CMDQ 延迟基准（DESIGN.md 第 7 节有脚本）",
+        "3. 编写 compare_report.sh：自动生成 markdown 对比报告",
+        "4. 跑全套，产出 report.md"
+      ],
+      "exit_criteria": {
+        "compile": "bash 语法检查通过 (bash -n verify.sh)",
+        "load": "sudo ./verify.sh 显示 'ALL 18/18 PASSED'",
+        "functional": [
+          "对比报告含一致性校验表 + 性能对比表",
+          "每项判据符合 DESIGN.md"
+        ],
+        "manual_checks": [
+          "report.md 的 p99 差异分析有合理解释",
+          "verify.sh 100 次运行稳定（flaky < 5%）"
+        ]
+      }
+    },
+
+    {
+      "id": "T17-architecture-summary",
+      "title": "mlx5 架构总结文档（知识沉淀）",
+      "phase": "S6",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": ["T16-verify-report"],
+      "estimated_loc": 0,
+      "learning": {
+        "objective": "系统性总结 mlx5 架构，沉淀面试弹药",
+        "concepts": [
+          "CMDQ 协议全景",
+          "固件引导状态机",
+          "QP-CQ 数据结构",
+          "DMA 一致性原理",
+          "doorbell-UAR 隔离机制"
+        ],
+        "keywords": ["架构总结", "面试弹药", "知识沉淀"],
+        "mlx5_reference": [
+          {"file": "全部已读过的源文件", "focus": "总结升华"}
+        ],
+        "reflection_questions": [
+          "如果面试官问 '描述 mlx5 的控制面协议'，你能在 5 分钟内讲清楚吗？",
+          "UAR 机制为什么让 Mellanox 不需要 VFIO？相比 Intel E810 的优势？",
+          "DMA coherent 和 streaming 的选择在 mlx5 中体现哪几次？"
+        ]
+      },
+      "goal": "产出 SUMMARY.md，覆盖 5 大主题",
+      "context": "CLAUDE.md 工作方式第 6 条要求：全部完成后写架构总结。这是把 17 个 task 的学习成果系统化、可复述的关键步骤。",
+      "steps": [
+        "1. CMDQ 协议（mailbox + doorbell + EQ）",
+        "2. 固件引导 7 步状态机",
+        "3. QP-CQ-WQE-CQE 数据结构关系",
+        "4. DMA 一致性在 mlx5 中的体现（coherent 用在哪、streaming 用在哪）",
+        "5. doorbell-UAR 隔离机制（与 VFIO 对比）",
+        "6. 每节配 ASCII 图 + 关键代码引用（file:line）"
+      ],
+      "exit_criteria": {
+        "compile": "N/A",
+        "load": "N/A",
+        "functional": ["SUMMARY.md 覆盖 5 大主题，每个主题有图 + 代码引用 + 面试话术"],
+        "manual_checks": ["可以让另一个人（或 AI）读完后能复述 mlx5 控制面架构"]
+      }
+    }
+  ]
+}
