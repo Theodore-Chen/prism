@@ -15,7 +15,7 @@
 | Task ID | 标题 | 阶段 | 里程碑 | 状态 | Commit | 完成日期 |
 |---------|------|------|--------|------|--------|---------|
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
-| T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | (本 commit) | 2026-07-07 |
+| T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | pending | — | — |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
@@ -84,7 +84,7 @@
 - **状态**: completed (M0 达成)
 - **开始时间**: 2026-07-07
 - **完成时间**: 2026-07-07
-- **Commit**: (本 commit)
+- **Commit**: e64c325
 - **读过源码**:
   - `mlx5_core/main.c:2250-2279` — `mlx5_core_pci_table[]` PCI device id 表写法（`PCI_VDEVICE(MELLANOX, 0x1015)`）
   - `mlx5_core/main.c:1972-2030` — `probe_one` 资源分配顺序 + 错误回滚 goto 链
