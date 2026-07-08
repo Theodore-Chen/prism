@@ -2,26 +2,41 @@
 /*
  * mlx5_prism: ConnectX-4 Lx control-plane kernel driver.
  *
- * T01: skeleton module. Loads/unloads cleanly and emits a dmesg marker.
- * Subsequent tasks attach PCI probe, CMDQ engine, firmware bootstrap,
- * PHY diagnostics and a minimal netdev skeleton here.
+ * Module entry: registers the PCI driver. The actual probe/remove logic
+ * lives in mlx5_prism_pci.c; firmware bootstrap, CMDQ engine, PHY
+ * diagnostics and the netdev skeleton attach later.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/pci.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.1"
+#include "mlx5_prism.h"
+
+static struct pci_driver mlx5_prism_driver = {
+	.name		= KBUILD_MODNAME,
+	.id_table	= mlx5_prism_pci_ids,
+	.probe		= mlx5_prism_pci_probe,
+	.remove		= mlx5_prism_pci_remove,
+};
 
 static int __init mlx5_prism_init(void)
 {
+	int err;
+
+	err = pci_register_driver(&mlx5_prism_driver);
+	if (err)
+		return err;
+
 	pr_info("loaded (v%s)\n", MLX5_PRISM_DRV_VERSION);
 	return 0;
 }
 
 static void __exit mlx5_prism_exit(void)
 {
+	pci_unregister_driver(&mlx5_prism_driver);
 	pr_info("unloaded\n");
 }
 

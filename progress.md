@@ -15,7 +15,7 @@
 | Task ID | 标题 | 阶段 | 里程碑 | 状态 | Commit | 完成日期 |
 |---------|------|------|--------|------|--------|---------|
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
-| T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | M0 | pending | — | — |
+| T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | (本 commit) | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | pending | — | — |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
@@ -40,6 +40,7 @@
 
 - _（待 T01 完成后填写）_
 - **T01**：内核模块的本质就是把一个函数指针塞进 `.initcall` 链接段——`module_init` 是宏不是函数，insmod 通过 `init_module()` syscall 在模块的 `.initcall` 段找到指针并执行。`MODULE_LICENSE("GPL")` 不是法律声明而是**技术开关**：决定能否使用 `EXPORT_SYMBOL_GPL` 导出的符号（`pcim_*`、`dma_alloc_coherent`、`pci_alloc_irq_vectors` 等后续 task 必用的核心 API 都是 GPL-only）。
+- **T02**：`pcim_` 前缀（pcim_enable_device/pcim_iomap_regions）= `pci_` 函数 + devres 自动释放。devres 把释放回调挂到 `pdev->dev.devres_head` 链表，probe 失败或 remove 时 PCI core **逆序**自动调用——这就是为什么我的 probe 里 `return err` 后无需任何 `goto err_xxx` 清理链，比 mlx5_core 的手动 `request_bar/iounmap/release_bar` 简洁得多。BAR0 起始的 init segment（4KB）是固件→驱动握手区，存 fw_rev / cmdq 物理地址 / initializing 位等。**M0 达成**：lspci 显示双口均绑定 mlx5_prism，fw_rev 14.32.1908 与 mlx5_core 读到的一致。
 
 ---
 
@@ -78,18 +79,44 @@
 
 ---
 
-### T02-pci-probe
+### T02-pci-probe 【M0 里程碑】
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed (M0 达成)
+- **开始时间**: 2026-07-07
+- **完成时间**: 2026-07-07
+- **Commit**: (本 commit)
+- **读过源码**:
+  - `mlx5_core/main.c:2250-2279` — `mlx5_core_pci_table[]` PCI device id 表写法（`PCI_VDEVICE(MELLANOX, 0x1015)`）
+  - `mlx5_core/main.c:1972-2030` — `probe_one` 资源分配顺序 + 错误回滚 goto 链
+  - `mlx5_core/main.c:918-985` — `mlx5_pci_init` / `mlx5_pci_close`：enable → request_bar → set_master → set_dma_caps → `ioremap(iseg_base, sizeof(*iseg))`
+  - `include/linux/mlx5/device.h:570-594` — `struct mlx5_init_seg` C 结构体（fw_rev/cmdif_rev_fw_sub/cmdq_addr/cmd_dbell/initializing 偏移）
+  - `include/linux/mlx5/driver.h:897-909` — `fw_rev_maj/min/sub` inline：`ioread32be(&iseg->fw_rev) & 0xffff` 等
+- **关键决策**:
+  - **建立多文件结构**：`mlx5_prism.h`（公共定义）+ `mlx5_prism_main.c`（module 入口 + pci_driver 注册）+ `mlx5_prism_pci.c`（probe/remove）。为后续 ~2000 行的 cmdq/fw/phy/smoke/netdev 模块铺路，避免单文件膨胀。对齐 mlx5_core 自己的多文件拆分（main.c / cmd.c / eq.c / fw.c）。
+  - **全程用 devres**（`pcim_enable_device` + `pcim_iomap_regions` + `devm_kzalloc`），probe 失败只需 `return err` 无需 goto 清理链。这是 task.json steps 明确要求的，比 mlx5_core 的手动管理（request_bar/iounmap/release_bar）更现代。
+  - **init segment 自定义精简版**：`struct mlx5_prism_iseg` 只定义 T02 用到的字段（fw_rev / cmdif_rev_fw_sub / initializing），不抄 mlx5_ifc.h 的全 bit-field 版本（那是给 RDMA/offload 用的）。后续 task 需要更多字段再追加。
+  - **fw_rev 读法**：`ioread32be(&iseg->fw_rev)` 返回 BE 32-bit 值，高 16 = minor，低 16 = major（与 mlx5_core driver.h 一致）。这是因为寄存器是 big-endian，`ioread32be` 做了 BE→CPU native 转换。
+- **遇到的问题与解决**（多文件模块开发 3 个典型踩坑，记录供后续 task 参考）:
+  1. **跨文件符号引用未声明**：`main.c` 引用 `mlx5_prism_pci_ids` 但定义在 `pci.c` → 编译报 `undeclared`。解决：`.h` 加 `extern const struct pci_device_id mlx5_prism_pci_ids[];`
+  2. **static 与 extern 冲突**：`pci.c` 里把 probe/remove/ids 声明 `static`，与 `.h` 的 `extern` 冲突 → `static declaration follows non-static declaration`。解决：跨文件调用的 3 个符号去掉 `static`，pci.c 内部辅助函数保持 `static`。
+  3. **MODULE_DEVICE_TABLE 宏未定义**：`pci.c` 忘了 `#include <linux/module.h>` → `type defaults to 'int'`。checkpatch 检测不到 include 缺失，只有编译暴露。解决：pci.c 加 `<linux/module.h>`。
+- **与设计的偏差**: 无（代码结构与 DESIGN.md §2 核心数据结构 `struct mlx5_prism_dev` 一致，只是当前只有 pdev/bar0/iseg 三个字段，后续 task 追加 cmdq/eq/phy/caps）
+- **exit_criteria 验证结果**:
+  - compile: `make modules` 通过，0 ERROR/WARNING；checkpatch 3 文件全 0/0/0
+  - load: `insmod` 成功，`lspci -k -d 15b3:1015` 显示双口均 `Kernel driver in use: mlx5_prism`（08:00.0 + 08:00.1 双 function，probe 调用 2 次）
+  - functional: dmesg 输出 `mlx5_prism 0000:08:00.0: BAR0 mapped at [mem 0x6016000000-0x6017ffffff 64bit pref], fw_rev 14.32.1908, cmdif_rev 5`（双口各一行）
+  - manual: 100 次 insmod/rmmod 循环通过，dmesg `DMESG CLEAN`（无 WARNING/BUG/Oops/panic/kmemleak）
+  - **M0 里程碑达成**：lspci 绑定 + BAR0 可读 + fw_rev 合理
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: pcim_ 前缀函数和裸 pci_ 函数有什么本质区别？devres 是怎么实现自动释放的？**
+    A: `pcim_` = `pci_` + devres（device resource management）。`pcim_enable_device` 内部调 `pci_enable_device` 后把一个释放回调（含 disable 函数指针）挂到 `pdev->dev.devres_head` 链表。后续 `pcim_iomap_regions` / `devm_kzalloc` 同理把各自的释放回调挂上去。probe 返回非零（失败）或 `pci_driver.remove` 被调用时，PCI core 遍历该链表**逆序**（LIFO，保证依赖顺序）调用所有回调。所以 probe 中途 `return -ENOMEM` 不会泄漏前面分配的任何资源。mlx5_core 用裸 `pci_` 是因为它要做更精细的错误恢复（AER、健康轮询），需要自己控制释放时机；学习项目用 `pcim_` 足矣。
+  - **Q: pci_set_drvdata 存的指针后续在哪些场景被取出来？**
+    A: 任何 PCI core 回调里。具体：`remove`（卸载时逆操作）、`suspend`/`resume`（电源管理）、`shutdown`（系统关机）、`err_handler`（AER 错误恢复）、`request_irq` 的 `dev_id` cookie（中断 handler 拿上下文）、sysfs attribute 的 `show/store`（通过 `to_pci_dev` + `pci_get_drvdata`）。T04 会用到 request_irq，T13 sysfs 会用到 attribute——都要靠 drvdata 拿回 `struct mlx5_prism_dev *`。
+  - **Q: ConnectX-4 Lx 的 BAR0 是 32MB，里面装的是什么？为什么控制面用 BAR0 而不是 BAR2？**
+    A: BAR0 的 layout：起始 4KB 是 init segment（固件状态/命令队列指针/health buffer），之后是 UAR（User Access Region）—— 每个 QP/CQ 独占一页（4KB）的 doorbell 寄存器。驱动写 doorbell 通知硬件"有新 WQE 了"。CX-4 Lx 实际上只有 BAR0（32MB），没有 BAR2。BAR0 同时承担 init segment（控制面握手）+ UAR doorbell（数据面通知）两个角色，分区使用。mlx5_core 也只 ioremap 了 init segment 那 4KB（`ioremap(iseg_base, sizeof(*iseg))`），doorbell 页按需 ioremap。我的 T02 也是只读 init segment，doorbell 在 T05 才用。
+  - **Q: 如果 probe 中途失败（比如第 3 步出错），前两步分配的资源怎么释放？**
+    A: 这正是 devres 的核心价值。我的 probe 顺序：`devm_kzalloc` → `pcim_enable_device` → `pci_set_master` → `pcim_iomap_regions`。假设 `pcim_iomap_regions` 失败 `return err`，PCI core 看到 probe 返回非零，自动逆序调 devres 链表：先释放 iomap（未成功，无操作）→ undo `pci_set_master`（devres 未注册这个，但 `pcim_enable_device` 失败路径会 disable）→ disable device → kfree devm 内存。**全程无需 goto**。对比 mlx5_core 的 `err_clr_master: release_bar; err_disable: disable_device` 手动 goto 链——它的每个分配都要有对应的 err label，维护成本高。这就是为什么现代内核驱动都倾向 devres。
 
 ---
 
