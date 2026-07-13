@@ -5,12 +5,11 @@ obj-m := mlx5_prism.o
 mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o
 
 # Generate compile_commands.json for clangd / IDE code navigation.
-# Usage: make compile_commands
-# Requires: sudo apt install bear
+# Uses the kernel's native GEN compile_commands.json target which invokes
+# scripts/clang-tools/gen_compile_commands.py in the kernel build context,
+# so -I./arch/... paths resolve correctly against the kernel build dir.
+# Usage: make compile_commands (no extra deps needed)
 compile_commands:
-	@command -v bear >/dev/null 2>&1 || { \
-		echo "ERROR: bear not found. Install: sudo apt install bear"; \
-		exit 1; \
-	}
-	bear -- $(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) \
+		compile_commands.json
 .PHONY: compile_commands
