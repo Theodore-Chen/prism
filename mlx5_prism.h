@@ -11,14 +11,21 @@
 
 #include <linux/io.h>
 #include <linux/pci.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.2"
+#define MLX5_PRISM_DRV_VERSION	"0.3"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
 
 #define MLX5_PRISM_BAR0		0
+
+/* Page and queue geometry (PRM defaults; match mlx5 MLX5_ADAPTER_PAGE_SIZE etc.) */
+#define MLX5_PRISM_PAGE_SIZE		4096
+#define MLX5_PRISM_MAX_COMMANDS		32
+#define MLX5_PRISM_EQE_SIZE		64
+#define MLX5_PRISM_EQ_ENTRIES		(MLX5_PRISM_PAGE_SIZE / MLX5_PRISM_EQE_SIZE)
 
 struct mlx5_prism_iseg {
 	__be32	fw_rev;			/* [minor hi16][major lo16] */
@@ -32,10 +39,27 @@ struct mlx5_prism_iseg {
 	/* further fields appended by later tasks as needed */
 };
 
+struct mlx5_prism_cmdq {
+	void		*buf;		/* cpu virtual address */
+	dma_addr_t	dma;		/* pci bus address for firmware */
+	size_t		size;
+	spinlock_t	lock;		/* serialise producers (used from T05) */
+};
+
+struct mlx5_prism_eq {
+	void		*buf;		/* cpu virtual address */
+	dma_addr_t	dma;		/* pci bus address for firmware */
+	size_t		size;
+	u32		cons_index;	/* consumer index (used from T06) */
+};
+
 struct mlx5_prism_dev {
 	struct pci_dev			*pdev;
 	void __iomem			*bar0;
 	const struct mlx5_prism_iseg __iomem *iseg;
+
+	struct mlx5_prism_cmdq		cmdq;
+	struct mlx5_prism_eq		eq;
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -62,5 +86,11 @@ extern const struct pci_device_id mlx5_prism_pci_ids[];
 
 int mlx5_prism_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 void mlx5_prism_pci_remove(struct pci_dev *pdev);
+
+int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev);
+void mlx5_prism_cmdq_free(struct mlx5_prism_dev *dev);
+
+int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
+void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
 
 #endif /* __MLX5_PRISM_H */

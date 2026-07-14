@@ -3,12 +3,14 @@
  * mlx5_prism: ConnectX-4 Lx control-plane driver — PCI probe/remove.
  *
  * T02: bind 15b3:1015, map BAR0 via devres, read init segment to verify
- * the MMIO path is alive. No CMDQ, no firmware bootstrap yet.
+ * the MMIO path is alive.
+ * T03: set DMA mask, allocate CMDQ mailbox and EQ ring buffers.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/ioport.h>
 #include <linux/mod_devicetable.h>
@@ -22,6 +24,24 @@ const struct pci_device_id mlx5_prism_pci_ids[] = {
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, mlx5_prism_pci_ids);
+
+static int mlx5_prism_set_dma_caps(struct pci_dev *pdev)
+{
+	int err;
+
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (err) {
+		pci_warn(pdev, "64-bit DMA mask failed, trying 32-bit\n");
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (err) {
+			pci_err(pdev, "failed to set DMA mask: %d\n", err);
+			return err;
+		}
+	}
+
+	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+	return 0;
+}
 
 int mlx5_prism_pci_probe(struct pci_dev *pdev,
 			 const struct pci_device_id *id)
@@ -40,6 +60,10 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 		dev_err(&pdev->dev, "pcim_enable_device failed: %d\n", err);
 		return err;
 	}
+
+	err = mlx5_prism_set_dma_caps(pdev);
+	if (err)
+		return err;
 
 	pci_set_master(pdev);
 
@@ -68,7 +92,19 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 		 &pdev->resource[MLX5_PRISM_BAR0],
 		 rev_major, rev_minor, rev_sub, cmdif_rev);
 
+	err = mlx5_prism_cmdq_alloc(dev);
+	if (err)
+		return err;
+
+	err = mlx5_prism_eq_alloc(dev);
+	if (err)
+		goto err_free_cmdq;
+
 	return 0;
+
+err_free_cmdq:
+	mlx5_prism_cmdq_free(dev);
+	return err;
 }
 
 void mlx5_prism_pci_remove(struct pci_dev *pdev)
@@ -85,6 +121,8 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
 
+	mlx5_prism_eq_free(dev);
+	mlx5_prism_cmdq_free(dev);
 	pci_clear_master(pdev);
 	pci_set_drvdata(pdev, NULL);
 }

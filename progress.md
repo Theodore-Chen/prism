@@ -16,7 +16,7 @@
 |---------|------|------|--------|------|--------|---------|
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
-| T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | pending | — | — |
+| T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | (本 commit) | 2026-07-14 |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
@@ -39,6 +39,8 @@
 > 每个 task 完成后，把"对自己最有启发的一条认知"摘出来放这里，最后回顾时一目了然。
 
 - _（待 T01 完成后填写）_
+- **T03**：`dma_alloc_coherent` 一次调用返回**两个地址**——CPU 虚拟地址（驱动读写用）和 `dma_addr_t` 总线地址（写进固件可见的寄存器/mailbox 描述符）。两者数值无关：CPU 虚拟地址是内核直接映射区 `ffff88...`（按 phys 直接映射），总线地址是 IOMMU/PCIe 地址空间映射后的值（本机实测 4-34GB，说明 64-bit DMA mask 生效）。coherent DMA 硬件保证 cache 一致性，无需显式 `dma_wmb()` flush，代价是映射窗口比 streaming DMA 映射开销略高但省心——mailbox/EQ 是低频小内存（4KB），coherent 完全合适。
+
 - **T01**：内核模块的本质就是把一个函数指针塞进 `.initcall` 链接段——`module_init` 是宏不是函数，insmod 通过 `init_module()` syscall 在模块的 `.initcall` 段找到指针并执行。`MODULE_LICENSE("GPL")` 不是法律声明而是**技术开关**：决定能否使用 `EXPORT_SYMBOL_GPL` 导出的符号（`pcim_*`、`dma_alloc_coherent`、`pci_alloc_irq_vectors` 等后续 task 必用的核心 API 都是 GPL-only）。
 - **T02**：`pcim_` 前缀（pcim_enable_device/pcim_iomap_regions）= `pci_` 函数 + devres 自动释放。devres 把释放回调挂到 `pdev->dev.devres_head` 链表，probe 失败或 remove 时 PCI core **逆序**自动调用——这就是为什么我的 probe 里 `return err` 后无需任何 `goto err_xxx` 清理链，比 mlx5_core 的手动 `request_bar/iounmap/release_bar` 简洁得多。BAR0 起始的 init segment（4KB）是固件→驱动握手区，存 fw_rev / cmdq 物理地址 / initializing 位等。**M0 达成**：lspci 显示双口均绑定 mlx5_prism，fw_rev 14.32.1908 与 mlx5_core 读到的一致。
 
@@ -122,16 +124,40 @@
 
 ### T03-dma-eq-alloc
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed
+- **开始时间**: 2026-07-14
+- **完成时间**: 2026-07-14
+- **Commit**: (本 commit)
+- **读过源码**:
+  - `mlx5_core/cmd.c:1434-1458` — `alloc_cmd_box/free_cmd_box`：单个 mailbox 用 `dma_pool_zalloc(dev->cmd.pool, ...)` 从池分配（每块 `struct mlx5_cmd_prot_block` = 576 字节，含 512B data + 64B 控制字段）
+  - `mlx5_core/cmd.c:2389-2416` — `alloc_cmd_page`：命令队列页用 `dma_alloc_coherent(..., MLX5_ADAPTER_PAGE_SIZE=4096, ...)`，手动 4KB 对齐兜底（防 ARM 64K page 系统默认对齐不够）
+  - `mlx5_core/cmd.c:2458-2518` — `mlx5_cmd_enable`：从 iseg 读 `log_sz` / `log_stride`（PRM cmdq_addr_l_sz 的 bits[7:4]/[3:0]），校验 `cmdif_rev==5`
+  - `mlx5_core/eq.c:253-320` — `create_map_eq`：EQ 用 `mlx5_frag_buf_alloc_node`（碎片缓冲，支持多页连续）；`log_eq_stride=ilog2(MLX5_EQE_SIZE)`，EQE = 64 字节
+  - `mlx5_core/main.c:245-261` — `set_dma_caps`：先试 `DMA_BIT_MASK(64)`，失败回退 32-bit
+  - `include/linux/mlx5/device.h:170-178,247-248,784-805` — 常量定义（`MLX5_MAX_COMMANDS=32`、`MLX5_ADAPTER_PAGE_SIZE=4096`、`struct mlx5_eqe` 64 字节 `__packed`、`struct mlx5_cmd_prot_block` 576 字节）
+- **关键决策**:
+  - **用 dma_alloc_coherent 单块分配而非 dma_pool**：mlx5_core 用 `dma_pool_create` 维护 mailbox 池（每块 576B），因为命令频繁复用小内存。T03 只验证 DMA 通路，每个 dev 分配 1 个 4KB cmd queue page + 1 个 4KB EQ buffer（64 EQE），保持最小实现。后续 T05 用 CMDQ 时再按需扩展（mailbox 池或 dma_pool）。
+  - **简化 EQ 内存模型**：mlx5_core 的 `mlx5_frag_buf_alloc_node` 支持跨页大 EQ（几 MB），T03 只用 1 页 4KB（64 个 EQE），对学习项目够用且能跑通完整 EQE 流程。
+  - **%pK 替代 %px**：checkpatch --strict 警告 `%px` 暴露内核地址，改用 `%pK`（root via dmesg 可读真实值，非-root 看到 0）。学习目的仍能看到地址，但符合内核规范。
+  - **dma_set_max_seg_size 设为 UINT_MAX**：和 mlx5_core 的 2GB 不同，T03 没有 SG list 需求，给最大值避免后续大块 DMA 被分段（学习项目简化）。
+- **遇到的问题与解决**:
+  - checkpatch 报 `%px` warning → 改 `%pK`（root 可见，checkpatch 通过）
+- **与设计的偏差**: 无
+- **exit_criteria 验证结果**:
+  - compile: `make modules` 通过，0 ERROR/WARNING；checkpatch 4 文件全 0/0/0
+  - load: insmod 成功，双口均输出 `cmdq: cpu=... dma=... size=4096` 和 `eq: cpu=... dma=... size=4096 entries=64`
+  - functional: **dma 地址全部 >4GB**（实测 08:00.0 cmdq=0x7f548c000≈34GB，eq=0x2b74ed000≈11.8GB；08:00.1 cmdq=0x10ae9a000≈4.3GB，eq=0x11df05000≈4.8GB），说明 `dma_set_mask_and_coherent(64)` 真正生效；rmmod 后无 kmemleak
+  - manual: 100 次 insmod/rmmod 通过，dmesg DMESG CLEAN（无 WARNING/BUG/Oops/leak）
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: dma_alloc_coherent 返回的两个地址为什么不相同？各自的消费者是谁？**
+    A: 同一块物理内存，但映射进两个不同的地址空间。**CPU 虚拟地址**：内核直接映射区（`ffff88...`），驱动用 `memcpy` / 普通指针解引用访问，消费者是 CPU。**`dma_addr_t` 总线地址（bus address / DMA address）**：经过 IOMMU 或 PCIe 地址翻译后的设备可见地址，固件通过它 DMA 读写这块内存，消费者是网卡硬件。两者数值无关——本机实测 cpu=`ffff89...`、dma=`0x7f548c000`，差几个数量级。**关键：固件永远不能拿 `ffff...` 去访问**（那是 CPU 虚拟地址，硬件看不懂），驱动也永远不能解引用 `dma_addr_t`（那是设备视角，CPU 解引用会段错误）。
+  - **Q: 为什么 mlx5 把 mailbox 和 EQ 都用 coherent 而不是 streaming？性能损失在哪？**
+    A: coherent DMA 硬件保证 cache 一致性——CPU 写完后无需 `dma_wmb()` + flush，硬件读到的就是最新值；反之亦然。streaming DMA（`dma_map_single`）每次需要显式 `dma_sync_*` 或 map/unmap 触发 cache 刷新。mlx5 选 coherent 因为 mailbox（命令描述符）和 EQ（事件 ring）都是**频繁小颗粒度读写**，streaming 每次都 flush 开销大且复杂。代价：coherent 内存映射窗口有限（早期系统只能在 16MB `DMA_ZONE`），现代 x86 IOMMU 普及后无此限制；分配/释放开销比 `kmalloc` 高（要做 IOMMU 映射）。所以**热路径大数据用 streaming（如 SKB），控制面小内存用 coherent**——这是 mlx5 的工程取舍。
+  - **Q: dma_set_mask_and_coherent 不调用会怎样？默认 mask 是多少？**
+    A: 默认 `pdev->dev.dma_mask = DMA_BIT_MASK(32)`（4GB 上限）。不调用的话 `dma_alloc_coherent` 只能在 4GB 以下分配——本机 16GB 内存，4GB 以下窗口可能被耗尽（特别在长期运行的系统）。更严重的：如果设备只能 DMA 到 64-bit 地址空间但 mask 默认 32，硬件会丢高 32 位数据。所以必须显式声明设备能力。mlx5_core 先试 64，失败回退 32（老系统/老 IOMMU 可能不支持 64-bit coherent）。
+  - **Q: mailbox 大小如何确定？固件有最小要求吗？**
+    A: 单个 mailbox block = `struct mlx5_cmd_prot_block` = 576 字节（512B data + 48B rsvd + 8B next 指针 + 4B block_num + 4B token/sig 等）。**命令队列页** = 1 个 `MLX5_ADAPTER_PAGE_SIZE`（4KB）= 1 个 page 含所有命令描述符槽位，槽数由固件在 iseg 上报：`log_sz`（典型 6 = 64 槽）+ `log_stride`（典型 7 = 128B/槽）。固件最小要求：cmd queue page 必须 4KB 对齐（PRM §4.3）。mailbox 大小是 PRM 协议层定义的，驱动不能改。
 
 ---
 
