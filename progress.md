@@ -16,7 +16,7 @@
 |---------|------|------|--------|------|--------|---------|
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
-| T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | (本 commit) | 2026-07-14 |
+| T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
@@ -127,7 +127,7 @@
 - **状态**: completed
 - **开始时间**: 2026-07-14
 - **完成时间**: 2026-07-14
-- **Commit**: (本 commit)
+- **Commit**: 693448b
 - **读过源码**:
   - `mlx5_core/cmd.c:1434-1458` — `alloc_cmd_box/free_cmd_box`：单个 mailbox 用 `dma_pool_zalloc(dev->cmd.pool, ...)` 从池分配（每块 `struct mlx5_cmd_prot_block` = 576 字节，含 512B data + 64B 控制字段）
   - `mlx5_core/cmd.c:2389-2416` — `alloc_cmd_page`：命令队列页用 `dma_alloc_coherent(..., MLX5_ADAPTER_PAGE_SIZE=4096, ...)`，手动 4KB 对齐兜底（防 ARM 64K page 系统默认对齐不够）
