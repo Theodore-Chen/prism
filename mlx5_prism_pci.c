@@ -75,7 +75,7 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	}
 
 	dev->bar0 = pcim_iomap_table(pdev)[MLX5_PRISM_BAR0];
-	dev->iseg = (const struct mlx5_prism_iseg __iomem *)dev->bar0;
+	dev->iseg = (struct mlx5_prism_iseg __iomem *)dev->bar0;
 	pci_set_drvdata(pdev, dev);
 
 	rev_major = mlx5_prism_fw_rev_major(dev);
@@ -104,8 +104,17 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_eq;
 
+	err = mlx5_prism_cmdq_init(dev);
+	if (err)
+		goto err_free_irq;
+
+	/* T05: prove the doorbell path end-to-end (non-fatal boot probe). */
+	mlx5_prism_cmdq_selftest(dev);
+
 	return 0;
 
+err_free_irq:
+	mlx5_prism_irq_free(dev);
 err_free_eq:
 	mlx5_prism_eq_free(dev);
 err_free_cmdq:

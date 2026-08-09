@@ -285,7 +285,7 @@
       "title": "CMDQ 命令提交（mailbox 写 + doorbell）",
       "phase": "S3",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": ["T04-msix-irq"],
       "estimated_loc": 220,
       "learning": {

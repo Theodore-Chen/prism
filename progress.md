@@ -18,7 +18,7 @@
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | 829cda5 | 2026-07-14 |
-| T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
+| T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | _TBD_ | 2026-08-09 |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
 | T07-fw-poll-enable | 固件引导 1：poll + ENABLE_HCA | S4 | — | pending | — | — |
 | T08-fw-pages | 固件引导 2：QUERY/MANAGE_PAGES | S4 | — | pending | — | — |
@@ -39,6 +39,7 @@
 > 每个 task 完成后，把"对自己最有启发的一条认知"摘出来放这里，最后回顾时一目了然。
 
 - _（待 T01 完成后填写）_
+- **T05**：CMDQ doorbell 的正确写法是 **32-bit `iowrite32be(1 << idx, &iseg->cmd_dbell)`**，不是 task.json/DESIGN.md 写的 `writeq`——位掩码值 1<<idx 表示"通知固件处理 slot idx"，固件经 PCIe 读到的是 BE32。doorbell 前的 **`wmb()`（非 `smp_wmb()`）**：消费者是固件经 PCIe DMA 读，不是另一个 CPU，必须用能跨越 MMIO 写的屏障；放在 `iowrite32be` **之前**确保描述符/mailbox 先于 doorbell 可见。CMDQ boot 完成是 **轮询 `lay->status_own` 的 OWNER_HW 位**（匹配 mlx5_core 的 `CMD_MODE_POLLING`），不走中断——EQ 未建、IRQ 仍 mask，所以 task.json 的"/proc/interrupts 计数自增"判据在此阶段不适用，等价证明是 `doorbell honoured, status_own 回到 SW, status=0`。**CX-4 Lx 无 QUERY_FW 命令**（7.0.0 mlx5_ifc.h 里 0x103=TEARDOWN_HCA）：fw 版本在 init segment 寄存器里直接读，第一条命令是 **ENABLE_HCA (0x104)**。实测 log_stride=6（64 字节/槽，等于描述符 struct 大小，无 padding）。
 - **T04**：MSI-X 中断是 PCIe 设备主动写 MMIO 地址触发中断（不是 INTx 的电平信号），每个 MSI-X 向量独立指向一个 CPU + 一个地址。`request_irq` 的 handler 在**硬中断上下文**执行（不是进程，禁止 mutex_lock/sleep），所以只能做最小工作——ack + 唤醒。`IRQF_NO_AUTOEN` 让 request_irq 不自动 enable，T04 保持 mask 状态直到 T07 创建 EQ 后才 `enable_irq`，避免固件随机中断打到未初始化的 handler。`/proc/interrupts` 的 `IR-PCI-MSI` 前缀说明 x86 VT-d 中断重映射启用，hwirq 4194304 是 MSI-X 表索引 0 经 IOMMU 翻译后的值。
 
 - **T03**：`dma_alloc_coherent` 一次调用返回**两个地址**——CPU 虚拟地址（驱动读写用）和 `dma_addr_t` 总线地址（写进固件可见的寄存器/mailbox 描述符）。两者数值无关：CPU 虚拟地址是内核直接映射区 `ffff88...`（按 phys 直接映射），总线地址是 IOMMU/PCIe 地址空间映射后的值（本机实测 4-34GB，说明 64-bit DMA mask 生效）。coherent DMA 硬件保证 cache 一致性，无需显式 `dma_wmb()` flush，代价是映射窗口比 streaming DMA 映射开销略高但省心——mailbox/EQ 是低频小内存（4KB），coherent 完全合适。
@@ -203,16 +204,52 @@
 
 ### T05-cmdq-submit
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed
+- **开始时间**: 2026-08-09
+- **完成时间**: 2026-08-09
+- **Commit**: _TBD_
+- **读过源码**:
+  - `mlx5_core/cmd.c:979-1080` — `cmd_work_handler`：命令描述符填充顺序（memset → type → inlen/in_ptr → inline in → out_ptr/outlen → token → status_own=CMD_OWNER_HW → set_signature）、**`wmb()` 在 `iowrite32be(1<<idx, &iseg->cmd_dbell)` 之前**（行 1071-1072），doorbell 是 32-bit BE 写不是 writeq
+  - `mlx5_core/cmd.c:212-215` — `get_inst(cmd, idx)`：`cmd->cmd_buf + (idx << log_stride)`，slot 按位运算索引
+  - `mlx5_core/cmd.c:2458-2533` — `mlx5_cmd_enable`：读 `iseg->cmdq_addr_l_sz & 0xff` 拿 log_sz/log_stride（行 2475-2477），校验 `1<<log_sz <= MAX_COMMANDS(32)`，写 `cmdq_addr_h/l_sz` + `wmb()`（行 2519-2523），cmd_dma 必须 4KB 对齐
+  - `mlx5_core/cmd.c:282-305` — `poll_timeout`：boot 命令用轮询 `READ_ONCE(lay->status_own) & CMD_OWNER_HW` 判完成，非中断
+  - `include/linux/mlx5/device.h:526-539` — `struct mlx5_cmd_layout` 64 字节 layout（type/rsvd0/inlen/in_ptr/in[4]/out[4]/out_ptr/outlen/token/sig/rsvd1/status_own）
+  - `include/linux/mlx5/driver.h:74,340-344` — `CMD_OWNER_HW=0x1`，`struct mlx5_cmd_mailbox{buf,dma,next}`
+  - `mlx5_core/main.c:189-220` — `wait_fw_init`：`ioread32be(&iseg->initializing) >> 31`（**bit31 不是 bit0**，修正了 header 注释）
+  - `mlx5_core/main.c:1182-1193` — 引导序列：wait_fw_init → 第一条命令 ENABLE_HCA（**无 QUERY_FW**）
+  - `include/linux/mlx5/mlx5_ifc.h:119-126` — opcode 表：0x103=TEARDOWN_HCA（不是 QUERY_FW），无 QUERY_FW 枚举；fw 版本从 iseg 读
+  - `mlx5_ifc.h:8398-8419` — `enable_hca_in/out_bits`：opcode[0:1]+reserved[2:3]+reserved[4:5]+op_mod[6:7]+embedded_cpu/function_id/reserved；in/out 都是 16 字节头
+- **关键决策**:
+  - **doorbell 用 `iowrite32be` 不是 `writeq`**：task.json/DESIGN.md 都写 `writeq(doorbell)`，但 mlx5_core 实测用 32-bit `iowrite32be(1<<idx, &iseg->cmd_dbell)`。值是位掩码（1<<idx 表示通知固件处理该 slot），32-bit 足够且匹配硬件。遵循"设计与硬件行为不一致时按硬件来 + 修正文档"。
+  - **测试命令用 ENABLE_HCA 不用 QUERY_FW**：CX-4 Lx 固件无 QUERY_FW（fw 版本在 iseg 寄存器，T02 已读）。ENABLE_HCA (0x104) 是固件接受的第一条命令，输入/输出都是 16 字节头（in_ptr=0, out_ptr=0），无需 mailbox，最简洁地验证 doorbell 往返。
+  - **boot 完成用轮询不走中断**：EQ 未建、IRQ 仍 mask（T04 状态），固件无法经 MSI-X 回 CMDQ 完成中断。匹配 mlx5_core 的 `CMD_MODE_POLLING`——轮询 `status_own` 的 OWNER_HW 位。task.json 的"/proc/interrupts 计数自增"判据在此阶段不适用，等价证明是 `doorbell honoured + status_own 回到 SW + status=0`。中断路径留 T06（建 EQ 后）。
+  - **iseg 去掉 `const`**：T02 把 `iseg` 声明为 `const struct ... __iomem *`（只读语义），但 T05 要写 `cmd_dbell`/`cmdq_addr_*`，传 `&iseg->cmd_dbell` 给 `iowrite32be`（非 const 形参）会报 const 丢弃。MMIO 寄存器本来就是读写，const 是误导，改为非 const 对齐 mlx5_core。
+  - **描述符 sig 计算**：`lay->sig = ~xor8_buf(lay, sizeof(*lay))`（先 memset→填字段→设 status_own=OWNER_HW→最后算 sig，覆盖整个 64 字节含 status_own）。匹配 mlx5_core `set_signature`，保证 `xor8_buf(lay, full) == 0xff` 的不变量。checksum_disabled 模式下固件仍验 layout sig。
+- **遇到的问题与解决**:
+  - **iseg const 冲突**：如关键决策第 4 条。解：去掉 const，更新 pci.c 的 cast。
+  - **fw_initializing 位**：原 header 注释 "bit0"，读 mlx5_core 发现是 `>> 31`（bit31）。已修正注释 + selftest 用 `ioread32be(...) >> 31`。
+- **与设计的偏差**:
+  - doorbell：`writeq` → `iowrite32be`（按硬件实测修正，DESIGN.md 第 3 节描述正确，task.json step 措辞不准）
+  - 测试命令：QUERY_FW(0x103) → ENABLE_HCA(0x104)（固件无 QUERY_FW，修正 DESIGN.md C2 校验项）
+  - 完成判据：/proc/interrupts 计数 → doorbell honoured 轮询（boot 阶段无 EQ/中断）
+- **exit_criteria 验证结果**:
+  - compile: `make modules` 通过，0 ERROR/WARNING；checkpatch 4 文件全 0/0/0
+  - load: 双口均 `Kernel driver in use: mlx5_prism`；dmesg 含完整序列
+  - functional:
+    - `cmdq ready: log_sz=5 (32 slots) log_stride=6 (64 bytes/slot)`（双口一致）
+    - `cmdq self-test: submitting ENABLE_HCA` → `doorbell honoured, desc_status=0 out_status=0`（双口一致，**ENABLE_HCA status=0 成功**）
+    - doorbell 往返耗时：08:00.0 ~173µs（首命令含冷启动）、08:00.1 ~72µs
+  - manual: 100 次 insmod/rmmod 循环无 FAIL；dmesg `grep -iE "WARNING|BUG|Oops|panic|leak|stall"` = `DMESG CLEAN`
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: wmb() 阻止 CPU 什么样的重排？为什么这里不能用 smp_wmb()（提示：跨 PCIe DMA）？**
+    A: `wmb()` 阻止 CPU 对**写操作**的重排——保证 wmb() 之前的所有 store（描述符字段 + mailbox 内容写入 coherent DMA 内存）在 wmb() 之后的 store（doorbell MMIO 写）之前对**所有观察者**可见。`smp_wmb()` 只在 **CPU 之间**有效（对 SMP 核间的 store 顺序），它**不保证对 PCIe 设备可见**——因为 PCIe DMA 不经过 CPU cache 一致性协议的 smp 屏障路径。这里的消费者是网卡固件（经 PCIe DMA 读 mailbox），不是另一个 CPU 核，所以必须用 `wmb()`（在 x86 上展开为 `sfence`，对所有 store 包括 MMIO store 全局排序）。mlx5_core cmd.c:1071 正是 `wmb()` 不是 `smp_wmb()`。
+  - **Q: spin_lock 和 spin_lock_irqsave 在 CMDQ 临界区用哪个？为什么？**
+    A: 用 **`spin_lock_irqsave`**。CMDQ 临界区（填描述符 + wmb + 写 doorbell）未来会被**硬中断 handler**（T06 的 EQ 完成中断）打断——handler 会读/更新 consumer_index 和 slot 状态。如果当前 CPU 持锁时被中断，handler 试图 `spin_lock` 同一把锁 → **死锁**（单核自旋等自己释放）。`spin_lock_irqsave` 在持锁前关本地 CPU 中断，保证临界区不被打断。即使 T05 还没接中断，提前用 `irqsave` 版本是为 T06 预留正确性，避免以后忘记切换。mlx5_core 用 `spin_lock_irqsave(&cmd->alloc_lock, flags)`。
+  - **Q: doorbell 寄存器在 BAR0 的哪个偏移？为什么是 writeq 不是 writel？**
+    A: doorbell 在 **init segment 偏移 0x18**（`iseg->cmd_dbell`），即 BAR0 起始 + 0x18。**纠正 task.json**：实际是 **`iowrite32be`（32-bit），不是 writeq/writel**。值 `1 << idx` 是位掩码（bit idx = 通知固件处理 slot idx），32-bit 足够覆盖 32 个 slot。用 BE 是因为 iseg 寄存器是大端（固件 ARM 核原生 BE），`iowrite32be` 做 CPU→BE 转换；若误用 `iowrite32`（x86 LE），写 1 会变成字节序 0x01000000 = bit24 = 错误 slot。
+  - **Q: 为什么 cmd_head 只由驱动更新，cmd_tail 只由固件更新（单写者原则）？**
+    A: 避免 ring buffer 的竞态。CMDQ 是 SPSC（单生产者单消费者）ring：**驱动**是命令的生产者（写描述符到 slot、更新 doorbell 位掩码），**固件**是消费者（读描述符、执行、写响应、清 status_own 的 OWNER 位）。如果双方都能写同一个 index，需要双向同步（lock 或原子 CAS），跨 PCIe DMA + CPU 的同步极昂贵且易错。单写者原则下：驱动只写 slot 内容 + doorbell + status_own=OWNER_HW（移交），固件只清 status_own（交回）——所有权靠 `status_own` 的 OWNER 位传递，天然无竞态。mlx5 的 `ent->lay->status_own` 就是这个交接点。doorbell 位掩码由驱动写（哪些 slot 有新命令），固件读后处理，不回写 doorbell。
 
 ---
 
@@ -406,4 +443,4 @@
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
-- _（待记录）_
+- **T05（2026-08-09）**：C2 校验项"固件版本"由 `QUERY_FW (opcode 0x103)` 改为"init segment `fw_rev` 寄存器"。原因：CX-4 Lx 固件（FW 14.32.1908）**无 QUERY_FW 命令**——7.0.0 内核 `mlx5_ifc.h` 中 0x103=TEARDOWN_HCA，opcode 表无 QUERY_FW 枚举；mlx5_core 引导序列（main.c:1182-1193）也是 wait_fw_init → ENABLE_HCA，不发 QUERY_FW。fw 版本从 init segment 的 `fw_rev` 寄存器直接读（T02 已实现 `mlx5_prism_fw_rev_major/minor/sub`）。task.json T05/T06 step 中的"QUERY_FW"需相应改为 ENABLE_HCA 或其他真实存在的命令。

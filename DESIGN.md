@@ -668,7 +668,7 @@ cat /sys/class/misc/mlx5_prism0/symbol_error_rate
 | # | 指标 | mlx5_prism 采集方式 | mlx5_core 采集方式 | 判据 |
 |---|------|-------------------|-------------------|------|
 | C1 | HCA 能力集 | `QUERY_HCA_CAP` (opcode 0x100) | `cat /sys/class/net/eth0/device/caps` | 逐字段 bit-exact |
-| C2 | 固件版本 | `QUERY_FW` (opcode 0x103) | `ethtool -i eth0` | 完全一致 |
+| C2 | 固件版本 | init segment `fw_rev`（无 QUERY_FW 命令） | `ethtool -i eth0` | 完全一致 |
 | C3 | Port 数量/速率 | `QUERY_HCA_CAP` ports 字段 | `ethtool eth0` | 完全一致 |
 | C4 | pre-FEC BER | `ACCESS_REG PPCNT` → sysfs | `ethtool -S eth0 \| grep ber` | 同数量级（差值 < 5%） |
 | C5 | FEC 纠错计数 | 同上 | `ethtool -S eth0 \| grep fec` | 趋势一致 |
