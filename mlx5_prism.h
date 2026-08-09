@@ -9,12 +9,14 @@
 #ifndef __MLX5_PRISM_H
 #define __MLX5_PRISM_H
 
+#include <linux/atomic.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.3"
+#define MLX5_PRISM_DRV_VERSION	"0.4"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -53,6 +55,12 @@ struct mlx5_prism_eq {
 	u32		cons_index;	/* consumer index (used from T06) */
 };
 
+struct mlx5_prism_irq {
+	int		vector;		/* Linux IRQ number; -1 if not allocated */
+	atomic_t	count;		/* handler invocation counter */
+	char		name[32];	/* shown in /proc/interrupts */
+};
+
 struct mlx5_prism_dev {
 	struct pci_dev			*pdev;
 	void __iomem			*bar0;
@@ -60,6 +68,7 @@ struct mlx5_prism_dev {
 
 	struct mlx5_prism_cmdq		cmdq;
 	struct mlx5_prism_eq		eq;
+	struct mlx5_prism_irq		irq;
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -92,5 +101,8 @@ void mlx5_prism_cmdq_free(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
+
+int mlx5_prism_irq_alloc(struct mlx5_prism_dev *dev);
+void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);
 
 #endif /* __MLX5_PRISM_H */

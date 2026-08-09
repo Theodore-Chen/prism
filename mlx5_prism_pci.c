@@ -100,8 +100,14 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_cmdq;
 
+	err = mlx5_prism_irq_alloc(dev);
+	if (err)
+		goto err_free_eq;
+
 	return 0;
 
+err_free_eq:
+	mlx5_prism_eq_free(dev);
 err_free_cmdq:
 	mlx5_prism_cmdq_free(dev);
 	return err;
@@ -121,6 +127,7 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
 
+	mlx5_prism_irq_free(dev);
 	mlx5_prism_eq_free(dev);
 	mlx5_prism_cmdq_free(dev);
 	pci_clear_master(pdev);

@@ -17,7 +17,7 @@
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
-| T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | pending | — | — |
+| T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | (本 commit) | 2026-07-14 |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
 | T07-fw-poll-enable | 固件引导 1：poll + ENABLE_HCA | S4 | — | pending | — | — |
@@ -39,6 +39,8 @@
 > 每个 task 完成后，把"对自己最有启发的一条认知"摘出来放这里，最后回顾时一目了然。
 
 - _（待 T01 完成后填写）_
+- **T04**：MSI-X 中断是 PCIe 设备主动写 MMIO 地址触发中断（不是 INTx 的电平信号），每个 MSI-X 向量独立指向一个 CPU + 一个地址。`request_irq` 的 handler 在**硬中断上下文**执行（不是进程，禁止 mutex_lock/sleep），所以只能做最小工作——ack + 唤醒。`IRQF_NO_AUTOEN` 让 request_irq 不自动 enable，T04 保持 mask 状态直到 T07 创建 EQ 后才 `enable_irq`，避免固件随机中断打到未初始化的 handler。`/proc/interrupts` 的 `IR-PCI-MSI` 前缀说明 x86 VT-d 中断重映射启用，hwirq 4194304 是 MSI-X 表索引 0 经 IOMMU 翻译后的值。
+
 - **T03**：`dma_alloc_coherent` 一次调用返回**两个地址**——CPU 虚拟地址（驱动读写用）和 `dma_addr_t` 总线地址（写进固件可见的寄存器/mailbox 描述符）。两者数值无关：CPU 虚拟地址是内核直接映射区 `ffff88...`（按 phys 直接映射），总线地址是 IOMMU/PCIe 地址空间映射后的值（本机实测 4-34GB，说明 64-bit DMA mask 生效）。coherent DMA 硬件保证 cache 一致性，无需显式 `dma_wmb()` flush，代价是映射窗口比 streaming DMA 映射开销略高但省心——mailbox/EQ 是低频小内存（4KB），coherent 完全合适。
 
 - **T01**：内核模块的本质就是把一个函数指针塞进 `.initcall` 链接段——`module_init` 是宏不是函数，insmod 通过 `init_module()` syscall 在模块的 `.initcall` 段找到指针并执行。`MODULE_LICENSE("GPL")` 不是法律声明而是**技术开关**：决定能否使用 `EXPORT_SYMBOL_GPL` 导出的符号（`pcim_*`、`dma_alloc_coherent`、`pci_alloc_irq_vectors` 等后续 task 必用的核心 API 都是 GPL-only）。
@@ -163,16 +165,39 @@
 
 ### T04-msix-irq
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed
+- **开始时间**: 2026-07-14
+- **完成时间**: 2026-07-14
+- **Commit**: (本 commit)
+- **读过源码**:
+  - `mlx5_core/pci_irq.c:227-231` — `irq_int_handler`：极简分发器，只 `atomic_notifier_call_chain(nh, 0, NULL)`，不读任何硬件。重活延迟到 notifier 订阅者的回调
+  - `mlx5_core/pci_irq.c:275-324` — `request_irq` 调用：`pci_irq_vector(pdev, i)` 拿 Linux IRQ 号，`request_irq(virq, handler, 0, name, &irq->nh)`，dev_id 用 `&irq->nh`（notifier head）
+  - `mlx5_core/pci_irq.c:773` — `pci_alloc_irq_vectors(pdev, 1, req_vec, PCI_IRQ_MSIX)`：req_vec = num_ports × online_cpus + 1，受 EQ 数和 PCI MSI-X 能力上限约束
+  - `mlx5_core/eq.c:153-164` — `mlx5_eq_poll_irq_disabled`：`disable_irq` + 读 EQE + `enable_irq` 模式（T06 会用）
+- **关键决策**:
+  - **handler 极简化**：mlx5_core 的 handler 用 notifier chain 分发（支持多 EQ 共享一个 IRQ），T04 学习目的只做 `atomic_inc` 计数。T06 扩展为读 EQE。
+  - **IRQF_NO_AUTOEN 保持 mask**：偏离 task.json step 4 "probe 末尾启用中断"。理由：T04 没 CREATE_EQ，固件不知道 IRQ 存在，但 PCIe 层可能有 spurious 错误中断；保持 mask 更安全。T07 创建 EQ + 写 IRQ 号给固件后才 `enable_irq`。这是更严谨的实现，避免 probe 期间被打断。
+  - **只用 1 个向量**：mlx5_core 按 num_ports × online_cpus 分配多向量（RSS/多队列用），T04 只验证中断框架，1 个够。后续 T15 netdev 多队列时再扩展。
+  - **dev_id 用 dev 而非 &dev->irq**：handler 需要访问 dev 的所有字段（cmdq/eq/caps），传 dev 更通用。free_irq 必须传同样的 dev_id 才能正确解绑。
+- **遇到的问题与解决**: 无
+- **与设计的偏差**:
+  - 偏离 task.json step 4 "probe 末尾启用中断" → 用 IRQF_NO_AUTOEN 保持 mask。理由如上关键决策第 2 条。T07 才 enable。
+- **exit_criteria 验证结果**:
+  - compile: `make modules` 通过，0 ERROR/WARNING；checkpatch 3 文件全 0/0/0
+  - load: insmod 成功，dmesg 双口各一行 `MSI-X enabled: 1 vector, irq=NNN (masked until EQ bind)`（08:00.0 irq=202, 08:00.1 irq=203）
+  - functional: `/proc/interrupts` 双口各一行 `mlx5_prism@0000:08:00.0/.1`；2 秒前后计数全 0（IRQ 被 mask，无 spurious 风暴）；rmmod 时 free_irq 不阻塞
+  - manual: 100 次 insmod/rmmod 通过，/proc/interrupts 无残留（`no residual mlx5_prism IRQ`），dmesg DMESG CLEAN
+  - 观察点：`IR-PCI-MSI 4194304-edge` → IR=Interrupt Remapping（x86 VT-d 启用），hwirq 4194304=0x400000 是 MSI-X 表索引 0 经 IOMMU 翻译的值，edge=边沿触发（MSI/MSI-X 都是）
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: MSI-X 相比 INTx 在 PCIe 上有哪些优势？为什么智能网卡必须用 MSI-X？**
+    A: INTx 是共享电平触发（4 条 PCI INTx 线，所有设备共享，内核要轮询所有 handler 找是谁），MSI/MSI-X 是设备**主动写 MMIO 地址**触发中断。MSI-X 相比 MSI 的优势：(1) 每个向量独立地址+数据（MSI 只能改 data，地址共享）；(2) 支持 2048 个向量（MSI 限 32）；(3) 每个向量可独立 mask/unmask（MSI 全局 mask）。智能网卡必须用 MSI-X 因为：(1) 高 pps 下 INTx 共享线 + 轮询开销爆炸；(2) 多队列/RSS 需要每队列独立中断 + CPU 亲和性（MSI 做不到）；(3) 独立 mask 让某队列中断处理时不影响其他队列。
+  - **Q: request_irq 的 handler 在哪个上下文执行？硬中断、软中断还是进程？**
+    A: **硬中断上下文**（hard IRQ context）。具体：CPU 收到 MSI-X 写入 → 触发硬件中断 → 内核保存寄存器 → 调 `handle_irq` → `generic_handle_irq` → 我们注册的 handler。整个过程**不在任何进程的上下文**（`current` 指向被打断的进程但不可信），不可睡眠、不可 mutex_lock、不可 copy_from_user。区别于 softirq（`__do_softirq` 上下文）和 tasklet/workqueue（进程上下文）。
+  - **Q: 为什么 handler 不能调用 mutex_lock？如果非要睡眠怎么办？**
+    A: mutex_lock 可能睡眠（等待锁持有者释放），而硬中断上下文**不在任何进程**里——调度器无法切换回中断（没有 task_struct 可切换），睡眠 = 死锁/Oops。如果非要延迟处理：(1) **tasklet**（`tasklet_schedule`，softirq 上下文，仍不可睡眠但可被硬中断抢占）；(2) **workqueue**（`queue_work`，进程上下文，可睡眠）；(3) **threaded_irq**（`request_threaded_irq`，handler 返回 IRQ_WAKE_THREAD 唤醒内核线程处理重活）。mlx5 用 tasklet 处理 EQE 重活（eq.c 的 `mlx5_eq_tasklet`）。
+  - **Q: mlx5 为什么要分配多个 EQ 而不是一个？跟 IRQ affinity 有什么关系？**
+    A: 一个 EQ 一个 MSI-X 向量，每个向量绑到不同 CPU（IRQ affinity）。目的：(1) **RSS 多队列**：每 RX 队列一个 EQ + 一个 CPU，避免单 CPU 中断瓶颈；(2) **隔离控制面/数据面**：async EQ（固件事件）和 comp EQ（数据面 CQE）分离，互不阻塞；(3) **NUMA 局部性**：把 EQ 绑到网卡所在 NUMA 节点的 CPU，减少跨节点访问延迟。`/proc/irq/<n>/smp_affinity` 控制每向量 CPU 掩码。本机 24 核，mlx5_core 默认会分 24+ 个向量。T04 学习目的只验证框架，1 个够。
 
 ---
 

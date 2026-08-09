@@ -3,7 +3,7 @@
 obj-m := mlx5_prism.o
 
 mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \
-		mlx5_prism_cmdq.o mlx5_prism_eq.o
+		mlx5_prism_cmdq.o mlx5_prism_eq.o mlx5_prism_irq.o
 
 # Generate compile_commands.json for clangd / IDE code navigation.
 # Uses the kernel's native GEN compile_commands.json target which invokes
