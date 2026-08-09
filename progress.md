@@ -18,7 +18,7 @@
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | 829cda5 | 2026-07-14 |
-| T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | _TBD_ | 2026-08-09 |
+| T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | 29ffcf0 | 2026-08-09 |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
 | T07-fw-poll-enable | 固件引导 1：poll + ENABLE_HCA | S4 | — | pending | — | — |
 | T08-fw-pages | 固件引导 2：QUERY/MANAGE_PAGES | S4 | — | pending | — | — |
@@ -207,7 +207,7 @@
 - **状态**: completed
 - **开始时间**: 2026-08-09
 - **完成时间**: 2026-08-09
-- **Commit**: _TBD_
+- **Commit**: 29ffcf0
 - **读过源码**:
   - `mlx5_core/cmd.c:979-1080` — `cmd_work_handler`：命令描述符填充顺序（memset → type → inlen/in_ptr → inline in → out_ptr/outlen → token → status_own=CMD_OWNER_HW → set_signature）、**`wmb()` 在 `iowrite32be(1<<idx, &iseg->cmd_dbell)` 之前**（行 1071-1072），doorbell 是 32-bit BE 写不是 writeq
   - `mlx5_core/cmd.c:212-215` — `get_inst(cmd, idx)`：`cmd->cmd_buf + (idx << log_stride)`，slot 按位运算索引
