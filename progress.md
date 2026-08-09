@@ -168,7 +168,7 @@
 - **状态**: completed
 - **开始时间**: 2026-07-14
 - **完成时间**: 2026-07-14
-- **Commit**: (本 commit)
+- **Commit**: 829cda5
 - **读过源码**:
   - `mlx5_core/pci_irq.c:227-231` — `irq_int_handler`：极简分发器，只 `atomic_notifier_call_chain(nh, 0, NULL)`，不读任何硬件。重活延迟到 notifier 订阅者的回调
   - `mlx5_core/pci_irq.c:275-324` — `request_irq` 调用：`pci_irq_vector(pdev, i)` 拿 Linux IRQ 号，`request_irq(virq, handler, 0, name, &irq->nh)`，dev_id 用 `&irq->nh`（notifier head）
