@@ -17,7 +17,7 @@
 | T01-hello-module | 内核模块骨架 + Makefile | S0 | — | **completed** | 8d446c9 | 2026-07-07 |
 | T02-pci-probe | PCI probe + BAR0 + 设备结构体 | S1 | **M0** | **completed** | e64c325 | 2026-07-07 |
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
-| T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | (本 commit) | 2026-07-14 |
+| T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | 829cda5 | 2026-07-14 |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | pending | — | — |
 | T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
 | T07-fw-poll-enable | 固件引导 1：poll + ENABLE_HCA | S4 | — | pending | — | — |
