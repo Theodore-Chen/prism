@@ -437,7 +437,28 @@
 
 > 跨 task 的反复出现的问题、踩过的硬件坑、与 PRM 文档不一致的地方，集中记录在这里方便回溯。
 
-- _（待记录）_
+- **T06 大步实现回退与知识沉淀（2026-08-23，代码归档于 `t06-wip` 分支 08db551）**
+
+  **背景**：原 T06（EQE+completion）按 task.json 排在固件引导任务之前，与硬件依赖倒置（固件不引导完连 ALLOC_UAR 都拒收），被迫在单任务内吞下"引导+邮箱链+caps+EQ+中断"，~1000 行无 checkpoint，两次死机后无法定位，决定回退并拆分为 T06a/T06b/T07/T08/T09/T10 六个子任务重做（见 task.json）。
+
+  **① 字节偏移实证表（全部经硬件验证，t06-wip 分支实现）**
+  - mailbox 块 576B：`data[512] + rsvd0[48] + next(be64) + block_num(be32) + rsvd1 + token + ctrl_sig + sig`——**rsvd1 在 token 之前**（字段序错位 → delivery 0x2 TOK_ERR）；块 DMA 地址必须 **1KB 对齐**（错位 → delivery 0x4/0x5）
+  - `manage_pages_in`：function_id @bytes[10:12]、input_num_entries @bytes[12:16]、pas[i] @16+8i；op_mod GIVE=1/TAKE=2
+  - `query_pages_out`：num_pages @bytes[12:16]（be32）；`manage_pages_out`：output_num_entries @bytes[8:12]
+  - `query_issi_out`：**112B 整**（outlen 不足 → 0x51），supported_issi_dw0 @bytes[108:112]；`set_issi_in`：current_issi @bytes[10:12]
+  - `access_register_in`：register_id @bytes[10:12]
+  - caps（payload 相对）：log_max_qp c[19]bits3-7 / pkey c[50..51] / num_ports c[55] / cmdif_checksum c[66] / uar_4k c[72] / log_uar_page_sz c[146..147]；查询 op_mod=(type<<1)|cur（max=1/cur=0）
+  - `create_eq_in`：eqc 64B @payload0（log_eq_size bits99-103、uar_page bits104-127=eqc[13..15]）、event_bitmask @payload72、pas @payload256、inlen=272+8/页；`create_eq_out` eq_number @**byte 11**；`alloc_uar_out` uar @bytes[9:12]
+  - EQ doorbell：BAR0 + uar_idx*4K + 0x40（arm）/0x48（仅更新），值 `(ci&0xffffff)|(eqn<<24)` 大端
+
+  **② known-good caps profile（FW 14.32.1908 实证）**：klm(c[35]bits3-7)<=18、bytes c[66..67]=0、c[82]&=~3、c[162..163]=0，**不动 c[19]/c[50]/c[146]**。反面现象：按 v5.15 语义写 log_max_qp/pkey/log_uar_page_sz → 固件拒绝一切 init 页 give（0x4E2106 "failed to read io or write host mem"），某轮还出现后续链式命令 delivery 0x1（sig error）。语义最小化（哪个字段是"开关"）为 T08 遗留实验。
+
+  **③ syndrome/status 速查**：status 0x50=bad input length、0x51=bad output length；syndrome 是 **out bytes[4:8] 的 32 位 BE**（截断打印会少 8 位）：0x4D99EF=query_issi bad outlen、0x4E2106=manage_pages 读写主机内存失败、0x9074AA=create_eq bad input len（社区 syndrome 表：gist.github.com/lukego/8b4e567f4d5c4b60da6545e063888391）
+
+  **④ CREATE_EQ 未解之谜**：4KB/log6/1pas/inlen280 被拒 0x9074AA；inlen 梯度 288/336/528 全同拒（pas 数不变）；64KB/log12/64pas 尝试后死机（是否被接受未知）。mlx5_core 在本机从不发单页 EQ（其 EQ 均 64 页起）——最小 pas 覆盖要求待 T09 阶梯测定。
+
+  **⑤ 两次 panic 复盘与风控工具箱**：两次均死在 insmod（probe 执行中）、CREATE_EQ 门后代码（arm/enable_irq/事件模式）从未安全执行过。教训固化：风险分级上机（eq_irq 参数：先"不点火"跑通 CREATE_EQ+arm+teardown，再单独点亮中断）；硬中断 printk 必须 dev_warn_ratelimited；风暴护栏（连续空中断超限 → disable_irq_nosync）；黑匣子记录器必须落 **/var/tmp**（磁盘backed，逐行 sync）——/tmp 是 tmpfs，断电即失（第一次现场就这么丢的）。mlx5_core debugfs 命令统计（/sys/kernel/debug/mlx5/<bdf>/commands/）是行为对照的免费基准。
+
 
 ## 修改 DESIGN.md 的记录
 
