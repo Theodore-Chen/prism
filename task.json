@@ -400,7 +400,7 @@
       "title": "CMDQ 轮询模式 invoke（等待 + 状态解析）",
       "phase": "S3",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T05-cmdq-submit"
       ],

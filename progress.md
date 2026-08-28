@@ -19,11 +19,12 @@
 | T03-dma-eq-alloc | DMA mailbox + EQ 分配 | S2 | — | **completed** | 693448b | 2026-07-14 |
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | 829cda5 | 2026-07-14 |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | 29ffcf0 | 2026-08-09 |
-| T06-cmdq-complete | CMDQ 响应处理（completion） | S3 | — | pending | — | — |
-| T07-fw-poll-enable | 固件引导 1：poll + ENABLE_HCA | S4 | — | pending | — | — |
-| T08-fw-pages | 固件引导 2：QUERY/MANAGE_PAGES | S4 | — | pending | — | — |
-| T09-fw-caps | 固件引导 3：QUERY_HCA_CAP 对比 | S4 | — | pending | — | — |
-| T10-fw-init-hca | 固件引导 4：INIT_HCA → OPERATIONAL | S4 | **M1** | pending | — | — |
+| T06a-cmdq-invoke-poll | CMDQ 轮询模式 invoke（等待 + 状态解析） | S3 | — | **completed** | 0678082 | 2026-08-28 |
+| T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | pending | — | — |
+| T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | pending | — | — |
+| T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | pending | — | — |
+| T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | pending | — | — |
+| T10-eq-irq-enable | MSI-X 点亮 + 硬中断消费 EQE（分级放量） | S5 | — | pending | — | — |
 | T11-tracepoints | ftrace tracepoint 插桩 | S6 | — | pending | — | — |
 | T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | pending | — | — |
 | T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | pending | — | — |
@@ -253,18 +254,40 @@
 
 ---
 
-### T06-cmdq-complete
+### T06a-cmdq-invoke-poll
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed
+- **开始时间**: 2026-08-28
+- **完成时间**: 2026-08-28
+- **Commit**: 0678082
+- **读过源码**:
+  - 实现主体从 `t06-wip` 分支（08db551，硬件已验证）拣选裁剪：去掉邮箱链（T06b）与事件模式（T09/T10），只保留轮询路径
+  - `mlx5_core/cmd.c` (v5.15) `cmd_status_to_err` — status→errno 映射表：0x2/0x3 BAD_OP/BAD_PARAM→-EINVAL、0x4 BAD_SYS_STATE→-EIO、0x7 RES_BUSY→-EBUSY、0x50/0x51 BAD_INP/OUTP_LEN→-EIO。prism 统一 -EIO，对本次实测值 0x4 与 mlx5_core 一致；细化映射推迟到有真实调用方需要区分 errno 时
+  - T05 已读的 `cmd.c` `poll_timeout`（轮询判完成）、`cmd_work_handler`（描述符填充序）继续沿用
+- **关键决策**:
+  - **拣选而非重写**：slot 位图分配 + token 递增（跳 0）+ OWNER 轮询 + 两层状态解析全部来自 t06-wip 已上机验证的代码，只做减法（裁掉 chain_alloc/fill/drain、completion/comp_handler、page_queue 保留位），最大化"已在硬件上对过"的代码占比
+  - **inline-only 边界**：invoke 校验 in_len==out_len==16，邮箱链留给 T06b——本任务验收命令（ENABLE_HCA/QUERY_PAGES/坏 opcode）全是 16B 头命令
+  - **超时泄露 slot 位**：-ETIMEDOUT 不清 slot 位（固件可能迟到写回，复用 slot 会别名），与 mlx5_core 行为一致；坏 opcode 探针即使超时也只烧一个 slot，probe 干净退出
+  - **自检失败 → probe 失败**：invoke 从 T05 探索性探针升级为承载性原语（T07+ 引导链全建在它上面），失败必须硬失败
+- **遇到的问题与解决**:
+  - **Makefile 默认目标陷阱复发**：`all:` 修复当时只提交在 t06-wip 上，回退时一起退掉——裸 `make` 又落到 `compile_commands` 目标不链接 .ko，磁盘残留 8/23 的 v0.7 旧二进制（含 CREATE_EQ panic 路径）。修复带回 main，构建后以 `modinfo version=0.6` 确认新二进制。教训：构建系统修复必须进 main，不能只活在特性分支
+- **与设计的偏差**: status→errno 暂不细分（统一 -EIO，日志带 status/syndrome），等调用方需要区分时再引入映射表
+- **exit_criteria 验证结果**:
+  - compile: `make` 通过（LD [M] mlx5_prism.ko）；checkpatch 5 文件 0 errors 0 warnings 0 checks
+  - load: 双口均 `cmdq poll self-test: ENABLE_HCA ok`
+  - functional:
+    - `QUERY_PAGES(boot) x10 ok, boot pages=6`（双口一致，与 t06-wip 实证及 mlx5_core 量级一致；单条往返 ~73µs）
+    - 坏 opcode 0xdead：`command status 0x4, syndrome 0x408b33`，~150µs 快速拒绝返回 -EIO（非超时）——固件对未知 opcode 走正常两层错误体系，不沉默
+    - 100 次 insmod/rmmod：100×INSMOD OK + 100×RMMOD OK；黑匣子 /var/tmp/t06a_live.log（2239 行）零 WARNING/Oops/BUG/超时/泄露，boot pages 恒 6
+  - manual: dmesg 无超时记录；/proc/interrupts 双向量计数 0（MSI-X 全程屏蔽，零点火）
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: OWNER 位为什么翻转而不是清零？区分了固件的哪几种状态？**
+    A: status_own bit0 是所有权：驱动置 1（OWNER_HW）移交 slot，固件写完响应后清 0 交回。一个 bit 区分三态——0=响应就绪、1=命令在途、超时仍 1=固件失联；且同一字节 bits[7:1] 顺带携带 delivery 状态，一次读同时拿到同步与状态
+  - **Q: status=0 但 delivery 非 0 可能吗？反过来呢？**
+    A: 都可能。delivery≠0 = 命令未被投递执行（token/sig/块对齐错，固件拒绝取件），此时固件根本没跑命令，status/syndrome 无意义（通常 0）。status≠0 + delivery=0 = 命令被执行但被拒（参数/状态机/长度），syndrome 给细因。检查顺序必须先 delivery 后 status
+  - **Q: 为什么读响应用 rmb() 而发命令用 wmb()？**
+    A: 发命令是写序问题：wmb() 保证描述符写对 PCIe DMA 消费者在 doorbell MMIO 写之前可见。读响应是读序问题：rmb() 保证先观察到所有权翻转（READ_ONCE status_own），之后的 out[] 读不被重排到翻转观察之前——否则可能读到固件未写完的旧响应。方向相反的两种排序需求
 
 ---
 
