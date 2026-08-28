@@ -4,15 +4,18 @@
  *
  * T03: allocate the 4 KiB command-descriptor ring via dma_alloc_coherent.
  * T05: publish the ring DMA address to the init segment, build command
- *	descriptors and ring the doorbell. A boot self-test fires ENABLE_HCA
- *	and polls the ownership bit to confirm the firmware processed the
- *	doorbell. CMDQ boot completions are poll-driven (matching mlx5_core's
- *	CMD_MODE_POLLING); the EQ/interrupt completion path arrives in T06
- *	once a real Event Queue exists.
+ *	descriptors and ring the doorbell.
+ * T06a: full poll-mode round trip — slot registry (bitmap + rolling token),
+ *	blocking invoke() that polls the ownership bit, two-layer status
+ *	parsing (delivery status vs command status/syndrome) and clean
+ *	timeout handling. This matches mlx5_core's CMD_MODE_POLLING, which is
+ *	how the whole firmware bootstrap runs; the EQ/interrupt completion
+ *	path arrives in T09/T10.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/bitmap.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
@@ -23,6 +26,8 @@
 #include <linux/string.h>
 
 #include "mlx5_prism.h"
+
+#define MLX5_PRISM_CMD_TIMEOUT_MSECS	2000
 
 int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev)
 {
@@ -35,6 +40,8 @@ int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev)
 		return -ENOMEM;
 
 	spin_lock_init(&cmdq->lock);
+	cmdq->token_next = 0;
+	bitmap_zero(cmdq->slots, MLX5_PRISM_MAX_COMMANDS);
 
 	pci_info(dev->pdev,
 		 "cmdq ring: cpu=%pK dma=%pad size=%zu\n",
@@ -115,51 +122,116 @@ int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev)
 	return 0;
 }
 
-void mlx5_prism_cmdq_submit(struct mlx5_prism_dev *dev, int idx,
-			    u16 opcode, u16 op_mod,
-			    dma_addr_t in_ptr, u32 in_len,
-			    dma_addr_t out_ptr, u32 out_len)
+int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
+			   u16 opcode, u16 op_mod,
+			   u8 *in, u32 in_len, u8 *out, u32 out_len)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
 	struct mlx5_prism_cmd_layout *lay;
-	unsigned long flags;
+	unsigned long deadline, flags;
+	u8 delivery, status, own = MLX5_PRISM_CMD_OWNER_HW;
+	u32 syndrome;
+	int idx;
 
-	lay = cmdq->buf + (idx << cmdq->log_stride);
+	if (in_len != MLX5_PRISM_CMD_HDR_SIZE ||
+	    out_len != MLX5_PRISM_CMD_HDR_SIZE)
+		return -EINVAL;
 
 	spin_lock_irqsave(&cmdq->lock, flags);
 
+	/*
+	 * All slots are equal for now; the top slot becomes the reserved
+	 * MANAGE_PAGES queue when T07 introduces page commands.
+	 */
+	idx = find_first_zero_bit(cmdq->slots, cmdq->max_cmds);
+	if (idx >= cmdq->max_cmds) {
+		spin_unlock_irqrestore(&cmdq->lock, flags);
+		return -EBUSY;
+	}
+	__set_bit(idx, cmdq->slots);
+
+	cmdq->token_next++;
+	if (!cmdq->token_next)
+		cmdq->token_next = 1;
+
+	lay = cmdq->buf + (idx << cmdq->log_stride);
 	memset(lay, 0, sizeof(*lay));
 	lay->type = MLX5_PRISM_PCI_CMD_XPORT;
 	lay->inlen = cpu_to_be32(in_len);
-	lay->in_ptr = cpu_to_be64(in_ptr);
-	/* Inline 16-byte command header: opcode at bytes[0:1], op_mod at[6:7]. */
+	lay->in_ptr = 0;
+	/* Inline 16-byte header: opcode at [0:2], op_mod at [6:8], args at [8:16]. */
 	lay->in[0] = cpu_to_be32((u32)opcode << 16);
 	lay->in[1] = cpu_to_be32((u32)op_mod);
-	lay->out_ptr = cpu_to_be64(out_ptr);
+	memcpy(&lay->in[2], in + 8, 8);
+	lay->out_ptr = 0;
 	lay->outlen = cpu_to_be32(out_len);
+	lay->token = cmdq->token_next;
 	lay->status_own = MLX5_PRISM_CMD_OWNER_HW;
 	lay->sig = ~mlx5_prism_xor8(lay, sizeof(*lay));
 
 	/*
-	 * Order the descriptor (and any mailbox writes) before the doorbell MMIO
-	 * write. wmb() — not smp_wmb() — because the consumer is the firmware
-	 * reading via PCIe DMA, not another CPU.
+	 * Order the descriptor writes before the doorbell MMIO write. wmb() —
+	 * not smp_wmb() — because the consumer is the firmware reading via
+	 * PCIe DMA, not another CPU.
 	 */
 	wmb();
 	iowrite32be(1 << idx, &dev->iseg->cmd_dbell);
 
 	spin_unlock_irqrestore(&cmdq->lock, flags);
+
+	deadline = jiffies + msecs_to_jiffies(MLX5_PRISM_CMD_TIMEOUT_MSECS);
+	while (time_before(jiffies, deadline)) {
+		own = READ_ONCE(lay->status_own);
+		if (!(own & MLX5_PRISM_CMD_OWNER_HW))
+			break;
+		usleep_range(10, 20);
+	}
+
+	if (own & MLX5_PRISM_CMD_OWNER_HW) {
+		/*
+		 * The slot bit stays set: the firmware may still complete the
+		 * descriptor long after we gave up, and a stale slot must not
+		 * be handed to a new command (mlx5_core leaks it too).
+		 */
+		pci_err(dev->pdev,
+			"opcode 0x%x: no ownership handover in %d ms, slot %d leaked\n",
+			opcode, MLX5_PRISM_CMD_TIMEOUT_MSECS, idx);
+		return -ETIMEDOUT;
+	}
+
+	/* Read the descriptor only after observing the ownership handover. */
+	rmb();
+	delivery = own >> 1;
+	status = (be32_to_cpu(lay->out[0]) >> 24) & 0xff;
+	/* Syndrome is the full be32 at out bytes[4:8] (fw writes e.g. 0x4d99ef). */
+	syndrome = be32_to_cpu(lay->out[1]) & 0xffffff;
+	memcpy(out, lay->out, MLX5_PRISM_CMD_HDR_SIZE);
+
+	spin_lock_irqsave(&cmdq->lock, flags);
+	__clear_bit(idx, cmdq->slots);
+	spin_unlock_irqrestore(&cmdq->lock, flags);
+
+	if (delivery) {
+		pci_err(dev->pdev, "opcode 0x%x: delivery status 0x%x\n",
+			opcode, delivery);
+		return -EIO;
+	}
+	if (status) {
+		pci_err(dev->pdev,
+			"opcode 0x%x: command status 0x%x, syndrome 0x%06x\n",
+			opcode, status, syndrome);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
 {
-	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
-	struct mlx5_prism_cmd_layout *lay;
-	unsigned long deadline;
-	u8 own, status;
-	const int idx = 0;
-
-	lay = cmdq->buf + (idx << cmdq->log_stride);
+	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	u32 boot_pages = 0;
+	int i, err;
 
 	if (ioread32be(&dev->iseg->initializing) >> 31) {
 		pci_warn(dev->pdev, "cmdq self-test: firmware still initializing\n");
@@ -169,34 +241,51 @@ int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
 	/*
 	 * ENABLE_HCA is the canonical first command the firmware accepts (the
 	 * fw revision lives in the init segment, so there is no QUERY_FW on
-	 * ConnectX-4 Lx). Its input/output are both a 16-byte header, so no
-	 * mailbox is needed.
+	 * ConnectX-4 Lx). Header-only command — exercises the full poll path.
 	 */
-	pci_info(dev->pdev, "cmdq self-test: submitting ENABLE_HCA\n");
-	mlx5_prism_cmdq_submit(dev, idx, MLX5_PRISM_CMD_OP_ENABLE_HCA, 0,
-			       0, MLX5_PRISM_CMD_HDR_SIZE,
-			       0, MLX5_PRISM_CMD_HDR_SIZE);
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_ENABLE_HCA, 0,
+				     in, sizeof(in), out, sizeof(out));
+	if (err)
+		return err;
+	pci_info(dev->pdev, "cmdq poll self-test: ENABLE_HCA ok\n");
 
-	deadline = jiffies + msecs_to_jiffies(2000);
-	do {
-		own = READ_ONCE(lay->status_own);
-		if (!(own & MLX5_PRISM_CMD_OWNER_HW))
-			break;
-		usleep_range(10, 20);
-	} while (time_before(jiffies, deadline));
-
-	if (own & MLX5_PRISM_CMD_OWNER_HW) {
-		pci_err(dev->pdev,
-			"cmdq self-test: doorbell not honoured within 2s\n");
-		return -ETIMEDOUT;
+	/*
+	 * QUERY_PAGES(boot): side-effect-free probe that is also the first
+	 * real bootstrap command (T07 gives these pages to the firmware).
+	 * num_pages rides in the inline out bytes[12:16].
+	 */
+	for (i = 0; i < 10; i++) {
+		err = mlx5_prism_cmdq_invoke(dev,
+					     MLX5_PRISM_CMD_OP_QUERY_PAGES,
+					     MLX5_PRISM_QUERY_PAGES_BOOT,
+					     in, sizeof(in), out, sizeof(out));
+		if (err) {
+			pci_err(dev->pdev,
+				"cmdq poll self-test: QUERY_PAGES(boot) failed at %d/10: %d\n",
+				i + 1, err);
+			return err;
+		}
+		boot_pages = mlx5_prism_get_be32(out + 12);
 	}
-
-	/* Read descriptor fields after observing the ownership handover. */
-	rmb();
-	status = own >> 1;
 	pci_info(dev->pdev,
-		 "cmdq self-test: doorbell honoured, desc_status=%u out_status=%u\n",
-		 status, (be32_to_cpu(lay->out[0]) >> 24) & 0xff);
+		 "cmdq poll self-test: QUERY_PAGES(boot) x10 ok, boot pages=%u\n",
+		 boot_pages);
+
+	/* Bad opcode: the firmware must answer with a status, not silence. */
+	err = mlx5_prism_cmdq_invoke(dev, 0xdead, 0,
+				     in, sizeof(in), out, sizeof(out));
+	if (!err) {
+		pci_err(dev->pdev,
+			"cmdq self-test: bad opcode 0xdead unexpectedly ok\n");
+		return -EINVAL;
+	}
+	if (err == -ETIMEDOUT) {
+		pci_err(dev->pdev, "cmdq self-test: bad opcode 0xdead timed out\n");
+		return err;
+	}
+	pci_info(dev->pdev,
+		 "cmdq poll self-test: bad opcode 0xdead rejected fast (%d)\n",
+		 err);
 
 	return 0;
 }

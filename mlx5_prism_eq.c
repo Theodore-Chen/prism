@@ -4,7 +4,7 @@
  *
  * T03: allocate one 4 KiB EQ ring buffer (64 EQEs of 64 B each) via
  * dma_alloc_coherent. The firmware writes Event Queue Entries here and
- * raises an MSI-X interrupt (T04 wires the IRQ; T06 consumes EQEs).
+ * raises an MSI-X interrupt (T04 wires the IRQ; T09 consumes EQEs).
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt

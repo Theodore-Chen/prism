@@ -16,7 +16,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.5"
+#define MLX5_PRISM_DRV_VERSION	"0.6"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -33,7 +33,11 @@
 #define MLX5_PRISM_PCI_CMD_XPORT	7
 #define MLX5_PRISM_CMD_OWNER_HW		0x1
 #define MLX5_PRISM_CMD_OP_ENABLE_HCA	0x104
+#define MLX5_PRISM_CMD_OP_QUERY_PAGES	0x107
 #define MLX5_PRISM_CMD_HDR_SIZE		16
+
+/* QUERY_PAGES op_mod (mlx5_ifc.h MLX5_QUERY_PAGES_IN_OP_MOD_*). */
+#define MLX5_PRISM_QUERY_PAGES_BOOT	1
 
 struct mlx5_prism_iseg {
 	__be32	fw_rev;			/* [minor hi16][major lo16] */
@@ -81,6 +85,8 @@ struct mlx5_prism_cmdq {
 	u8		log_sz;		/* firmware-reported queue geometry */
 	u8		log_stride;
 	int		max_cmds;
+	u16		token_next;	/* rolling token; 0 is reserved */
+	DECLARE_BITMAP(slots, MLX5_PRISM_MAX_COMMANDS);
 	spinlock_t	lock;		/* serialise producers (used from T05) */
 };
 
@@ -127,6 +133,12 @@ static inline u16 mlx5_prism_cmdif_rev(const struct mlx5_prism_dev *dev)
 	return ioread32be(&dev->iseg->cmdif_rev_fw_sub) >> 16;
 }
 
+/* Big-endian field accessor (avoids asm/unaligned.h dependencies). */
+static inline u32 mlx5_prism_get_be32(const u8 *p)
+{
+	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
 extern const struct pci_device_id mlx5_prism_pci_ids[];
 
 int mlx5_prism_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
@@ -135,10 +147,18 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev);
 int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_cmdq_free(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev);
-void mlx5_prism_cmdq_submit(struct mlx5_prism_dev *dev, int idx,
-			    u16 opcode, u16 op_mod,
-			    dma_addr_t in_ptr, u32 in_len,
-			    dma_addr_t out_ptr, u32 out_len);
+
+/*
+ * Blocking CMDQ round trip in poll mode: register a slot under cmdq->lock,
+ * ring the doorbell, poll the ownership bit, parse status/syndrome, copy the
+ * inline out back. `in`/`out` are full 16-byte command buffers — bytes[0:8]
+ * of `in` are the opcode/op_mod passed separately, bytes[8:16] are
+ * caller-set inline args. Mailbox chains (payload beyond the inline header)
+ * arrive in T06b; the EQ/interrupt completion path in T09/T10.
+ */
+int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
+			   u16 opcode, u16 op_mod,
+			   u8 *in, u32 in_len, u8 *out, u32 out_len);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);

@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
 
+# Default goal — must be the first target in the file, otherwise bare
+# "make" falls through to compile_commands below and never links the .ko.
+all:
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR)
+
+.PHONY: all
+
 obj-m := mlx5_prism.o
 
 mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \

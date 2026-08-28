@@ -4,8 +4,8 @@
  *
  * T04: allocate one MSI-X vector and register a minimal handler that
  * only counts invocations. The vector is left masked (IRQF_NO_AUTOEN)
- * because the firmware has no EQ bound to it yet — T07 enables it after
- * CREATE_EQ. T06 extends the handler to actually consume EQEs.
+ * because the firmware has no EQ bound to it yet — T10 enables it after
+ * the EQ is proven in poll mode (T09).
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt

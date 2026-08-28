@@ -108,8 +108,13 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_irq;
 
-	/* T05: prove the doorbell path end-to-end (non-fatal boot probe). */
-	mlx5_prism_cmdq_selftest(dev);
+	/*
+	 * T06a: prove the blocking poll round trip (ENABLE_HCA, QUERY_PAGES,
+	 * bad opcode) before T07 starts mutating firmware state.
+	 */
+	err = mlx5_prism_cmdq_selftest(dev);
+	if (err)
+		goto err_free_irq;
 
 	return 0;
 
