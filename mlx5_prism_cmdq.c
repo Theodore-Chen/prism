@@ -11,6 +11,8 @@
  *	timeout handling. This matches mlx5_core's CMD_MODE_POLLING, which is
  *	how the whole firmware bootstrap runs; the EQ/interrupt completion
  *	path arrives in T09/T10.
+ * T06b: mailbox chains — payload beyond the 16-byte inline header travels
+ *	through 1 KiB-aligned 576-byte blocks linked by DMA next pointers.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -122,20 +124,125 @@ int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev)
 	return 0;
 }
 
+/*
+ * Mailbox chain helpers (PRM §4.2.2). Payload beyond the 16-byte inline
+ * header travels in 576-byte blocks linked by DMA next pointers, numbered
+ * from 0 at the head. Blocks are laid out at a 1 KiB stride — mlx5_core
+ * serves them from a dma_pool with 1 KiB alignment and the firmware rejects
+ * misaligned block pointers (delivery stat 0x4/0x5). sig/ctrl_sig stay zero:
+ * this firmware defaults to mailbox checksums disabled.
+ */
+static struct mlx5_prism_cmd_block *
+mlx5_prism_chain_alloc(struct mlx5_prism_dev *dev, int n, dma_addr_t *dma)
+{
+	struct mlx5_prism_cmd_block *blks;
+	int i;
+
+	blks = dma_alloc_coherent(&dev->pdev->dev,
+				  n * MLX5_PRISM_CMD_BLOCK_STRIDE,
+				  dma, GFP_KERNEL);
+	if (!blks)
+		return NULL;
+
+	for (i = 0; i < n; i++) {
+		struct mlx5_prism_cmd_block *b;
+
+		b = (struct mlx5_prism_cmd_block *)
+			((u8 *)blks + i * MLX5_PRISM_CMD_BLOCK_STRIDE);
+		b->next = cpu_to_be64(i + 1 < n ?
+				      *dma + (i + 1) *
+				      MLX5_PRISM_CMD_BLOCK_STRIDE : 0);
+		b->block_num = cpu_to_be32(i);
+	}
+	return blks;
+}
+
+static struct mlx5_prism_cmd_block *
+mlx5_prism_chain_at(struct mlx5_prism_cmd_block *blks, int i)
+{
+	return (struct mlx5_prism_cmd_block *)
+		((u8 *)blks + i * MLX5_PRISM_CMD_BLOCK_STRIDE);
+}
+
+static void mlx5_prism_chain_token(struct mlx5_prism_cmd_block *blks,
+				   int n, u8 token)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+		mlx5_prism_chain_at(blks, i)->token = token;
+}
+
+static void mlx5_prism_chain_fill(struct mlx5_prism_cmd_block *blks, int n,
+				  const u8 *src, size_t len)
+{
+	int i;
+
+	for (i = 0; i < n && len; i++) {
+		size_t copy = min_t(size_t, len,
+				    MLX5_PRISM_CMD_DATA_BLOCK_SIZE);
+
+		memcpy(mlx5_prism_chain_at(blks, i)->data, src, copy);
+		src += copy;
+		len -= copy;
+	}
+}
+
+static void mlx5_prism_chain_drain(struct mlx5_prism_cmd_block *blks, int n,
+				   u8 *dst, size_t len)
+{
+	int i;
+
+	for (i = 0; i < n && len; i++) {
+		size_t copy = min_t(size_t, len,
+				    MLX5_PRISM_CMD_DATA_BLOCK_SIZE);
+
+		memcpy(dst, mlx5_prism_chain_at(blks, i)->data, copy);
+		dst += copy;
+		len -= copy;
+	}
+}
+
 int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 			   u16 opcode, u16 op_mod,
 			   u8 *in, u32 in_len, u8 *out, u32 out_len)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
 	struct mlx5_prism_cmd_layout *lay;
+	struct mlx5_prism_cmd_block *in_blks = NULL, *out_blks = NULL;
+	dma_addr_t in_dma = 0, out_dma = 0;
+	size_t in_pay, out_pay, chain_max;
 	unsigned long deadline, flags;
 	u8 delivery, status, own = MLX5_PRISM_CMD_OWNER_HW;
 	u32 syndrome;
-	int idx;
+	int err, idx, n_in, n_out;
 
-	if (in_len != MLX5_PRISM_CMD_HDR_SIZE ||
-	    out_len != MLX5_PRISM_CMD_HDR_SIZE)
+	chain_max = MLX5_PRISM_CMD_DATA_BLOCK_SIZE * MLX5_PRISM_CMD_MAX_CHAIN;
+	if (in_len < MLX5_PRISM_CMD_HDR_SIZE ||
+	    out_len < MLX5_PRISM_CMD_HDR_SIZE ||
+	    in_len > MLX5_PRISM_CMD_HDR_SIZE + chain_max ||
+	    out_len > MLX5_PRISM_CMD_HDR_SIZE + chain_max)
 		return -EINVAL;
+
+	in_pay = in_len - MLX5_PRISM_CMD_HDR_SIZE;
+	out_pay = out_len - MLX5_PRISM_CMD_HDR_SIZE;
+	n_in = DIV_ROUND_UP(in_pay, MLX5_PRISM_CMD_DATA_BLOCK_SIZE);
+	n_out = DIV_ROUND_UP(out_pay, MLX5_PRISM_CMD_DATA_BLOCK_SIZE);
+
+	if (n_in) {
+		in_blks = mlx5_prism_chain_alloc(dev, n_in, &in_dma);
+		if (!in_blks)
+			return -ENOMEM;
+		mlx5_prism_chain_fill(in_blks, n_in,
+				      in + MLX5_PRISM_CMD_HDR_SIZE, in_pay);
+	}
+	if (n_out) {
+		out_blks = mlx5_prism_chain_alloc(dev, n_out, &out_dma);
+		if (!out_blks) {
+			err = -ENOMEM;
+			goto err_free_in;
+		}
+	}
 
 	spin_lock_irqsave(&cmdq->lock, flags);
 
@@ -146,7 +253,8 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 	idx = find_first_zero_bit(cmdq->slots, cmdq->max_cmds);
 	if (idx >= cmdq->max_cmds) {
 		spin_unlock_irqrestore(&cmdq->lock, flags);
-		return -EBUSY;
+		err = -EBUSY;
+		goto err_free_out;
 	}
 	__set_bit(idx, cmdq->slots);
 
@@ -158,21 +266,25 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 	memset(lay, 0, sizeof(*lay));
 	lay->type = MLX5_PRISM_PCI_CMD_XPORT;
 	lay->inlen = cpu_to_be32(in_len);
-	lay->in_ptr = 0;
+	lay->in_ptr = cpu_to_be64(in_dma);
 	/* Inline 16-byte header: opcode at [0:2], op_mod at [6:8], args at [8:16]. */
 	lay->in[0] = cpu_to_be32((u32)opcode << 16);
 	lay->in[1] = cpu_to_be32((u32)op_mod);
 	memcpy(&lay->in[2], in + 8, 8);
-	lay->out_ptr = 0;
+	lay->out_ptr = cpu_to_be64(out_dma);
 	lay->outlen = cpu_to_be32(out_len);
 	lay->token = cmdq->token_next;
 	lay->status_own = MLX5_PRISM_CMD_OWNER_HW;
 	lay->sig = ~mlx5_prism_xor8(lay, sizeof(*lay));
+	if (in_blks)
+		mlx5_prism_chain_token(in_blks, n_in, cmdq->token_next);
+	if (out_blks)
+		mlx5_prism_chain_token(out_blks, n_out, cmdq->token_next);
 
 	/*
-	 * Order the descriptor writes before the doorbell MMIO write. wmb() —
-	 * not smp_wmb() — because the consumer is the firmware reading via
-	 * PCIe DMA, not another CPU.
+	 * Order the descriptor (and any mailbox writes) before the doorbell MMIO
+	 * write. wmb() — not smp_wmb() — because the consumer is the firmware
+	 * reading via PCIe DMA, not another CPU.
 	 */
 	wmb();
 	iowrite32be(1 << idx, &dev->iseg->cmd_dbell);
@@ -191,11 +303,15 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 		/*
 		 * The slot bit stays set: the firmware may still complete the
 		 * descriptor long after we gave up, and a stale slot must not
-		 * be handed to a new command (mlx5_core leaks it too).
+		 * be handed to a new command (mlx5_core leaks it too). The
+		 * mailbox chains leak with it — the firmware still holds their
+		 * DMA addresses, so freeing (and reusing) the memory could let
+		 * a late completion corrupt an unrelated command.
 		 */
 		pci_err(dev->pdev,
-			"opcode 0x%x: no ownership handover in %d ms, slot %d leaked\n",
-			opcode, MLX5_PRISM_CMD_TIMEOUT_MSECS, idx);
+			"opcode 0x%x: no ownership handover in %d ms, slot %d + %d mailbox blocks leaked\n",
+			opcode, MLX5_PRISM_CMD_TIMEOUT_MSECS, idx,
+			n_in + n_out);
 		return -ETIMEDOUT;
 	}
 
@@ -206,10 +322,22 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 	/* Syndrome is the full be32 at out bytes[4:8] (fw writes e.g. 0x4d99ef). */
 	syndrome = be32_to_cpu(lay->out[1]) & 0xffffff;
 	memcpy(out, lay->out, MLX5_PRISM_CMD_HDR_SIZE);
+	if (out_pay)
+		mlx5_prism_chain_drain(out_blks, n_out,
+				       out + MLX5_PRISM_CMD_HDR_SIZE, out_pay);
 
 	spin_lock_irqsave(&cmdq->lock, flags);
 	__clear_bit(idx, cmdq->slots);
 	spin_unlock_irqrestore(&cmdq->lock, flags);
+
+	if (out_blks)
+		dma_free_coherent(&dev->pdev->dev,
+				  n_out * MLX5_PRISM_CMD_BLOCK_STRIDE,
+				  out_blks, out_dma);
+	if (in_blks)
+		dma_free_coherent(&dev->pdev->dev,
+				  n_in * MLX5_PRISM_CMD_BLOCK_STRIDE,
+				  in_blks, in_dma);
 
 	if (delivery) {
 		pci_err(dev->pdev, "opcode 0x%x: delivery status 0x%x\n",
@@ -224,6 +352,18 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 	}
 
 	return 0;
+
+err_free_out:
+	if (out_blks)
+		dma_free_coherent(&dev->pdev->dev,
+				  n_out * MLX5_PRISM_CMD_BLOCK_STRIDE,
+				  out_blks, out_dma);
+err_free_in:
+	if (in_blks)
+		dma_free_coherent(&dev->pdev->dev,
+				  n_in * MLX5_PRISM_CMD_BLOCK_STRIDE,
+				  in_blks, in_dma);
+	return err;
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
@@ -286,6 +426,50 @@ int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
 	pci_info(dev->pdev,
 		 "cmdq poll self-test: bad opcode 0xdead rejected fast (%d)\n",
 		 err);
+
+	return 0;
+}
+
+/*
+ * T06b: mailbox-chain self-test. QUERY_ISSI (96 B payload out, single
+ * block) is the only >16 B command this firmware accepts before boot pages
+ * are given — QUERY_HCA_CAP draws status 0x4 / syndrome 0x2b69b6 at that
+ * stage (measured on both ports), it only becomes legal afterwards, so its
+ * 8-block chain is probed by the T07 bootstrap right after the boot-page
+ * give. Negotiating ISSI 1 here is also the first step of the T07
+ * bootstrap, and idempotent on this firmware.
+ */
+int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev)
+{
+	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 qout[MLX5_PRISM_CMD_HDR_SIZE + 96];
+	u8 sout[MLX5_PRISM_CMD_HDR_SIZE];
+	u8 sin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u32 supported;
+	int err;
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_ISSI, 0,
+				     qin, sizeof(qin), qout, sizeof(qout));
+	if (err)
+		return err;
+	supported = mlx5_prism_get_be32(qout + 108);
+	pci_info(dev->pdev,
+		 "mailbox self-test: QUERY_ISSI ok (1 block): current=%u supported=0x%x\n",
+		 (qout[10] << 8) | qout[11], supported);
+
+	if (supported & BIT(1)) {
+		/* current_issi: be16 at inline bytes[10:12]. */
+		sin[11] = 1;
+		err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_ISSI, 0,
+					     sin, sizeof(sin),
+					     sout, sizeof(sout));
+		if (err)
+			return err;
+		pci_info(dev->pdev, "mailbox self-test: ISSI set to 1\n");
+	} else {
+		pci_info(dev->pdev,
+			 "mailbox self-test: ISSI 1 unsupported, staying at 0\n");
+	}
 
 	return 0;
 }

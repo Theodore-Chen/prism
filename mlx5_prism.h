@@ -16,7 +16,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.6"
+#define MLX5_PRISM_DRV_VERSION	"0.7"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -32,9 +32,16 @@
 /* CMDQ protocol (PRM §4 / mlx5 cmd.c). */
 #define MLX5_PRISM_PCI_CMD_XPORT	7
 #define MLX5_PRISM_CMD_OWNER_HW		0x1
+#define MLX5_PRISM_CMD_OP_QUERY_HCA_CAP	0x100
 #define MLX5_PRISM_CMD_OP_ENABLE_HCA	0x104
 #define MLX5_PRISM_CMD_OP_QUERY_PAGES	0x107
+#define MLX5_PRISM_CMD_OP_QUERY_ISSI	0x10a
+#define MLX5_PRISM_CMD_OP_SET_ISSI	0x10b
 #define MLX5_PRISM_CMD_HDR_SIZE		16
+#define MLX5_PRISM_CMD_DATA_BLOCK_SIZE	512
+#define MLX5_PRISM_CMD_BLOCK_STRIDE	1024	/* mlx5 dma_pool align: pow2(576) */
+#define MLX5_PRISM_CMD_MAX_CHAIN		128	/* blocks per command (64 KiB payload) */
+#define MLX5_PRISM_CAP_BYTES		0x1000	/* cmd_hca_cap struct size */
 
 /* QUERY_PAGES op_mod (mlx5_ifc.h MLX5_QUERY_PAGES_IN_OP_MOD_*). */
 #define MLX5_PRISM_QUERY_PAGES_BOOT	1
@@ -71,12 +78,25 @@ struct mlx5_prism_cmd_layout {
 	u8	status_own;		/* bit0 = OWNER_HW; bits[7:1] = status */
 };
 
-/* Coherent mailbox block holding command data beyond the 16-byte inline hdr. */
-struct mlx5_prism_cmd_mailbox {
-	void		*buf;
-	dma_addr_t	dma;
-	size_t		size;
+/*
+ * Mailbox block (PRM §4.2.2 / mlx5 struct mlx5_cmd_prot_block). Payload
+ * beyond the 16-byte inline header travels in 576-byte blocks linked by
+ * DMA next pointers and numbered from 0; each block's DMA address must be
+ * 1 KiB aligned (mlx5_core serves them from a dma_pool with alignment
+ * roundup_pow_of_two(576) — misalignment draws delivery status 0x4/0x5).
+ */
+struct mlx5_prism_cmd_block {
+	u8	data[MLX5_PRISM_CMD_DATA_BLOCK_SIZE];
+	u8	rsvd0[48];
+	__be64	next;			/* dma of the following block, 0 if last */
+	__be32	block_num;		/* 0-based position in the chain */
+	u8	rsvd1;
+	u8	token;			/* must match the descriptor token */
+	u8	ctrl_sig;
+	u8	sig;
 };
+
+static_assert(sizeof(struct mlx5_prism_cmd_block) == 576);
 
 struct mlx5_prism_cmdq {
 	void		*buf;		/* cpu virtual address */
@@ -151,15 +171,17 @@ int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev);
 /*
  * Blocking CMDQ round trip in poll mode: register a slot under cmdq->lock,
  * ring the doorbell, poll the ownership bit, parse status/syndrome, copy the
- * inline out back. `in`/`out` are full 16-byte command buffers — bytes[0:8]
- * of `in` are the opcode/op_mod passed separately, bytes[8:16] are
- * caller-set inline args. Mailbox chains (payload beyond the inline header)
- * arrive in T06b; the EQ/interrupt completion path in T09/T10.
+ * inline out back. `in`/`out` are FULL command buffers — bytes[0:8] of `in`
+ * are the opcode/op_mod passed separately, bytes[8:16] are caller-set inline
+ * args, and bytes[16:len) travel through 1 KiB-aligned mailbox blocks
+ * (single block up to 512 B of payload, up to 128 blocks chained). The
+ * EQ/interrupt completion path arrives in T09/T10.
  */
 int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 			   u16 opcode, u16 op_mod,
 			   u8 *in, u32 in_len, u8 *out, u32 out_len);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
+int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);

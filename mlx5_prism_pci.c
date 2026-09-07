@@ -116,6 +116,11 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_irq;
 
+	/* T06b: mailbox chain — QUERY_ISSI (1-block out) + SET_ISSI. */
+	err = mlx5_prism_cmdq_mailbox_selftest(dev);
+	if (err)
+		goto err_free_irq;
+
 	return 0;
 
 err_free_irq:
