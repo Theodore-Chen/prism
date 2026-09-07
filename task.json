@@ -465,7 +465,7 @@
       "title": "多块邮箱链（576B 块 + 1KB 对齐 + token）",
       "phase": "S3",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T06a-cmdq-invoke-poll"
       ],
@@ -478,7 +478,8 @@
           "每块 DMA 地址必须 1KB 对齐（mlx5 dma_pool align=roundup_pow_of_two(576)=1024；错位 → delivery 0x4/0x5）",
           "命令 payload 从块偏移 0 开始，前 16B 头在描述符 inline 区",
           "inlen/outlen 必须覆盖完整结构：outlen 不足 → 0x51（QUERY_ISSI 实测需 112B）",
-          "fill（入链 memcpy）/ drain（出链 memcpy）/ token（防张冠李戴）"
+          "fill（入链 memcpy）/ drain（出链 memcpy）/ token（防张冠李戴）",
+          "硬件实证（2026-08-28 双口一致）：boot pages 之前唯一合法的 >16B 命令是 QUERY_ISSI——QUERY_HCA_CAP 在该阶段被拒 status 0x4 / syndrome 0x2b69b6，8 块链验证因此落在 T07（give 后第一时间）"
         ],
         "keywords": [
           "mailbox",
@@ -504,19 +505,18 @@
       "steps": [
         "1. chain_alloc / chain_fill / chain_drain / chain_token 帮助函数",
         "2. exec 扩展：in_ptr/out_ptr 指向链头 DMA，inlen/outlen 填总长",
-        "3. 验证 A：QUERY_HCA_CAP(max/cur) 4112B 链读取，hexdump 锚点检查（payload bytes[16..17]=log_max_srq_sz/log_max_qp_sz≈0x0f 0x0f）",
-        "4. 验证 B：QUERY_ISSI 112B out → SET_ISSI(1)",
-        "5. 失败路径链内存释放"
+        "3. 验证：QUERY_ISSI 112B out（单块链）→ SET_ISSI(1)",
+        "4. 失败路径链内存释放；超时路径链随 slot 一起泄露（固件仍持 DMA 地址，释放复用会被迟到完成写坏）"
       ],
       "exit_criteria": {
         "compile": "make 通过，checkpatch 无 ERROR",
-        "load": "dmesg 含 QUERY_HCA_CAP hexdump 与 'ISSI set to 1'",
+        "load": "dmesg 含 'QUERY_ISSI ok (1 block)' 与 'ISSI set to 1'",
         "functional": [
-          "QUERY_HCA_CAP 双 op_mod 成功且字段合理",
-          "QUERY_ISSI supported=0x2，SET_ISSI status=0"
+          "QUERY_ISSI supported=0x2（112B 单块链 drain 无错位），SET_ISSI status=0",
+          "多块（8 块）链验证移交 T07：boot pages give 后立即 QUERY_HCA_CAP(max/cur)"
         ],
         "manual_checks": [
-          "drain 后 out 缓冲与 hexdump 一致（无错位）"
+          "drain 后 out 缓冲字段位置正确（supported@+108 实测 0x2）"
         ]
       }
     },
@@ -570,6 +570,7 @@
         "2. host endianness：ACCESS_REG 写 reg 0x7004",
         "3. query boot pages → 分配 → 单条 give（专用 slot）",
         "4. initializing 轮询确认固件完成 boot",
+        "4.5 give 后第一时间 QUERY_HCA_CAP(max/cur) 4112B 双 op_mod——既是引导推进证明，也是 8 块邮箱链验证（hexdump 锚点 payload[16:18]=0f 0f，全零判 drain 失败）",
         "5. teardown：TEARDOWN_HCA → TAKE 回收 boot 页 → DISABLE_HCA"
       ],
       "exit_criteria": {
@@ -578,7 +579,8 @@
         "functional": [
           "give 被接受（status=0），initializing 清零",
           "rmmod 后 TAKE 回收全部 boot 页、无泄漏",
-          "rmmod 后 mlx5_core 可立即正常加载"
+          "rmmod 后 mlx5_core 可立即正常加载",
+          "QUERY_HCA_CAP(max/cur) 双 op_mod status=0，payload[16:18]=0f 0f（8 块链）"
         ],
         "manual_checks": [
           "100 次 insmod/rmmod"

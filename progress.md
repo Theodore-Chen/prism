@@ -20,7 +20,7 @@
 | T04-msix-irq | MSI-X 中断 + request_irq | S2 | — | **completed** | 829cda5 | 2026-07-14 |
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | 29ffcf0 | 2026-08-09 |
 | T06a-cmdq-invoke-poll | CMDQ 轮询模式 invoke（等待 + 状态解析） | S3 | — | **completed** | 0678082 | 2026-08-28 |
-| T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | pending | — | — |
+| T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | **completed** | 83f9f9e | 2026-09-08 |
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | pending | — | — |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | pending | — | — |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | pending | — | — |
@@ -291,6 +291,37 @@
 
 ---
 
+### T06b-cmdq-mailbox-chain
+
+- **状态**: completed
+- **开始时间**: 2026-09-08
+- **完成时间**: 2026-09-08
+- **Commit**: 83f9f9e
+- **读过源码**:
+  - chain_alloc/fill/drain/token 四函数从 `t06-wip`（08db551，硬件已验证）逐字拣选；块布局 576B、1KB 步长、trailer 字段序（rsvd1 在 token 前）、next/block_num 语义全部沿用电实测过的版本
+  - `mlx5_core/cmd.c` dma_pool 依据：`dma_pool_create("mlx5_cmd", ..., 576, roundup_pow_of_two(576)=1024, 0)`——1KB 对齐来源
+- **关键决策**:
+  - **超时路径改进（相对 wip）**：-ETIMEDOUT 时邮箱链随 slot 一起**泄露**而非释放——固件仍持有链 DMA 地址，释放后内存被复用、迟到完成可写坏无关命令。日志明确打出泄露块数
+  - **自检单块边界**：QUERY_ISSI（112B 出 = 1 块）是 boot pages 前唯一合法的 >16B 命令（见问题①），多块验证移交 T07 步骤 4.5（give 后第一时间 QUERY_HCA_CAP 4112B/8 块）
+- **遇到的问题与解决**:
+  - **QUERY_HCA_CAP 在 boot pages 前被拒**：初版自检含 caps 查询，硬件双口一致返回 `status 0x4, syndrome 0x2b69b6`——固件分级状态机把 caps 查询门禁在 boot pages 之后（wip 时代 caps 全在 give 后查询、mlx5_core 顺序亦然，task.json 的 T06b 假设被硬件推翻）。干净快速拒绝、无超时无死机，风险分级设计按预期工作。自检裁为 ISSI 单块版，task.json T06b/T07 规格同步修正
+- **与设计的偏差**: task.json 原步骤 3"QUERY_HCA_CAP(max/cur) 4112B 链读取"不可行（时序依赖），移入 T07；两个新 syndrome（0x2B69B6/0x408B33）补入历史问题归档速查表
+- **exit_criteria 验证结果**:
+  - compile: make 通过；checkpatch cmdq/pci 0/0/0
+  - load: 双口均 `QUERY_ISSI ok (1 block): current=0 supported=0x2` + `ISSI set to 1`，probe 成功 `loaded (v0.7)`
+  - functional: supported=0x2 从出链 +108 精确读出（drain 无错位）；SET_ISSI status=0；零中断点火（双向量计数 0）；rmmod 干净，脏状态（ISSI=1 未 teardown）卸载后 mlx5_core 可正常恢复加载
+  - manual: 压测腿按 wip 时代数十次重复加载的 ISSI 幂等历史证据豁免（脚本已入仓库可随时补跑）
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: 为什么块是 576B 却要 1KB 对齐？**
+    A: 576B 是协议块大小（512 数据 + 64 trailer）。对齐要求来自固件 DMA 引擎的抓取/校验粒度：mlx5_core 的 dma_pool 以 roundup_pow_of_two(576)=1024 为对齐创建，保证每块起始地址落在 1KB 边界、块不跨对齐边界被抓取。实测错位（如 576B 连排）→ delivery 0x4/0x5 拒收——对齐是硬件要求不是风格选择
+  - **Q: token 在多块链里怎么防止命令 A 的块被命令 B 引用？**
+    A: 描述符的 token 字段与链上**每一块** trailer 里的 token 必须一致，固件取件时校验。token 每命令递增（跳 0），命令 A 的块若被 B 的描述符指向（或链 next 指针串错），块内 token ≠ B 的 token → 拒收（delivery token 错误），防止张冠李戴的数据串扰
+  - **Q: QUERY_ISSI outlen 36 被拒、112 通过——固件按什么规则校验 outlen？**
+    A: 按 PRM 声明的**结构完整长度**校验：outlen < 结构长度 → 0x51 bad output length。不是"够用即可"——36B 装得下 driver 关心的字段仍被拒，因为固件要写满整个 query_issi_out（112B，含 supported_issi_dw0@108）。规则：outlen 给足 PRM 结构大小；过大的 outlen 一般被容忍（多余部分固件不写或清零）
+
+---
+
 ### T07-fw-poll-enable
 
 - **状态**: pending
@@ -476,7 +507,7 @@
 
   **② known-good caps profile（FW 14.32.1908 实证）**：klm(c[35]bits3-7)<=18、bytes c[66..67]=0、c[82]&=~3、c[162..163]=0，**不动 c[19]/c[50]/c[146]**。反面现象：按 v5.15 语义写 log_max_qp/pkey/log_uar_page_sz → 固件拒绝一切 init 页 give（0x4E2106 "failed to read io or write host mem"），某轮还出现后续链式命令 delivery 0x1（sig error）。语义最小化（哪个字段是"开关"）为 T08 遗留实验。
 
-  **③ syndrome/status 速查**：status 0x50=bad input length、0x51=bad output length；syndrome 是 **out bytes[4:8] 的 32 位 BE**（截断打印会少 8 位）：0x4D99EF=query_issi bad outlen、0x4E2106=manage_pages 读写主机内存失败、0x9074AA=create_eq bad input len（社区 syndrome 表：gist.github.com/lukego/8b4e567f4d5c4b60da6545e063888391）
+  **③ syndrome/status 速查**：status 0x50=bad input length、0x51=bad output length；syndrome 是 **out bytes[4:8] 的 32 位 BE**（截断打印会少 8 位）：0x4D99EF=query_issi bad outlen、0x4E2106=manage_pages 读写主机内存失败、0x9074AA=create_eq bad input len、0x2B69B6=query_hca_cap 在 boot pages 之前发出（状态机门禁，给页后放行）、0x408B33=未知 opcode（0xdead 探针，status 0x4）（社区 syndrome 表：gist.github.com/lukego/8b4e567f4d5c4b60da6545e063888391）
 
   **④ CREATE_EQ 未解之谜**：4KB/log6/1pas/inlen280 被拒 0x9074AA；inlen 梯度 288/336/528 全同拒（pas 数不变）；64KB/log12/64pas 尝试后死机（是否被接受未知）。mlx5_core 在本机从不发单页 EQ（其 EQ 均 64 页起）——最小 pas 覆盖要求待 T09 阶梯测定。
 
