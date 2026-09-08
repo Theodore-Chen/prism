@@ -16,7 +16,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.8"
+#define MLX5_PRISM_DRV_VERSION	"0.9"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -33,11 +33,13 @@
 #define MLX5_PRISM_PCI_CMD_XPORT	7
 #define MLX5_PRISM_CMD_OWNER_HW		0x1
 #define MLX5_PRISM_CMD_OP_QUERY_HCA_CAP	0x100
+#define MLX5_PRISM_CMD_OP_INIT_HCA	0x102
 #define MLX5_PRISM_CMD_OP_TEARDOWN_HCA	0x103
 #define MLX5_PRISM_CMD_OP_ENABLE_HCA	0x104
 #define MLX5_PRISM_CMD_OP_DISABLE_HCA	0x105
 #define MLX5_PRISM_CMD_OP_QUERY_PAGES	0x107
 #define MLX5_PRISM_CMD_OP_MANAGE_PAGES	0x108
+#define MLX5_PRISM_CMD_OP_SET_HCA_CAP	0x109
 #define MLX5_PRISM_CMD_OP_QUERY_ISSI	0x10a
 #define MLX5_PRISM_CMD_OP_SET_ISSI	0x10b
 #define MLX5_PRISM_CMD_OP_ACCESS_REG	0x805
@@ -145,6 +147,7 @@ struct mlx5_prism_fw {
 	u32		func_id;	/* reported by QUERY_PAGES, reused in gives */
 	u32		num_pages;	/* total given, reclaimed on teardown */
 	bool		active;		/* bootstrap entered; teardown may talk */
+	bool		initialized;	/* INIT_HCA ok; full teardown applies */
 	void		*pages[MLX5_PRISM_MAX_FW_PAGES];
 	dma_addr_t	pages_dma[MLX5_PRISM_MAX_FW_PAGES];
 };

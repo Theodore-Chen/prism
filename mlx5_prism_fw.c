@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mlx5_prism: firmware bootstrap, stage I (boot pages).
+ * mlx5_prism: firmware bootstrap.
  *
- * Mirrors mlx5_core's mlx5_function_enable boot leg:
+ * Mirrors mlx5_core's mlx5_function_enable:
  *   SET_ISSI -> boot pages -> wait for fw_initializing to clear ->
- *   ACCESS_REG(HOST_ENDIANNESS) -> QUERY_HCA_CAP probe.
- * SET_HCA_CAP, init pages and INIT_HCA are stage II (T08); the EQ work
- * (T09/T10) comes after the HCA is operational.
+ *   ACCESS_REG(HOST_ENDIANNESS) -> SET_HCA_CAP (known-good profile) ->
+ *   init pages -> INIT_HCA (OPERATIONAL).
  *
- * Teardown reverses the boot stage only: reclaim pages (MANAGE_PAGES/TAKE)
- * and DISABLE_HCA — exactly mlx5_core's failed-load path (reclaim_boot_pages
- * -> err_disable_hca). TEARDOWN_HCA belongs to the full teardown after
- * INIT_HCA and arrives with T08.
+ * Teardown reverses it. Once INIT_HCA succeeded this is the FULL teardown
+ * (mlx5_core's mlx5_function_teardown): TEARDOWN_HCA -> reclaim pages ->
+ * DISABLE_HCA. A bootstrap that failed before INIT_HCA gets the reduced
+ * failed-load path instead (reclaim + disable only — mlx5_core's
+ * reclaim_boot_pages: label).
  *
  * Field offsets below were verified against mlx5_ifc.h bit layouts on this
  * FW (14.32.1908) — see progress.md 历史问题归档 for the offset table.
@@ -23,6 +23,7 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -262,10 +263,81 @@ out:
 	return err;
 }
 
-int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
+/*
+ * Capability negotiation (stage II). The firmware cannot size its init
+ * working set until the driver has written the capability structure once
+ * (QUERY_PAGES(init) fails with "bad resource state" otherwise).
+ *
+ * The profile below replicates, byte for byte, the one configuration this
+ * CX-4 Lx fw (14.32.1908) is known to accept: writing the v5.15-ifc-named
+ * fields (log_max_qp @ byte 19, pkey_table_size @ 50, log_uar_page_sz @ 146)
+ * leaves it rejecting every init-pages MANAGE_PAGES with syndrome 0x4e2106
+ * ("failed to read io or write host mem"), and one attempt even drew a
+ * delivery signature error on the next mailbox command. The working bytes
+ * map to log_max_klm_list_size @ 35 (bits 3-7 capped at 18), cmdif_checksum
+ * and sigerr / feature flags in bytes 66-67 cleared, and two unidentified
+ * regions @ 82 and @ 162-163. Minimizing this against mlx5_core's
+ * handle_hca_cap profile is a deferred experiment (progress.md 归档).
+ */
+static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 {
+	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 sout[MLX5_PRISM_CMD_HDR_SIZE];
+	u8 *caps, *c;
 	int err;
 
+	caps = kzalloc(MLX5_PRISM_CMD_HDR_SIZE + MLX5_PRISM_CAP_BYTES,
+		       GFP_KERNEL);
+	if (!caps)
+		return -ENOMEM;
+	c = caps + MLX5_PRISM_CMD_HDR_SIZE;	/* capability payload */
+
+	/* The profile applies to the CURRENT caps (fw defaults), not max. */
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,
+				     qin, sizeof(qin), caps,
+				     MLX5_PRISM_CMD_HDR_SIZE +
+				     MLX5_PRISM_CAP_BYTES);
+	if (err)
+		goto out;
+
+	c[35] = (c[35] & (u8)~(0x1f << 3)) | (18 << 3);
+	memset(c + 66, 0, 2);
+	c[82] &= (u8)~0x3;
+	memset(c + 162, 0, 2);
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_HCA_CAP, 0,
+				     caps, MLX5_PRISM_CMD_HDR_SIZE +
+				     MLX5_PRISM_CAP_BYTES,
+				     sout, sizeof(sout));
+	if (err)
+		goto out;
+	pci_info(dev->pdev,
+		 "SET_HCA_CAP ok: profile known-good, num_ports=%u log_max_qp=%u\n",
+		 c[55], (c[19] >> 3) & 0x1f);
+
+	/* Read back: verifies the fw accepted and kept the profile. */
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,
+				     qin, sizeof(qin), caps,
+				     MLX5_PRISM_CMD_HDR_SIZE +
+				     MLX5_PRISM_CAP_BYTES);
+	if (err)
+		goto out;
+	pci_info(dev->pdev, "caps[post]: %64ph %64ph %64ph\n",
+		 caps, caps + 64, caps + 128);
+
+out:
+	kfree(caps);
+	return err;
+}
+
+int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
+{
+	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	u64 t_boot, t0;
+	int err;
+
+	t_boot = ktime_get_ns();
 	dev->fw.active = true;
 
 	err = mlx5_prism_fw_set_issi(dev);
@@ -317,7 +389,29 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 	if (err)
 		return err;
 
-	pci_info(dev->pdev, "fw bootstrap stage I ok (boot pages + caps probe)\n");
+	err = mlx5_prism_fw_set_hca_cap(dev);
+	if (err)
+		return err;
+
+	t0 = ktime_get_ns();
+	err = mlx5_prism_fw_supply_pages(dev, MLX5_PRISM_QUERY_PAGES_INIT,
+					 "init");
+	if (err)
+		return err;
+	pci_info(dev->pdev, "init pages supplied in %llu ms\n",
+		 (ktime_get_ns() - t0) / NSEC_PER_MSEC);
+
+	t0 = ktime_get_ns();
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_INIT_HCA, 0,
+				     in, sizeof(in), out, sizeof(out));
+	if (err)
+		return err;
+	dev->fw.initialized = true;
+	pci_info(dev->pdev, "INIT_HCA ok: HCA operational (%llu ms)\n",
+		 (ktime_get_ns() - t0) / NSEC_PER_MSEC);
+	pci_info(dev->pdev, "Bootstrap time: %llu ms\n",
+		 (ktime_get_ns() - t_boot) / NSEC_PER_MSEC);
+
 	return 0;
 }
 
@@ -336,10 +430,24 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
 	fw->active = false;
 
 	/*
+	 * With the HCA operational, stop it first: the firmware keeps DMA-ing
+	 * into the init pages until TEARDOWN_HCA quiesces it. Without INIT_HCA
+	 * (failed bootstrap) there is no consumer to stop — reclaim directly.
+	 */
+	if (fw->initialized) {
+		err = mlx5_prism_cmdq_invoke(dev,
+					     MLX5_PRISM_CMD_OP_TEARDOWN_HCA, 0,
+					     in, sizeof(in),
+					     out, sizeof(out));
+		if (err)
+			pci_warn(dev->pdev, "TEARDOWN_HCA failed: %d\n", err);
+		fw->initialized = false;
+	}
+
+	/*
 	 * Take mode: input_num_entries (bytes[12:16]) says how many the host
 	 * wants back; the firmware fills the returned addresses into the out
-	 * pas[] array. No TEARDOWN_HCA here — the HCA was never initialized
-	 * (that is T08); this matches mlx5_core's failed-load reclaim path.
+	 * pas[] array.
 	 */
 	remaining = fw->num_pages;
 	while (remaining && rounds++ < MLX5_PRISM_MAX_FW_PAGES) {
