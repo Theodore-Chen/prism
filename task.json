@@ -525,7 +525,7 @@
       "title": "固件引导 I：ISSI + 字节序 + boot pages + 回收",
       "phase": "S4",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T06b-cmdq-mailbox-chain"
       ],

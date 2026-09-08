@@ -21,7 +21,7 @@
 | T05-cmdq-submit | CMDQ 命令提交（doorbell） | S3 | — | **completed** | 29ffcf0 | 2026-08-09 |
 | T06a-cmdq-invoke-poll | CMDQ 轮询模式 invoke（等待 + 状态解析） | S3 | — | **completed** | 0678082 | 2026-08-28 |
 | T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | **completed** | 83f9f9e | 2026-09-08 |
-| T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | pending | — | — |
+| T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | pending | — | — |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | pending | — | — |
 | T10-eq-irq-enable | MSI-X 点亮 + 硬中断消费 EQE（分级放量） | S5 | — | pending | — | — |
@@ -319,6 +319,41 @@
     A: 描述符的 token 字段与链上**每一块** trailer 里的 token 必须一致，固件取件时校验。token 每命令递增（跳 0），命令 A 的块若被 B 的描述符指向（或链 next 指针串错），块内 token ≠ B 的 token → 拒收（delivery token 错误），防止张冠李戴的数据串扰
   - **Q: QUERY_ISSI outlen 36 被拒、112 通过——固件按什么规则校验 outlen？**
     A: 按 PRM 声明的**结构完整长度**校验：outlen < 结构长度 → 0x51 bad output length。不是"够用即可"——36B 装得下 driver 关心的字段仍被拒，因为固件要写满整个 query_issi_out（112B，含 supported_issi_dw0@108）。规则：outlen 给足 PRM 结构大小；过大的 outlen 一般被容忍（多余部分固件不写或清零）
+
+---
+
+### T07-fw-bootstrap-1
+
+- **状态**: completed
+- **开始时间**: 2026-09-08
+- **完成时间**: 2026-09-08
+- **Commit**: 10ccbad
+- **读过源码**:
+  - 实现全部从 `t06-wip`（08db551，硬件已验证）拣选：set_issi / set_host_endianness / query_pages / give_pages（单条 give）/ supply_pages（裁掉 wip 的批量大写回退——实证 2299 init 页单条也过）/ teardown TAKE 循环
+  - `mlx5_core/main.c` (v5.15) `mlx5_function_setup` 失败路径：`reclaim_boot_pages: mlx5_reclaim_startup_pages() → err_disable_hca: mlx5_core_disable_hca()`——**boot 阶段（未 INIT_HCA）的卸载不发 TEARDOWN_HCA**；TEARDOWN 只在 `mlx5_function_teardown`（完整加载后的卸载）出现。T07 teardown 据此实现，硬件证实
+  - `mlx5_core/cmd.c` page_queue 语义：最高 slot 保留给 MANAGE_PAGES——页命令完成其他命令可能依赖页，不能在普通队列里饿死
+- **关键决策**:
+  - **teardown = TAKE + DISABLE（无 TEARDOWN_HCA）**：HCA 未 INIT 过，按 mlx5_core 失败加载路径；TEARDOWN_HCA 属于 T08（INIT_HCA 成功后的完整卸载）。bootstrap 中途失败也走同样回收（pci.c 错误路径调 teardown）
+  - **caps 探针 = 引导推进证明 + 8 块链验证二合一**：T06b 实证 QUERY_HCA_CAP 被 boot pages 门禁（0x4/0x2b69b6），give 后第一时间查它（T07 步骤 4.5）既证明固件真的消费了页、进入下一状态，又补上 T06b 移交的多块链验证（caps[max] hexdump 与历史逐字节一致）
+  - **fw.active 门**：teardown 只在 bootstrap 进入过后才说话（自检失败/HCA 仅 ENABLE 的状态不需要也不能乱发命令——此时 iseg 可能未程序化），remove 与错误路径统一检查
+  - **removal 顺序**：teardown 在 irq/eq/cmdq 释放**之前**（它靠 CMDQ 说话）
+- **遇到的问题与解决**:
+  - **验证脚本的 rmmod 时段盲区**：单循环模式 dmesg 在 rmmod 前抓取；黑匣子 `dmesg -w` 管道块缓冲，脚本 kill 时尾部行丢失——live.log 停在 loaded，连必打的 removing 行都没有，teardown 一度"无证据"。修复：rmmod+sleep 1 后补抓内核环（新增 post-rmmod 小节）+ 记录器 `stdbuf -oL` 行缓冲（三脚本回填），复跑拿到完整 teardown 线
+  - **两处预期内日志**：bootstrap 二次 `QUERY_ISSI current=1`（自检设置的持久性证明）；`boot pages: firmware still wants 6`（give 后重查仍报 6，历史成功 run 均有——QUERY_PAGES(boot) 疑似报告 boot 段大小而非未满足请求；以 caps 探针成功为真正推进判据）
+- **与设计的偏差**: —（task.json 步骤 4.5 按计划落地）
+- **exit_criteria 验证结果**:
+  - compile: make 通过；checkpatch fw/cmdq/h/pci 四文件 0/0/0
+  - load: 双口均 'ISSI set to 1'、'boot pages: firmware wants 6'、'MANAGE_PAGES(give 6): out entries 0'
+  - functional: give status=0、initializing 清零（<=0ms）、caps probe payload[16:18]=0f 0f num_ports=1（8 块链）；rmmod teardown **6/6 页回收**（~6.3ms/口）+ DISABLE ok；mlx5_core 随即正常加载
+  - manual: 100 次 insmod/rmmod 零告警；live.log 5066 行对账 stage I ok/teardown 6/6/removing 各 202、boot pages 恒 6、异常信号全零
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: 固件为什么要求驱动给页而不是自己 DMA 抓？（内存所有权）**
+    A: 主机内存的所有权在主机。固件作为 PCIe master 物理上能访问全部主机内存，但它不知道哪些页空闲/安全/已映射——驱动分配 coherent 页并显式移交（give）才建立"固件可安全 DMA 这批地址"的契约；TAKE 则把所有权交还。卸载时这个契约让主机能确定性回收，避免固件悬空指针指向已释放复用的内存。虚拟化/多函数下 also 保证函数只见自己的页
+  - **Q: boot pages 与 init pages 的用途差异？**
+    A: boot pages（本卡 6 页）是固件**引导映像的最小内存**，在 caps 定容之前就要给，让 boot image 跑起来能处理后续命令；init pages（本卡 2299 页）是 caps 定容后的**运行时工作集**（队列上下文、ICM 等），SET_HCA_CAP 之后 QUERY_PAGES(init) 才会给出尺寸。两级设计让同一协议服务"先跑起来"和"按需定容"两个阶段
+  - **Q: TEARDOWN_HCA 与收页的顺序为什么不能反？**
+    A: TEARDOWN 把 HCA 从 OPERATIONAL 转入静默，**停止固件对 init pages 的消费**；先收页的话，还在运行的固件会对已交还（可能已释放复用）的内存继续 DMA → 主机内存损坏。先停消费者、再回收资源——与 netdev 先 stop 再 free ring 同理。T07 状态未 INIT 故不发 TEARDOWN（无消费者需停），直接收 boot 页
 
 ---
 
