@@ -592,7 +592,7 @@
       "title": "固件引导 II：SET_HCA_CAP + init pages + INIT_HCA（M1）",
       "phase": "S4",
       "milestone": "M1",
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T07-fw-bootstrap-1"
       ],

@@ -22,7 +22,7 @@
 | T06a-cmdq-invoke-poll | CMDQ 轮询模式 invoke（等待 + 状态解析） | S3 | — | **completed** | 0678082 | 2026-08-28 |
 | T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | **completed** | 83f9f9e | 2026-09-08 |
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
-| T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | pending | — | — |
+| T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | pending | — | — |
 | T10-eq-irq-enable | MSI-X 点亮 + 硬中断消费 EQE（分级放量） | S5 | — | pending | — | — |
 | T11-tracepoints | ftrace tracepoint 插桩 | S6 | — | pending | — | — |
@@ -354,6 +354,37 @@
     A: boot pages（本卡 6 页）是固件**引导映像的最小内存**，在 caps 定容之前就要给，让 boot image 跑起来能处理后续命令；init pages（本卡 2299 页）是 caps 定容后的**运行时工作集**（队列上下文、ICM 等），SET_HCA_CAP 之后 QUERY_PAGES(init) 才会给出尺寸。两级设计让同一协议服务"先跑起来"和"按需定容"两个阶段
   - **Q: TEARDOWN_HCA 与收页的顺序为什么不能反？**
     A: TEARDOWN 把 HCA 从 OPERATIONAL 转入静默，**停止固件对 init pages 的消费**；先收页的话，还在运行的固件会对已交还（可能已释放复用）的内存继续 DMA → 主机内存损坏。先停消费者、再回收资源——与 netdev 先 stop 再 free ring 同理。T07 状态未 INIT 故不发 TEARDOWN（无消费者需停），直接收 boot 页
+
+---
+
+### T08-fw-bootstrap-2（M1）
+
+- **状态**: completed（**里程碑 M1 达成**）
+- **开始时间**: 2026-09-08
+- **完成时间**: 2026-09-08
+- **Commit**: 436ea84
+- **读过源码**:
+  - set_hca_cap 从 `t06-wip`（08db551，known-good 那轮 4 次验证全绿）拣选，known-good profile 注释完整保留
+  - `mlx5_core/main.c` (v5.15) `mlx5_function_teardown`：TEARDOWN_HCA → reclaim → disable 的完整卸载顺序（T08 teardown 形态依据）
+- **关键决策**:
+  - **set_hca_cap 只查 cur**：T07 的 caps probe 已查过 max（日志已有 hexdump）；SET 输入 = 当前 caps + profile 修正，与 wip 验证过的 SET 字节完全一致
+  - **fw.initialized 门控两种 teardown**：INIT_HCA 成功 → 完整卸载（TEARDOWN_HCA 先停固件对 init 页的 DMA 消费，再 TAKE）；中途失败 → T07 精简回收路径
+  - **ktime_get_ns 计时**（jiffies 4ms 粒度不够），输出 init pages / INIT_HCA / Bootstrap 三段耗时
+- **遇到的问题与解决**: 无新问题。一个重要**观察**：caps[post] 与 caps[cur] 逐字节相同（本次与 wip 时代一致）——固件对 klm=18 等写入实际**钳回默认值**（c[35] 保持 d0=klm 26），SET_HCA_CAP 在此 fw 上更像"驱动已完成定容"的**门闩**而非字段级生效；反面证据（写 v5.15 语义字段 → 0x4E2106）说明破坏性写入会真正生效并损坏 fw 状态。此假说是遗留"字段最小化实验"的起点
+- **与设计的偏差**: task.json 步骤 3"失败才降批"未实现——wip 实证 2299 页单条 give 直接通过，批量大回退是无用复杂度，去掉（T07 时已裁）
+- **exit_criteria 验证结果**:
+  - compile: make 通过；checkpatch fw/h 0/0/0
+  - load: 双口均 'INIT_HCA ok: HCA operational (230/239 ms)' + 'Bootstrap time: 267/276 ms'
+  - functional: 双端口 INIT_HCA status=0；引导 ≤300ms（压测分布 min 258 / 中位 273 / max 277）；teardown **2305/2305**（6 boot + 2299 init）100% 全量回收、TEARDOWN_HCA 零失败；100 次装卸零告警（live.log 6480 行对账：INIT_HCA ok / Bootstrap time / teardown 2305/2305 各 202，give 恒 6+2299）
+  - manual: 引导序列与 mlx5_core 逐步对照一致（enable→issi→boot pages→ctrl→caps→init pages→init hca）；耗时 ~270ms vs mlx5_core ~265ms 同量级；teardown 单口 ~1.0s（TEARDOWN_HCA 主导，mlx5_core debugfs 未捕获该项对照）
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**:
+  - **Q: 固件为什么要驱动定容而不是自己按最大配置？**
+    A: 资源预算属于主机。按 max 配置分配上下文内存（log_max_qp=2⁶ 等）会占用远超实际需求的 init pages 和主机内存；驱动知道自己要开多少 QP/CQ/EQ，固件不知道。SET_HCA_CAP 是一次性"合同"，固件按合同计算工作集（QUERY_PAGES(init) 的 2299 就是这份合同的产物）。虚拟化/多函数下，定容还是资源配额的执行点——单函数不能越过大纲
+  - **Q: known-good profile 与 handle_hca_cap 的差异如何逐字段最小化定位"开关"字段？**
+    A: 方法：从 known-good 出发，把 v5.15 语义的写入按字段分组加回（log_max_qp 组 / pkey 组 / log_uar_page_sz 组），每组一次上机看 init give 是否开始 0x4E2106——二分定位到字段。本次新增的关键证据 caps[post]==caps[cur]（固件钳回默认值）把问题重述为：**SET 的大部分写入被忽略，只有少数"破坏性"写入真正进入 fw 状态**——实验目标从"找必需字段"变成"找哪些字段会真正生效且致命"，二分空间缩小
+  - **Q: teardown 为什么要逆序？**
+    A: 资源是栈式获取的（caps → 页 → INIT），依赖方向决定释放方向：INIT_HCA 的运行依赖 init pages 的有效，init pages 的所有权依赖 caps 定容的合同。逆序释放保证每层释放时它的依赖者已经停止——TEARDOWN 停 DMA 消费者，TAKE 收页解除所有权，DISABLE 关函数级开关。顺序错了就是 use-after-free 的 DMA 版
 
 ---
 
