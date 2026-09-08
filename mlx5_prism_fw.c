@@ -1,0 +1,384 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * mlx5_prism: firmware bootstrap, stage I (boot pages).
+ *
+ * Mirrors mlx5_core's mlx5_function_enable boot leg:
+ *   SET_ISSI -> boot pages -> wait for fw_initializing to clear ->
+ *   ACCESS_REG(HOST_ENDIANNESS) -> QUERY_HCA_CAP probe.
+ * SET_HCA_CAP, init pages and INIT_HCA are stage II (T08); the EQ work
+ * (T09/T10) comes after the HCA is operational.
+ *
+ * Teardown reverses the boot stage only: reclaim pages (MANAGE_PAGES/TAKE)
+ * and DISABLE_HCA — exactly mlx5_core's failed-load path (reclaim_boot_pages
+ * -> err_disable_hca). TEARDOWN_HCA belongs to the full teardown after
+ * INIT_HCA and arrives with T08.
+ *
+ * Field offsets below were verified against mlx5_ifc.h bit layouts on this
+ * FW (14.32.1908) — see progress.md 历史问题归档 for the offset table.
+ */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/dma-mapping.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+
+#include "mlx5_prism.h"
+
+/*
+ * Interface version negotiation (ISSI). Old firmware without QUERY_ISSI
+ * stays at ISSI 0, which mlx5_core also tolerates — only a transport-level
+ * failure is fatal. query_issi_out is 112 B — a shorter outlen is rejected
+ * with fw status 0x51 "bad output length". supported_issi_dw0 is a be32 at
+ * out bytes[108:112], one bit per ISSI.
+ */
+static int mlx5_prism_fw_set_issi(struct mlx5_prism_dev *dev)
+{
+	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 qout[112] = { };
+	u8 sout[MLX5_PRISM_CMD_HDR_SIZE];
+	u32 supported;
+	int err;
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_ISSI, 0,
+				     qin, sizeof(qin), qout, sizeof(qout));
+	if (err) {
+		pci_info(dev->pdev, "QUERY_ISSI failed (%d): staying at ISSI 0\n",
+			 err);
+		return 0;
+	}
+
+	supported = mlx5_prism_get_be32(qout + 108);
+	pci_info(dev->pdev, "QUERY_ISSI ok: current=%u supported=0x%x\n",
+		 (qout[10] << 8) | qout[11], supported);
+	if (!(supported & BIT(1))) {
+		pci_info(dev->pdev, "ISSI 1 not supported: staying at ISSI 0\n");
+		return 0;
+	}
+
+	/* current_issi: be16 at inline bytes[10:12]. */
+	{
+		u8 sin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+
+		sin[11] = 1;
+		err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_ISSI, 0,
+					     sin, sizeof(sin),
+					     sout, sizeof(sout));
+		if (err)
+			return err;
+	}
+
+	pci_info(dev->pdev, "ISSI set to 1\n");
+	return 0;
+}
+
+/*
+ * Tell the firmware the host endianness via ACCESS_REG(HOST_ENDIANNESS):
+ * register_id at inline bytes[10:12] (be16), 16-byte register data at the
+ * payload — he = 0 for a little-endian host.
+ */
+static int mlx5_prism_fw_set_host_endianness(struct mlx5_prism_dev *dev)
+{
+	u8 in[MLX5_PRISM_CMD_HDR_SIZE + 16] = { };
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE + 16];
+
+	in[10] = MLX5_PRISM_REG_HOST_ENDIANNESS >> 8;
+	in[11] = MLX5_PRISM_REG_HOST_ENDIANNESS & 0xff;
+
+	return mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_ACCESS_REG, 0,
+				      in, sizeof(in), out, sizeof(out));
+}
+
+static int mlx5_prism_fw_query_pages(struct mlx5_prism_dev *dev, u32 op_mod,
+				     u32 *num_pages)
+{
+	struct mlx5_prism_fw *fw = &dev->fw;
+	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	int err;
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_PAGES, op_mod,
+				     in, sizeof(in), out, sizeof(out));
+	if (err)
+		return err;
+
+	fw->func_id = mlx5_prism_get_be32(out + 8) & 0xffff;
+	*num_pages = mlx5_prism_get_be32(out + 12);
+	return 0;
+}
+
+/*
+ * Hand `count` pages (already allocated into fw->pages[]) to the firmware
+ * in a single MANAGE_PAGES — as mlx5_core does: this firmware expects the
+ * full request per command (a verified single give carried 2299 init pages).
+ * in layout: function_id at bytes[8:12], input_num_entries at bytes[12:16],
+ * pas[i] at 16+8i.
+ */
+static int mlx5_prism_fw_give_pages(struct mlx5_prism_dev *dev, u32 count)
+{
+	struct mlx5_prism_fw *fw = &dev->fw;
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	u32 first = fw->num_pages;
+	int err, i, in_len = MLX5_PRISM_CMD_HDR_SIZE + 8 * count;
+	u8 *in;
+
+	in = kzalloc(in_len, GFP_KERNEL);
+	if (!in)
+		return -ENOMEM;
+
+	mlx5_prism_put_be32(in + 8, fw->func_id);
+	mlx5_prism_put_be32(in + 12, count);
+	for (i = 0; i < count; i++)
+		mlx5_prism_put_be64(in + 16 + 8 * i, fw->pages_dma[first + i]);
+
+	err = mlx5_prism_cmdq_invoke_pages(dev,
+					   MLX5_PRISM_CMD_OP_MANAGE_PAGES,
+					   MLX5_PRISM_PAGES_GIVE,
+					   in, in_len, out, sizeof(out));
+	if (err)
+		goto out;
+
+	fw->num_pages = first + count;
+	pci_info(dev->pdev, "MANAGE_PAGES(give %u): out entries %u\n",
+		 count, mlx5_prism_get_be32(out + 8));
+
+out:
+	kfree(in);
+	return err;
+}
+
+static int mlx5_prism_fw_supply_pages(struct mlx5_prism_dev *dev, u32 op_mod,
+				      const char *phase)
+{
+	u32 requested;
+	int err, i;
+
+	err = mlx5_prism_fw_query_pages(dev, op_mod, &requested);
+	if (err)
+		return err;
+
+	if (!requested) {
+		pci_info(dev->pdev, "%s pages: none requested\n", phase);
+		return 0;
+	}
+	if (requested > MLX5_PRISM_MAX_FW_PAGES - dev->fw.num_pages) {
+		pci_err(dev->pdev, "%s pages: %u requested, no room (max total %d)\n",
+			phase, requested, MLX5_PRISM_MAX_FW_PAGES);
+		return -E2BIG;
+	}
+
+	pci_info(dev->pdev, "%s pages: firmware wants %u\n", phase, requested);
+	for (i = 0; i < requested; i++) {
+		struct mlx5_prism_fw *fw = &dev->fw;
+		void *p;
+
+		p = dma_alloc_coherent(&dev->pdev->dev, MLX5_PRISM_PAGE_SIZE,
+				       &fw->pages_dma[fw->num_pages + i],
+				       GFP_KERNEL);
+		if (!p) {
+			err = -ENOMEM;
+			goto err_free_batch;
+		}
+		fw->pages[fw->num_pages + i] = p;
+	}
+
+	err = mlx5_prism_fw_give_pages(dev, requested);
+	if (err)
+		goto err_free_batch;
+
+	err = mlx5_prism_fw_query_pages(dev, op_mod, &requested);
+	if (err)
+		return err;
+	if (requested)
+		pci_warn(dev->pdev, "%s pages: firmware still wants %u\n",
+			 phase, requested);
+
+	return 0;
+
+err_free_batch:
+	for (i--; i >= 0; i--)
+		dma_free_coherent(&dev->pdev->dev, MLX5_PRISM_PAGE_SIZE,
+				  dev->fw.pages[dev->fw.num_pages + i],
+				  dev->fw.pages_dma[dev->fw.num_pages + i]);
+	return err;
+}
+
+/*
+ * Boot-stage capability probe (the T06b finding: QUERY_HCA_CAP is gated
+ * behind the boot-page give — status 0x4 / syndrome 0x2b69b6 before it).
+ * Beyond proving the fw advanced a stage, this exercises the 8-block
+ * mailbox chain that T08's SET_HCA_CAP depends on.
+ */
+static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
+{
+	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 *caps;
+	int err, i, nonzero = 0;
+
+	caps = kzalloc(MLX5_PRISM_CMD_HDR_SIZE + MLX5_PRISM_CAP_BYTES,
+		       GFP_KERNEL);
+	if (!caps)
+		return -ENOMEM;
+
+	/* op_mod bit0 selects max over current; bits1+ select the cap type. */
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 1,
+				     qin, sizeof(qin), caps,
+				     MLX5_PRISM_CMD_HDR_SIZE +
+				     MLX5_PRISM_CAP_BYTES);
+	if (err)
+		goto out;
+	pci_info(dev->pdev, "caps[max]: %64ph %64ph %64ph\n",
+		 caps, caps + 64, caps + 128);
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,
+				     qin, sizeof(qin), caps,
+				     MLX5_PRISM_CMD_HDR_SIZE +
+				     MLX5_PRISM_CAP_BYTES);
+	if (err)
+		goto out;
+	pci_info(dev->pdev, "caps[cur]: %64ph %64ph %64ph\n",
+		 caps, caps + 64, caps + 128);
+
+	/* Drain sanity: the payload must not be all zeros. */
+	for (i = MLX5_PRISM_CMD_HDR_SIZE; i < MLX5_PRISM_CMD_HDR_SIZE + 64; i++)
+		nonzero |= caps[i];
+	if (!nonzero) {
+		pci_err(dev->pdev, "caps probe: payload drained all-zero\n");
+		err = -EIO;
+		goto out;
+	}
+	/* log_max_srq_sz / log_max_qp_sz live at payload bytes[16:18]. */
+	pci_info(dev->pdev,
+		 "caps probe: max/cur ok (8-block chains), cur payload[16:18]=%02x %02x, num_ports=%u\n",
+		 caps[MLX5_PRISM_CMD_HDR_SIZE + 16],
+		 caps[MLX5_PRISM_CMD_HDR_SIZE + 17],
+		 caps[MLX5_PRISM_CMD_HDR_SIZE + 55]);
+
+out:
+	kfree(caps);
+	return err;
+}
+
+int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
+{
+	int err;
+
+	dev->fw.active = true;
+
+	err = mlx5_prism_fw_set_issi(dev);
+	if (err)
+		return err;
+
+	err = mlx5_prism_fw_supply_pages(dev, MLX5_PRISM_QUERY_PAGES_BOOT,
+					 "boot");
+	if (err)
+		return err;
+
+	/*
+	 * The firmware boots its boot image from the pages just handed over.
+	 * Watch the init segment while that happens so we can tell "busy
+	 * booting" (initializing set) from "silently unhappy".
+	 */
+	{
+		u32 init1 = ioread32be(&dev->iseg->initializing);
+		int calm;
+
+		for (calm = 0; calm < 200; calm++) {
+			u32 init2 = ioread32be(&dev->iseg->initializing);
+
+			if (init2 != init1)
+				pci_info(dev->pdev,
+					 "post-boot-pages: initializing 0x%x -> 0x%x\n",
+					 init1, init2);
+			init1 = init2;
+			if (!(init1 >> 31))
+				break;
+			usleep_range(10000, 20000);
+		}
+		if (init1 >> 31)
+			pci_warn(dev->pdev,
+				 "firmware still initializing after 2s: 0x%x\n",
+				 init1);
+		else
+			pci_info(dev->pdev,
+				 "post-boot-pages: initializing clear after <= %d ms\n",
+				 calm * 10);
+	}
+
+	err = mlx5_prism_fw_set_host_endianness(dev);
+	if (err)
+		return err;
+	pci_info(dev->pdev, "host endianness declared (reg 0x7004)\n");
+
+	err = mlx5_prism_fw_probe_caps(dev);
+	if (err)
+		return err;
+
+	pci_info(dev->pdev, "fw bootstrap stage I ok (boot pages + caps probe)\n");
+	return 0;
+}
+
+void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_fw *fw = &dev->fw;
+	u8 tin[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 tout[MLX5_PRISM_CMD_HDR_SIZE + 8 * MLX5_PRISM_PAGES_PER_CMD];
+	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
+	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	u32 remaining, batch, returned, total = 0;
+	int err, i, rounds = 0;
+
+	if (!fw->active)
+		return;
+	fw->active = false;
+
+	/*
+	 * Take mode: input_num_entries (bytes[12:16]) says how many the host
+	 * wants back; the firmware fills the returned addresses into the out
+	 * pas[] array. No TEARDOWN_HCA here — the HCA was never initialized
+	 * (that is T08); this matches mlx5_core's failed-load reclaim path.
+	 */
+	remaining = fw->num_pages;
+	while (remaining && rounds++ < MLX5_PRISM_MAX_FW_PAGES) {
+		batch = min_t(u32, remaining, MLX5_PRISM_PAGES_PER_CMD);
+		memset(tin, 0, sizeof(tin));
+		memset(tout, 0, sizeof(tout));
+		mlx5_prism_put_be32(tin + 8, fw->func_id);
+		mlx5_prism_put_be32(tin + 12, batch);
+
+		err = mlx5_prism_cmdq_invoke_pages(dev,
+						   MLX5_PRISM_CMD_OP_MANAGE_PAGES,
+						   MLX5_PRISM_PAGES_TAKE,
+						   tin, sizeof(tin),
+						   tout, sizeof(tout));
+		if (err) {
+			pci_warn(dev->pdev, "page reclaim failed: %d\n", err);
+			break;
+		}
+		returned = mlx5_prism_get_be32(tout + 8);
+		if (!returned)
+			break;
+		remaining -= min(returned, batch);
+		total += min(returned, batch);
+	}
+
+	if (total != fw->num_pages)
+		pci_warn(dev->pdev, "firmware returned %u/%u pages\n",
+			 total, fw->num_pages);
+
+	for (i = 0; i < fw->num_pages; i++)
+		dma_free_coherent(&dev->pdev->dev, MLX5_PRISM_PAGE_SIZE,
+				  fw->pages[i], fw->pages_dma[i]);
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_DISABLE_HCA, 0,
+				     in, sizeof(in), out, sizeof(out));
+	if (err)
+		pci_warn(dev->pdev, "DISABLE_HCA failed: %d\n", err);
+	else
+		pci_info(dev->pdev, "teardown: %u/%u pages reclaimed, HCA disabled\n",
+			 total, fw->num_pages);
+	fw->num_pages = 0;
+}

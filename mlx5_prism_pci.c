@@ -121,6 +121,14 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_irq;
 
+	/* T07: boot stage — ISSI, boot pages, endianness, caps probe. */
+	err = mlx5_prism_fw_bootstrap(dev);
+	if (err) {
+		/* Reclaim any pages already given (mlx5_core's failed-load path). */
+		mlx5_prism_fw_teardown(dev);
+		goto err_free_irq;
+	}
+
 	return 0;
 
 err_free_irq:
@@ -146,6 +154,8 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
 
+	/* Teardown talks over the CMDQ — must run before the queues go away. */
+	mlx5_prism_fw_teardown(dev);
 	mlx5_prism_irq_free(dev);
 	mlx5_prism_eq_free(dev);
 	mlx5_prism_cmdq_free(dev);

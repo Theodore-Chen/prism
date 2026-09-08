@@ -16,7 +16,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.7"
+#define MLX5_PRISM_DRV_VERSION	"0.8"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -33,18 +33,28 @@
 #define MLX5_PRISM_PCI_CMD_XPORT	7
 #define MLX5_PRISM_CMD_OWNER_HW		0x1
 #define MLX5_PRISM_CMD_OP_QUERY_HCA_CAP	0x100
+#define MLX5_PRISM_CMD_OP_TEARDOWN_HCA	0x103
 #define MLX5_PRISM_CMD_OP_ENABLE_HCA	0x104
+#define MLX5_PRISM_CMD_OP_DISABLE_HCA	0x105
 #define MLX5_PRISM_CMD_OP_QUERY_PAGES	0x107
+#define MLX5_PRISM_CMD_OP_MANAGE_PAGES	0x108
 #define MLX5_PRISM_CMD_OP_QUERY_ISSI	0x10a
 #define MLX5_PRISM_CMD_OP_SET_ISSI	0x10b
+#define MLX5_PRISM_CMD_OP_ACCESS_REG	0x805
 #define MLX5_PRISM_CMD_HDR_SIZE		16
 #define MLX5_PRISM_CMD_DATA_BLOCK_SIZE	512
 #define MLX5_PRISM_CMD_BLOCK_STRIDE	1024	/* mlx5 dma_pool align: pow2(576) */
 #define MLX5_PRISM_CMD_MAX_CHAIN		128	/* blocks per command (64 KiB payload) */
 #define MLX5_PRISM_CAP_BYTES		0x1000	/* cmd_hca_cap struct size */
 
-/* QUERY_PAGES op_mod (mlx5_ifc.h MLX5_QUERY_PAGES_IN_OP_MOD_*). */
+/* QUERY_PAGES / MANAGE_PAGES op_mod (mlx5_ifc.h MLX5_*_IN_OP_MOD_*). */
 #define MLX5_PRISM_QUERY_PAGES_BOOT	1
+#define MLX5_PRISM_QUERY_PAGES_INIT	2
+#define MLX5_PRISM_PAGES_GIVE		1
+#define MLX5_PRISM_PAGES_TAKE		2
+
+/* ACCESS_REG register ids (PRM §21, mlx5 register enum). */
+#define MLX5_PRISM_REG_HOST_ENDIANNESS	0x7004
 
 struct mlx5_prism_iseg {
 	__be32	fw_rev;			/* [minor hi16][major lo16] */
@@ -123,6 +133,22 @@ struct mlx5_prism_irq {
 	char		name[32];	/* shown in /proc/interrupts */
 };
 
+/*
+ * Working set handed to the firmware before it accepts resource commands:
+ * boot pages bring the boot image up, init pages (T08) plus INIT_HCA take
+ * the HCA to operational. One MANAGE_PAGES gives at most 63 pages.
+ */
+#define MLX5_PRISM_MAX_FW_PAGES		8192
+#define MLX5_PRISM_PAGES_PER_CMD		63
+
+struct mlx5_prism_fw {
+	u32		func_id;	/* reported by QUERY_PAGES, reused in gives */
+	u32		num_pages;	/* total given, reclaimed on teardown */
+	bool		active;		/* bootstrap entered; teardown may talk */
+	void		*pages[MLX5_PRISM_MAX_FW_PAGES];
+	dma_addr_t	pages_dma[MLX5_PRISM_MAX_FW_PAGES];
+};
+
 struct mlx5_prism_dev {
 	struct pci_dev			*pdev;
 	void __iomem			*bar0;
@@ -131,6 +157,7 @@ struct mlx5_prism_dev {
 	struct mlx5_prism_cmdq		cmdq;
 	struct mlx5_prism_eq		eq;
 	struct mlx5_prism_irq		irq;
+	struct mlx5_prism_fw		fw;
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -153,10 +180,26 @@ static inline u16 mlx5_prism_cmdif_rev(const struct mlx5_prism_dev *dev)
 	return ioread32be(&dev->iseg->cmdif_rev_fw_sub) >> 16;
 }
 
-/* Big-endian field accessor (avoids asm/unaligned.h dependencies). */
+/* Big-endian field accessors (the Ubuntu header pack lacks asm/unaligned.h). */
 static inline u32 mlx5_prism_get_be32(const u8 *p)
 {
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+static inline void mlx5_prism_put_be32(u8 *p, u32 v)
+{
+	p[0] = (u8)(v >> 24);
+	p[1] = (u8)(v >> 16);
+	p[2] = (u8)(v >> 8);
+	p[3] = (u8)v;
+}
+
+static inline void mlx5_prism_put_be64(u8 *p, u64 v)
+{
+	int i;
+
+	for (i = 0; i < 8; i++)
+		p[i] = (u8)(v >> (56 - 8 * i));
 }
 
 extern const struct pci_device_id mlx5_prism_pci_ids[];
@@ -180,8 +223,19 @@ int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 			   u16 opcode, u16 op_mod,
 			   u8 *in, u32 in_len, u8 *out, u32 out_len);
+/*
+ * Same round trip on the dedicated top CMDQ slot reserved for MANAGE_PAGES
+ * (mlx5_core's page_queue): page commands must never starve behind regular
+ * commands, since completing those may itself require pages.
+ */
+int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
+				 u16 opcode, u16 op_mod,
+				 u8 *in, u32 in_len, u8 *out, u32 out_len);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
+
+int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev);
+void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);

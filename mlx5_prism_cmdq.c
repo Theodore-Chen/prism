@@ -203,9 +203,10 @@ static void mlx5_prism_chain_drain(struct mlx5_prism_cmd_block *blks, int n,
 	}
 }
 
-int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
-			   u16 opcode, u16 op_mod,
-			   u8 *in, u32 in_len, u8 *out, u32 out_len)
+static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
+			       u16 opcode, u16 op_mod,
+			       u8 *in, u32 in_len, u8 *out, u32 out_len,
+			       bool page_queue)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
 	struct mlx5_prism_cmd_layout *lay;
@@ -247,16 +248,25 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 	spin_lock_irqsave(&cmdq->lock, flags);
 
 	/*
-	 * All slots are equal for now; the top slot becomes the reserved
-	 * MANAGE_PAGES queue when T07 introduces page commands.
+	 * The top slot is reserved for MANAGE_PAGES (mlx5_core's page_queue);
+	 * regular commands share the slots below it.
 	 */
-	idx = find_first_zero_bit(cmdq->slots, cmdq->max_cmds);
-	if (idx >= cmdq->max_cmds) {
-		spin_unlock_irqrestore(&cmdq->lock, flags);
-		err = -EBUSY;
-		goto err_free_out;
+	if (page_queue) {
+		idx = cmdq->max_cmds - 1;
+		if (test_and_set_bit(idx, cmdq->slots)) {
+			spin_unlock_irqrestore(&cmdq->lock, flags);
+			err = -EBUSY;
+			goto err_free_out;
+		}
+	} else {
+		idx = find_first_zero_bit(cmdq->slots, cmdq->max_cmds - 1);
+		if (idx >= cmdq->max_cmds - 1) {
+			spin_unlock_irqrestore(&cmdq->lock, flags);
+			err = -EBUSY;
+			goto err_free_out;
+		}
+		__set_bit(idx, cmdq->slots);
 	}
-	__set_bit(idx, cmdq->slots);
 
 	cmdq->token_next++;
 	if (!cmdq->token_next)
@@ -364,6 +374,22 @@ err_free_in:
 				  n_in * MLX5_PRISM_CMD_BLOCK_STRIDE,
 				  in_blks, in_dma);
 	return err;
+}
+
+int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
+			   u16 opcode, u16 op_mod,
+			   u8 *in, u32 in_len, u8 *out, u32 out_len)
+{
+	return mlx5_prism_cmd_exec(dev, opcode, op_mod, in, in_len,
+				   out, out_len, false);
+}
+
+int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
+				 u16 opcode, u16 op_mod,
+				 u8 *in, u32 in_len, u8 *out, u32 out_len)
+{
+	return mlx5_prism_cmd_exec(dev, opcode, op_mod, in, in_len,
+				   out, out_len, true);
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)

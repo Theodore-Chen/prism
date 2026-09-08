@@ -17,7 +17,7 @@ exec > >(tee "$LOG") 2>&1
 cd /home/zqc/code/prism
 
 mv -f "$LIVE" "$LIVE.prev" 2>/dev/null
-dmesg -w | while IFS= read -r line; do
+ stdbuf -oL dmesg -w | while IFS= read -r line; do
         printf '%s\n' "$line" >> "$LIVE"
         sync
 done &
