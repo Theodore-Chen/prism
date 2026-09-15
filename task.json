@@ -659,7 +659,7 @@
       "title": "EQ 创建 + 轮询消费 EQE（零中断点亮）",
       "phase": "S5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T08-fw-bootstrap-2"
       ],
