@@ -16,7 +16,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#define MLX5_PRISM_DRV_VERSION	"0.9"
+#define MLX5_PRISM_DRV_VERSION	"0.26"
 
 #define MLX5_PRISM_VENDOR_ID_MELLANOX	0x15b3
 #define MLX5_PRISM_DEVICE_ID_CX4_LX	0x1015
@@ -57,6 +57,20 @@
 
 /* ACCESS_REG register ids (PRM §21, mlx5 register enum). */
 #define MLX5_PRISM_REG_HOST_ENDIANNESS	0x7004
+
+/* EQ / UAR (PRM §8 / mlx5 eq.c). */
+#define MLX5_PRISM_CMD_OP_CREATE_EQ	0x301
+#define MLX5_PRISM_CMD_OP_DESTROY_EQ	0x302
+#define MLX5_PRISM_CMD_OP_QUERY_EQ	0x303
+#define MLX5_PRISM_CMD_OP_GEN_EQE	0x304
+#define MLX5_PRISM_CMD_OP_ALLOC_UAR	0x802
+#define MLX5_PRISM_CMD_OP_DEALLOC_UAR	0x803
+#define MLX5_PRISM_CMD_OP_NOP		0x80d
+#define MLX5_PRISM_EVENT_TYPE_CMD	0x0a
+#define MLX5_PRISM_EQ_DOORBELL_OFFSET	0x40
+#define MLX5_PRISM_EQ_BUF_PAGES		64	/* ladder rung D needs 64 pas */
+#define MLX5_PRISM_EQE_OWNER_INIT	0x1	/* MLX5_EQE_OWNER_INIT_VAL */
+#define MLX5_PRISM_IRQ_VECS		2	/* v4.19: cmd EQ lives on vec 1 */
 
 struct mlx5_prism_iseg {
 	__be32	fw_rev;			/* [minor hi16][major lo16] */
@@ -122,17 +136,48 @@ struct mlx5_prism_cmdq {
 	spinlock_t	lock;		/* serialise producers (used from T05) */
 };
 
+/*
+ * Event Queue Entry (PRM §8 / mlx5 struct mlx5_eqe, verified against
+ * v5.15 device.h): type at byte 1, the command-completion vector (CMDQ slot
+ * bitmask) at bytes[32:36], owner at byte 63. An entry is fresh when
+ * (owner & 1) == ((cons_index >> log_sz) & 1); the ring is pre-filled with
+ * owner = 1 so the first lap's fresh entries carry owner = 0.
+ */
+struct mlx5_prism_eqe {
+	u8	rsvd0;
+	u8	type;			/* e.g. MLX5_PRISM_EVENT_TYPE_CMD */
+	u8	rsvd1;
+	u8	sub_type;
+	u8	rsvd2[28];
+	union {
+		__be32	cmd_vector;	/* type 0x0a: bit i = CMDQ slot i done */
+		u8	raw[28];
+	} data;
+	u8	rsvd3[2];
+	u8	signature;
+	u8	owner;
+};
+
+static_assert(sizeof(struct mlx5_prism_eqe) == MLX5_PRISM_EQE_SIZE);
+
 struct mlx5_prism_eq {
 	void		*buf;		/* cpu virtual address */
 	dma_addr_t	dma;		/* pci bus address for firmware */
 	size_t		size;
-	u32		cons_index;	/* consumer index (used from T06) */
+	u32		cons_index;	/* total entries consumed */
+	u8		log_sz;		/* accepted ladder rung (entries = 1<<log) */
+	u32		eqn;		/* assigned by CREATE_EQ */
+	u32		uar;		/* assigned by ALLOC_UAR */
+	void __iomem	*doorbell;	/* bar0 + uar * 4 KiB + 0x40 */
+	u32		events;		/* EQEs consumed (T09: process ctx) */
+	bool		created;
 };
 
 struct mlx5_prism_irq {
-	int		vector;		/* Linux IRQ number; -1 if not allocated */
+	int		vector[MLX5_PRISM_IRQ_VECS];	/* Linux IRQ numbers */
+	int		nvecs;
 	atomic_t	count;		/* handler invocation counter */
-	char		name[32];	/* shown in /proc/interrupts */
+	char		name[MLX5_PRISM_IRQ_VECS][32]; /* /proc/interrupts */
 };
 
 /*
@@ -234,6 +279,7 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
 				 u16 opcode, u16 op_mod,
 				 u8 *in, u32 in_len, u8 *out, u32 out_len);
+int mlx5_prism_cmdq_release_slots(struct mlx5_prism_dev *dev, u32 vector);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
 
@@ -242,6 +288,9 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
+int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev);
+int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev);
+void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_irq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);

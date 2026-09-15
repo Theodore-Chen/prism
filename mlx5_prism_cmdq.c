@@ -337,7 +337,16 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 				       out + MLX5_PRISM_CMD_HDR_SIZE, out_pay);
 
 	spin_lock_irqsave(&cmdq->lock, flags);
-	__clear_bit(idx, cmdq->slots);
+	/*
+	 * Slot lifecycle: with an EQ alive the slot stays BUSY until the
+	 * command's completion EQE (vector bit) is consumed — this fw stops
+	 * generating completion events for slots it considers acknowledged
+	 * (measured: reusing slot 0 yielded exactly one EQE per EQ lifetime;
+	 * mlx5_core likewise frees the slot from the EQE path in events
+	 * mode). Without an EQ there is nobody to release it — clear here.
+	 */
+	if (!dev->eq.created)
+		__clear_bit(idx, cmdq->slots);
 	spin_unlock_irqrestore(&cmdq->lock, flags);
 
 	if (out_blks)
@@ -390,6 +399,23 @@ int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
 {
 	return mlx5_prism_cmd_exec(dev, opcode, op_mod, in, in_len,
 				   out, out_len, true);
+}
+
+/* Release CMDQ slots named by a command-completion vector bitmap. */
+int mlx5_prism_cmdq_release_slots(struct mlx5_prism_dev *dev, u32 vector)
+{
+	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
+	unsigned long v = vector, flags;
+	int i, n = 0;
+
+	spin_lock_irqsave(&cmdq->lock, flags);
+	for_each_set_bit(i, &v, cmdq->max_cmds) {
+		if (test_and_clear_bit(i, cmdq->slots))
+			n++;
+	}
+	spin_unlock_irqrestore(&cmdq->lock, flags);
+
+	return n;
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
