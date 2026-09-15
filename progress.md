@@ -23,7 +23,7 @@
 | T06b-cmdq-mailbox-chain | 多块邮箱链（576B 块 + 1KB 对齐 + token） | S3 | — | **completed** | 83f9f9e | 2026-09-08 |
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
-| T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | pending | — | — |
+| T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **in_progress** | — | — |
 | T10-eq-irq-enable | MSI-X 点亮 + 硬中断消费 EQE（分级放量） | S5 | — | pending | — | — |
 | T11-tracepoints | ftrace tracepoint 插桩 | S6 | — | pending | — | — |
 | T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | pending | — | — |
@@ -553,6 +553,35 @@
 
 ---
 
+---
+
+### T09-eq-create-poll-consume（进行中：功能验收已达成，压测稳定性验证中）
+
+- **状态**: in_progress（双口 10/10 EQE 已达成；固件提交延迟长尾导致压测成功率波动，2000ms 耐心版验证中）
+- **开始时间**: 2026-09-08
+- **Commit**: —（待压测绿后提交）
+- **读过源码**:
+  - `mlx5_core/eq.c` v5.15：create_map_eq（eqc 四字段 + bitmask be64 逐字 + pas）、mlx5_eq_get_eqe（owner 判定 `(owner&1) ^ !!(ci&nent)`）、mlx5_eq_update_ci（arm 值 `(ci&0xffffff)|(eqn<<24)` 大端裸写，+0x40 arm/+0x48 仅 ci）、mlx5_eq_enable（创建后初始 arm 的出处）
+  - `mlx5_core/eq.c/cmd.c` v4.19（同代固件参考）：MLX5_EQ_VEC_CMD=1（cmd EQ 绑向量 1）、token 无条件非零、create_map_eq 字段一致
+  - `mlx5_ifc.h` v4.19/v5.15：create_eq_in/destroy_eq_in/alloc_uar_out 位偏移逐字段核准（eqc@payload0、bitmask@72、pas@256、eq_number@byte11、uar@bits72-96）
+  - **ConnectX-4 PRM Rev 0.40（MLNX-15-48450.40）**：§7.13.4（纯轮询 EQ 用 FIRED 态）、§7.13.10.1（vector=已完成未上报位图）、§7.14.1（命令完成→事件生成契约）、§12.6.4 GEN_EQE、§12.18.1 NOP（官方命令事件探针）、Figure 24（EQ 状态机 ARMED↔FIRED）
+- **核心发现（14 轮硬件实验的结论）**:
+  - **① CREATE_EQ 单条目之谜（原 T06 未解之谜的答案）**：本固件（14.32.1908）对 log12/64pas 的 CREATE_EQ 返回成功，但 QUERY_EQ 读回 eqc[12]=0x00——**实际构建的是 1 条目 EQ**。当年 4KB/log6/1pas/inlen280 被拒 0x9074AA "bad input length" 是同一件事的另一面。消费者必须以 QUERY_EQ 读回值为准（nent=1 时 owner 翻圈公式数学上恰好成立）
+  - **② 事件投递模型**：每条命令（含 NOP/GEN_EQE 探针）都生成 type 0x0a 事件，**全部投递到 entry 0**，owner 按已投递事件数交替翻圈（单条目环的圈奇偶）；事件数据先行写入（暂存），owner 翻转（提交）与驱动 doorbell 相关但存在**长尾延迟**（快则 ~100µs，慢则 >500ms，压测中表现为成功率波动——2000ms 耐心验证中）
+  - **③ 已单独排除的嫌疑**（各有对照实验）：arm doorbell 值/偏移/eqn（GEN_EQE 扫 eqn 0-7：仅 4 被接受，eqn 真实）、中断投递（enable_irq+计数 stub 后行为不变、事件按纯轮询语义投递、/proc/interrupts 全零）、slot 生命周期（保持 busy 至 EQE 消费无效）、EQ 尺寸阶梯（4KB→64KB 同行为）、向量绑定（intr=0/1 同行为）、批量 vs 逐命令轮询
+  - **④ 当年两次 panic 的重新解释**：CREATE_EQ 命令、arm 写、enable_irq、MSI 投递均已单独证明安全；致死嫌疑收窄到 wip 代码的事件模式 driver 侧（comp_handler/complete 路径）或固件受损状态连带（caps 破坏时代）
+- **关键决策**:
+  - 消费者尺寸以 QUERY_EQ 读回为权威（fw reports log_eq_size=0 → log_sz=0 即 1 条目环，现有 owner 公式无需改动）
+  - 事件消费保持在进程上下文轮询（T09 本意）；中断线虽已使能（v0.16 起，为验证"中断投递"假说）但 handler 仍是 T04 计数 stub，零点火维持
+  - slot 生命周期协议保留（EQ 存在时 slot 至 EQE 消费才释放，对齐 mlx5_core events 模式）——vector 位图语义与之配套
+- **工具沉淀**: NOP（0x80D）/GEN_EQE（0x304）/QUERY_EQ（0x303）三探针、entry0 紧采样（1ms 窗口零 doorbell 污染）、dump-on-timeout（环头 4 项全量+owner 行）、判别式自检设计（一次上机分离多假说）
+- **exit_criteria 验证结果**:
+  - compile: make 通过；checkpatch eq/irq/h/cmdq 0/0/0
+  - functional: 双口 `10/10 commands ok with an EQE each (10 events total, 0 interrupts)`（v0.24 单轮）；CREATE_EQ accepted + QUERY_EQ 读回 + DESTROY_EQ 干净 + 完整 teardown 2305/2305
+  - 零中断判据以更强形式成立：中断线已使能但固件按轮询语义投递，/proc/interrupts 四向量全零
+  - manual: 100 次装卸无 WARNING/Oops（rmmod/probe 层面全绿）；但压测中 EQE 自检成功率波动（182/202 miss @500ms 耐心）→ 2000ms 耐心版重测中
+- **学习心得**: 见上方"学习心得汇总"
+- **reflection_questions 答案**: 压测收官后补全
 ## 历史问题归档
 
 > 跨 task 的反复出现的问题、踩过的硬件坑、与 PRM 文档不一致的地方，集中记录在这里方便回溯。
@@ -575,7 +604,7 @@
 
   **③ syndrome/status 速查**：status 0x50=bad input length、0x51=bad output length；syndrome 是 **out bytes[4:8] 的 32 位 BE**（截断打印会少 8 位）：0x4D99EF=query_issi bad outlen、0x4E2106=manage_pages 读写主机内存失败、0x9074AA=create_eq bad input len、0x2B69B6=query_hca_cap 在 boot pages 之前发出（状态机门禁，给页后放行）、0x408B33=未知 opcode（0xdead 探针，status 0x4）（社区 syndrome 表：gist.github.com/lukego/8b4e567f4d5c4b60da6545e063888391）
 
-  **④ CREATE_EQ 未解之谜**：4KB/log6/1pas/inlen280 被拒 0x9074AA；inlen 梯度 288/336/528 全同拒（pas 数不变）；64KB/log12/64pas 尝试后死机（是否被接受未知）。mlx5_core 在本机从不发单页 EQ（其 EQ 均 64 页起）——最小 pas 覆盖要求待 T09 阶梯测定。
+  **④ CREATE_EQ 之谜（T09 已破，2026-09-08）**：根因是**固件接受 log12/64pas 的 CREATE_EQ 但实际构建 1 条目 EQ**（QUERY_EQ 读回 eqc[12]=0x00 为证）。所有事件投递到 entry 0、owner 按投递数翻圈；消费者以 QUERY_EQ 读回为准（nent=1）。当年 0x9074AA 拒绝是小 EQ 档位下 inlen 校验的另一面；当年 64KB 尝试后的两次 panic 与 CREATE_EQ/arm/enable_irq/MSI 均无关（T09 已逐一单独排除），嫌疑收窄至 wip 的 driver 侧事件模式代码。事件提交存在长尾延迟（~100µs 至 >500ms），纯轮询消费需大耐心窗口（2000ms 验证中）。
 
   **⑤ 两次 panic 复盘与风控工具箱**：两次均死在 insmod（probe 执行中）、CREATE_EQ 门后代码（arm/enable_irq/事件模式）从未安全执行过。教训固化：风险分级上机（eq_irq 参数：先"不点火"跑通 CREATE_EQ+arm+teardown，再单独点亮中断）；硬中断 printk 必须 dev_warn_ratelimited；风暴护栏（连续空中断超限 → disable_irq_nosync）；黑匣子记录器必须落 **/var/tmp**（磁盘backed，逐行 sync）——/tmp 是 tmpfs，断电即失（第一次现场就这么丢的）。mlx5_core debugfs 命令统计（/sys/kernel/debug/mlx5/<bdf>/commands/）是行为对照的免费基准。
 
