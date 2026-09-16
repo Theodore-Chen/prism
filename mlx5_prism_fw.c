@@ -312,8 +312,9 @@ static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 				     MLX5_PRISM_CAP_BYTES);
 	if (err)
 		goto out;
-	pci_info(dev->pdev, "caps[max]: %64ph %64ph %64ph\n",
-		 caps, caps + 64, caps + 128);
+	if (mlx5_prism_selftest)
+		pci_info(dev->pdev, "caps[max]: %64ph %64ph %64ph\n",
+			 caps, caps + 64, caps + 128);
 	if (!fw->caps_max) {
 		fw->caps_max = kzalloc(MLX5_PRISM_CAP_BYTES, GFP_KERNEL);
 		fw->caps_cur = kzalloc(MLX5_PRISM_CAP_BYTES, GFP_KERNEL);
@@ -328,8 +329,9 @@ static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 				     MLX5_PRISM_CAP_BYTES);
 	if (err)
 		goto out;
-	pci_info(dev->pdev, "caps[cur]: %64ph %64ph %64ph\n",
-		 caps, caps + 64, caps + 128);
+	if (mlx5_prism_selftest)
+		pci_info(dev->pdev, "caps[cur]: %64ph %64ph %64ph\n",
+			 caps, caps + 64, caps + 128);
 	if (fw->caps_max && fw->caps_cur)
 		memcpy(fw->caps_cur, caps + MLX5_PRISM_CMD_HDR_SIZE,
 		       MLX5_PRISM_CAP_BYTES);
@@ -359,20 +361,11 @@ out:
 }
 
 /*
- * Capability negotiation (stage II). The firmware cannot size its init
- * working set until the driver has written the capability structure once
- * (QUERY_PAGES(init) fails with "bad resource state" otherwise).
- *
- * The profile below replicates, byte for byte, the one configuration this
- * CX-4 Lx fw (14.32.1908) is known to accept: writing the v5.15-ifc-named
- * fields (log_max_qp @ byte 19, pkey_table_size @ 50, log_uar_page_sz @ 146)
- * leaves it rejecting every init-pages MANAGE_PAGES with syndrome 0x4e2106
- * ("failed to read io or write host mem"), and one attempt even drew a
- * delivery signature error on the next mailbox command. The working bytes
- * map to log_max_klm_list_size @ 35 (bits 3-7 capped at 18), cmdif_checksum
- * and sigerr / feature flags in bytes 66-67 cleared, and two unidentified
- * regions @ 82 and @ 162-163. Minimizing this against mlx5_core's
- * handle_hca_cap profile is a deferred experiment (progress.md 归档).
+ * Capability negotiation: the fw cannot size its init working set until
+ * the driver has written the capability structure once. The patch below
+ * applies the known-good profile from the quirk table — writing other
+ * (v5.15-ifc-named) fields leaves the fw rejecting every init-pages give.
+ * Archaeology: progress.md T08; profile semantics: DESIGN.md v2 §6.2.
  */
 static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 {
@@ -425,8 +418,9 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 				     MLX5_PRISM_CAP_BYTES);
 	if (err)
 		goto out;
-	pci_info(dev->pdev, "caps[post]: %64ph %64ph %64ph\n",
-		 caps, caps + 64, caps + 128);
+	if (mlx5_prism_selftest)
+		pci_info(dev->pdev, "caps[post]: %64ph %64ph %64ph\n",
+			 caps, caps + 64, caps + 128);
 	if (fw->caps_cur)
 		memcpy(fw->caps_cur, caps + MLX5_PRISM_CMD_HDR_SIZE,
 		       MLX5_PRISM_CAP_BYTES);

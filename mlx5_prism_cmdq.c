@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mlx5_prism: CMDQ engine.
+ * mlx5_prism: CMDQ engine — the driver->firmware command channel.
  *
- * T03: allocate the 4 KiB command-descriptor ring via dma_alloc_coherent.
- * T05: publish the ring DMA address to the init segment, build command
- *	descriptors and ring the doorbell.
- * T06a: full poll-mode round trip — slot registry (bitmap + rolling token),
- *	blocking invoke() that polls the ownership bit, two-layer status
- *	parsing (delivery status vs command status/syndrome) and clean
- *	timeout handling. This matches mlx5_core's CMD_MODE_POLLING, which is
- *	how the whole firmware bootstrap runs; the EQ/interrupt completion
- *	path arrives in T09/T10.
- * T06b: mailbox chains — payload beyond the 16-byte inline header travels
- *	through 1 KiB-aligned 576-byte blocks linked by DMA next pointers.
+ * Reading map: cmdq_alloc/init (4 KiB descriptor ring, publish its DMA
+ * address to the init segment) -> mlx5_prism_cmd_exec (THE round trip:
+ * slot -> descriptor -> wmb -> doorbell -> poll the ownership bit ->
+ * two-layer status) -> complete_slots/eq_bound/eq_gone (the EQ side's
+ * only entry into slot state). Self-tests at the bottom.
+ *
+ * Protocol invariants live with the code: payload beyond the 16-byte
+ * inline header travels in 576 B mailbox blocks at a 1 KiB stride; the
+ * barrier before the doorbell is wmb(), not smp_wmb(), because the
+ * consumer is the firmware reading via PCIe DMA, not another CPU; a
+ * timed-out slot and its mailbox chain leak deliberately — see the
+ * comment at the timeout path.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -300,13 +301,14 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 		mlx5_prism_chain_token(out_blks, n_out, cmdq->token_next);
 
 	/*
-	 * Order the descriptor (and any mailbox writes) before the doorbell MMIO
-	 * write. wmb() — not smp_wmb() — because the consumer is the firmware
-	 * reading via PCIe DMA, not another CPU.
+	 * Order the descriptor (and any mailbox writes) before the doorbell
+	 * MMIO write. wmb() — not smp_wmb() — because the consumer is the
+	 * firmware reading via PCIe DMA, not another CPU.
 	 */
 	t0 = ktime_get_ns();
 	trace_prism_cmdq_issue(opcode, op_mod, idx, cmdq->token_next,
 			       page_queue);
+	/* Doorbell: bit idx = notify the fw that slot idx is ready. */
 	wmb();
 	iowrite32be(1 << idx, &dev->iseg->cmd_dbell);
 

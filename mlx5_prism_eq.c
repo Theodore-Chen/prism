@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mlx5_prism: Event Queue — creation (size ladder), EQE polling, teardown.
+ * mlx5_prism: Event Queue — the firmware->driver event channel.
  *
- * T09 zeroes in on the CREATE_EQ mystery with interrupts entirely masked:
- * the MSI-X vector allocated in T04 stays disabled (IRQF_NO_AUTOEN), every
- * EQE is consumed by polling the ring from process context, and the arm
- * doorbell is the only new MMIO write in this task. /proc/interrupts
- * staying at 0 while events flow is the proof the line never fired.
+ * Reading map: eq_alloc (ring, owner prefill 0x01) -> eq_setup (ALLOC_UAR,
+ * doorbell = bar0 + uar*4K + 0x40, create ladder, authoritative QUERY_EQ
+ * size readback, arm) -> eq_poll (process-context consumption) ->
+ * eq_teardown. eq_selftest drives 10 commands each expecting one EQE.
  *
- * Commands generate EQEs because the invoke() descriptors carry a non-zero
- * token (mlx5_core only allocates tokens in events mode for the same
- * effect): each completed command posts a type-0x0a EQE whose vector bitmap
- * names the finished CMDQ slot. Poll-mode completion and EQE delivery are
- * independent — we keep waiting on the ownership bit (robust) and verify
- * the EQE trail after each command.
- *
- * Layout offsets verified against mlx5_ifc.h v5.15 and hardware hexdumps:
- * create_eq_in: eqc @payload0 (log_eq_size at eqc byte 12 bits[3:7],
- * uar_page at bytes[13:16]), event_bitmask @payload72 (4 x be64 words),
- * pas @payload256, inlen = 272 + 8 per page. create_eq_out eq_number @byte
- * 11; destroy_eq_in eq_number @byte 11; alloc_uar_out uar @bytes[9:12].
+ * Measured fw behaviour (DESIGN.md v2 §7, T09): event data is staged
+ * eagerly but the owner byte — the commit — flips only after the non-arm
+ * doorbell (+0x48) publishes the consumer index; the arm doorbell (+0x40)
+ * gates interrupt generation only; the event engine engages on ~10% of
+ * loads, and a fresh EQ (destroy/recreate) re-rolls the dice.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt

@@ -22,11 +22,13 @@
 /*
  * Built-in self-tests (cmdq round trip, mailbox chain, EQ polling) run only
  * when asked — the default probe is the plain production bring-up. The
- * verify scripts load with selftest=1.
+ * verify scripts load with selftest=1; the flag also gates verbose output
+ * (caps hexdumps) so the default dmesg reads as a one-line-per-step boot
+ * script.
  */
-static bool selftest;
-module_param(selftest, bool, 0444);
-MODULE_PARM_DESC(selftest, "run built-in self-tests at probe (default off)");
+bool mlx5_prism_selftest;
+module_param_named(selftest, mlx5_prism_selftest, bool, 0444);
+MODULE_PARM_DESC(selftest, "run built-in self-tests and verbose logs at probe (default off)");
 
 const struct pci_device_id mlx5_prism_pci_ids[] = {
 	{ PCI_VDEVICE(MELLANOX, MLX5_PRISM_DEVICE_ID_CX4_LX) },
@@ -140,7 +142,7 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_irq;
 
-	if (selftest) {
+	if (mlx5_prism_selftest) {
 		/*
 		 * T06a: prove the blocking poll round trip (ENABLE_HCA,
 		 * QUERY_PAGES, bad opcode) before mutating firmware state.
@@ -170,7 +172,7 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_eq_teardown;
 
-	if (selftest) {
+	if (mlx5_prism_selftest) {
 		err = mlx5_prism_eq_selftest(dev);
 		if (err)
 			goto err_eq_teardown;

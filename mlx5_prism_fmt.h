@@ -57,6 +57,31 @@ static inline void prism_set_bits(u8 *buf, u16 bit_off, u8 nbits, u32 val)
 /*
  * ---- command inline header (16 B), byte offsets into in/out buffers ----
  * All verified on FW 14.32.1908 (progress.md 历史问题归档 ①).
+ *
+ * Command layout maps (byte ranges; the 16 B header's opcode/op_mod at
+ * bytes[0:8] are filled by the engine, not by callers):
+ *
+ *	query_pages_in  (16 B)		manage_pages_in  (16 + 8*n B)
+ *	  [0:8]   header			  [0:8]    header
+ *	  [8:16]  op_mod (boot/init)	  [8:12]   function_id
+ *					  [12:16]  num_entries
+ *	query_pages_out (16 B)		  [16+8i]  pas[i]
+ *	  [8:12]  function_id (lo 16)
+ *	  [12:16] num_pages		manage_pages_out (16 B)
+ *					  [8:12]   out_num_entries
+ *	query_issi_out (112 B exactly — a shorter outlen is rejected 0x51)
+ *	  [10:12] current_issi (be16)
+ *	  [108:112] supported_issi_dw0 (be32, one bit per ISSI)
+ *
+ *	access_reg_in (16 + reg_size B)	create_eq_in (272 + 8*npas B)
+ *	  [10:12] register_id (be16)	  [16:80]   eqc (64 B) — see the
+ *	  [16:]   register payload		    dw3/intr encoding notes below
+ *	access_reg_out (16 + reg_size B)	  [88:120]  event_bitmask (be64)
+ *	  [16:]   register data		  [272+8i]  pas[i]
+ *					  out[11]   eq_number
+ *	alloc_uar_out: uar (24-bit) at [8:12]
+ *	dealloc_uar_in: uar (be32) at [8:12]
+ *	query_eq_in / destroy_eq_in: eq_number at [11]
  */
 #define PRISM_OFF_MP_FUNC_ID		8	/* manage_pages_in: be32, low 16 bits valid */
 #define PRISM_OFF_MP_NUM_ENTRIES	12	/* manage_pages_in: be32 (give/take count) */

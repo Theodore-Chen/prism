@@ -691,6 +691,13 @@
 - **验证**: make 零警告；checkpatch 无 ERROR/WARNING（TRACE_EVENT 宏布局 9 处 CHECK 豁免，与树内 trace 头一致）；tracepoint 未启用时零行为变化（默认 no-op）
 - **reflection 要点**: tracepoint 提前于 T10 落地=T06"死机无现场"教训的工程化兑现；issue/complete 配对 + eq_event 即 T10 事件模式调试的观测三件套
 
+### R0.7-可读性整改
+
+- **状态**: completed（行为保持：selftest=1 路径日志序列与金样逐行一致，硬件门禁 G1 复跑覆盖；默认路径新增的唯一变化 = 三面 caps hexdump 墙不再打印——设计内收敛）
+- **交付物**: ①日志瘦身——`mlx5_prism_selftest` 全局化（module_param 同名），caps[max]/[cur]/[post] hexdump 仅 selftest 打印（缓存 memcpy 不受影响），默认 dmesg 成纯文本剧本；②注释节食——set_hca_cap 考古块 15→6 行（不变量+指针），eq.c/cmdq.c 文件头从任务流水账改为"阅读地图+不变量"；③fmt.h 新增 9 条命令的 ASCII 布局图（命名偏移表补上字段全景）；④新增 READING.md——600 行脊柱读法/分层映射/动手路径/知识索引（含宏魔法专题沉淀：三世界、÷8/÷32 双坐标系、量尺结构体与 sizeof 不求值语义）
+- **验证**: make 零警告 + checkpatch 8 文件 0/0/0（trace.h 为已入档的 TRACE_EVENT 布局豁免）+ 等价性测试 ALL EQUIVALENT
+- **反思**: 面向读者的三件套（剧本式日志/地图式文件头/全景式偏移表）与面向作者的资产（考古档案/金样/测试）分工明确——前者做减法，后者只增不减
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

@@ -317,6 +317,11 @@ static inline void mlx5_prism_put_be64(u8 *p, u64 v)
 
 extern const struct pci_device_id mlx5_prism_pci_ids[];
 
+/* Set at probe from the selftest= module param (default off): gates the
+ * built-in self-tests and the verbose logs (caps hexdumps).
+ */
+extern bool mlx5_prism_selftest;
+
 int mlx5_prism_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 void mlx5_prism_pci_remove(struct pci_dev *pdev);
 
