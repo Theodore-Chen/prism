@@ -15,7 +15,7 @@
 #   4. 重采后同周期自洽复验（必须 zero diff）
 #   5. r0_gate.sh          — 新基线下 G0-G4 全门禁（~10 min）
 #
-# Usage: sudo bash scripts/rebaseline.sh        (~15 min)
+# Usage: sudo bash scripts/gate/rebaseline.sh        (~15 min)
 
 set -u
 cd /home/zqc/code/prism
@@ -39,7 +39,7 @@ res() { if [ "$1" -eq 0 ]; then echo "   [PASS] $2"; else echo "   [FAIL] $2"; f
 say "rebaseline start: $(date '+%F %T') HEAD=$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 
 say "step 1/5: 3 fresh cycles (t09_verify.sh 3)"
-bash scripts/t09_verify.sh 3
+bash scripts/gate/t09_verify.sh 3
 res $? "cycles completed (WARNING/Oops 内建检查)"
 
 say "step 2/5: diff vs OLD baseline (expected FAIL, changed lines must be known drift)"
@@ -87,7 +87,7 @@ bash scripts/baseline/diff_baseline.sh
 res $? "zero diff vs new baseline"
 
 say "step 5/5: full gate G0-G4 under the new baseline (~10 min)"
-bash scripts/r0_gate.sh
+bash scripts/gate/r0_gate.sh
 GATE=$?
 
 say "verdict"

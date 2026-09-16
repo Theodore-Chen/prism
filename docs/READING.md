@@ -3,14 +3,14 @@
 > 给第一次打开这个仓库的人（包括未来的你和面试官）。
 > 目标：沿 ~600 行"协议脊柱"读完就能复述主机如何命令一块 ConnectX-4 Lx。
 
-## 一、按什么顺序读（协议脊柱，~600 行核心）
+## 一、按什么顺序读（协议脊柱，~600 行核心；全部源码在 `src/`）
 
 | 顺序 | 文件 | 读什么 | 你会学到的关键不变量 |
 |------|------|--------|---------------------|
 | 1 | `mlx5_prism_pci.c` (~190) | `mlx5_prism_pci_probe`：PCI 探测 → BAR0/iseg → 启动编排；`mlx5_prism_teardown`：唯一的有序拆卸 | devres 免 goto 清理链；资源栈式获取、逆序释放 |
 | 2 | `mlx5_prism_cmdq.c` (~570) | `mlx5_prism_cmd_exec`：**全项目的心脏**——slot 分配 → 填 64B 描述符 → `wmb()` → `iowrite32be(1<<idx, cmd_dbell)` → 轮询 owner 位 → 两层状态解析 | wmb 非 smp_wmb（消费者是经 PCIe DMA 的固件，不是 CPU）；超时故意泄露 slot+邮箱（防迟到完成写坏复用内存）；最高槽保留给页命令 |
 | 3 | `mlx5_prism_fw.c` (~560) | `mlx5_prism_fw_bootstrap`：9 步引导（ISSI → boot 页 → 字节序 → caps → SET_HCA_CAP → init 页 → INIT_HCA）；`fw_teardown` 双形态 | 每命令有门禁状态（fw_state 门禁表）；known-good caps 是怪癖档案数据不是字段语义 |
-| 4 | `mlx5_prism_eq.c` (~460) | `eq_poll`：owner 奇偶判定 → `dma_rmb` → vector → `complete_slots`；双 doorbell（+0x48 commit / +0x40 arm） | 数据先行、owner 后提交（长尾）；~10% 激活率 → 销毁重建重掷骰子 |
+| 4 | `mlx5_prism_eq.c` (~460) | `eq_poll`：owner 奇偶判定 → `dma_rmb` → vector → `complete_slots`；双 doorbell（+0x48 commit / +0x40 arm） | 数据先行、owner 后提交（长尾 T11 复测中）；事件按序落真·多条目环——T09 的"1 条目/~10% 激活/中断不点火"系编码错位，已翻案（T10-prep） |
 
 辅助：`mlx5_prism.h`（全部结构体与线格式定义）、`mlx5_prism_fmt.h`（**唯一**偏移表 + 每命令 ASCII 布局图）、`mlx5_prism_trace.h`（tracepoint）。
 
@@ -30,24 +30,24 @@ L3 服务       (T12+ phy / T14 smoke / T15 netdev，未建)
 
 ```bash
 # 构建（无需 root）
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+make
 
 # 上机（需 root；先卸载官方驱动）
 sudo modprobe -r mlx5_ib mlx5_core
-sudo insmod mlx5_prism.ko selftest=1     # 自检 + 完整日志（含 caps hexdump）
+sudo insmod src/mlx5_prism.ko selftest=1     # 自检 + 完整日志（含 caps hexdump）
 dmesg | grep mlx5_prism                  # 一步一行的引导剧本
 sudo rmmod mlx5_prism
 
 # 行为保持门禁（重构/修改后必跑）
-sudo bash scripts/t09_verify.sh 1 && sudo bash scripts/baseline/diff_baseline.sh
+sudo bash scripts/gate/t09_verify.sh 1 && sudo bash scripts/baseline/diff_baseline.sh
 
 # 观测（R0.6 起内置）
 sudo perf list | grep mlx5_prism
 sudo perf record -a -e mlx5_prism:prism_cmdq_issue -e mlx5_prism:prism_cmdq_complete \
-     -e mlx5_prism:prism_eq_event -- insmod mlx5_prism.ko selftest=1
+     -e mlx5_prism:prism_eq_event -- insmod src/mlx5_prism.ko selftest=1
 
 # R0 硬件门禁一键跑（G1 基线/G2 生产路径/G3 tracepoint/G4 40 循环压测）
-sudo bash scripts/r0_gate.sh
+sudo bash scripts/gate/r0_gate.sh
 ```
 
 ## 四、知识索引（深挖入口）

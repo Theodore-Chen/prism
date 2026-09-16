@@ -69,7 +69,7 @@ mlx5_prism 与 mlx5_core 不能同时加载（同一 PCI 设备只能绑定一�
 
 ```bash
 sudo modprobe -r mlx5_ib mlx5_core   # 逆序卸载 Mellanox 栈
-sudo insmod mlx5_prism.ko [selftest=1]
+sudo insmod src/mlx5_prism.ko [selftest=1]
 # ... 验证 ...
 sudo rmmod mlx5_prism
 sudo modprobe mlx5_core              # 回生产驱动
@@ -131,10 +131,12 @@ sudo modprobe mlx5_core              # 回生产驱动
 **依赖规则（grep 可检查）**：
 1. 依赖严格向下：L(n) 只能调用 L(<n)。L1 不得引用任何固件语义（不知道 ENABLE_HCA 是什么）；L2 不知道 sysfs/netdev 的存在。
 2. **跨模块触碰 slot 只能走声明 API**：eq.c 消费事件后释放命令槽，必须调用 `mlx5_prism_cmdq_complete_slots()`，禁止直接操作 cmdq 内部位图（R0.3 落地）。
-3. 线格式只允许出现在 L1（及 `mlx5_prism_fmt.h` 的偏移表）——`grep -rn "put_be\|prism_set_bits" mlx5_prism_fw.c` 等在 R0.2 后应只命中 accessor 调用。
+3. 线格式只允许出现在 L1（及 `mlx5_prism_fmt.h` 的偏移表）——`grep -rn "put_be\|prism_set_bits" src/mlx5_prism_fw.c` 等在 R0.2 后应只命中 accessor 调用。
 4. L0/L1 的不变量注释是承重墙：搬运代码必须连同注释一起搬。
 
 ### 2.2 文件到层的映射
+
+> 仓库重组（2026-09-17）起：全部源码在 `src/`（下表文件名均在 src/ 下），设计/阅读文档在 `docs/`，脚本按生命周期分 `scripts/{gate,baseline,test,archive}/`。
 
 | 文件 | 层 | 职责 | 行数（v0.26） |
 |------|---|------|------|
@@ -508,7 +510,7 @@ v1 勘误：v1 草案里 TP_printk 引用了不存在的 `mlx5_prism_cmdq_opcode
 
 ### 9.2 黑匣子记录器（标准组件）
 
-任何新中断/MMIO 路径上机必配：`dmesg -w | stdbuf -oL tee /var/tmp/xxx.log`（/tmp 是 tmpfs 断电即失——T06 第一次现场就这么丢的），逐行落盘。验证脚本内建（scripts/t09_verify.sh 已实现，头部注释 R0.1 修正）。
+任何新中断/MMIO 路径上机必配：`dmesg -w | stdbuf -oL tee /var/tmp/xxx.log`（/tmp 是 tmpfs 断电即失——T06 第一次现场就这么丢的），逐行落盘。验证脚本内建（scripts/gate/t09_verify.sh 已实现，头部注释 R0.1 修正）。
 
 ---
 

@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# Thin forwarder — the kernel-build incantation lives HERE and only here.
+# Everything else (docs, scripts) just says "make" at the repo root; the
+# module itself is built from src/ (see src/Makefile for the obj-m list).
 
-# Default goal — must be the first target in the file, otherwise bare
-# "make" falls through to compile_commands below and never links the .ko.
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
 all:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR)
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/src
 
-.PHONY: all
-
-obj-m := mlx5_prism.o
-
-# trace/define_trace.h re-includes the trace header via a string-literal
-# include; the module source dir must be on the -I path for it to resolve.
-ccflags-y += -I$(src)
-
-mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \
-		mlx5_prism_cmdq.o mlx5_prism_fw.o \
-		mlx5_prism_eq.o mlx5_prism_irq.o \
-		mlx5_prism_trace.o
+clean:
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/src clean
 
 # Generate compile_commands.json for clangd / IDE code navigation.
 # Uses the kernel's native GEN compile_commands.json target which invokes
@@ -24,6 +18,6 @@ mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \
 # so -I./arch/... paths resolve correctly against the kernel build dir.
 # Usage: make compile_commands (no extra deps needed)
 compile_commands:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) \
-		compile_commands.json
-.PHONY: compile_commands
+	$(MAKE) -C $(KDIR) M=$(CURDIR)/src compile_commands.json
+
+.PHONY: all clean compile_commands

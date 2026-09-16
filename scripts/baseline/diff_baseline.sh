@@ -9,7 +9,7 @@
 # hardware before proceeding (DESIGN.md v2 §11.2 safety rules).
 #
 # Usage:
-#   sudo bash scripts/t09_verify.sh 1          # fresh single cycle
+#   sudo bash scripts/gate/t09_verify.sh 1          # fresh single cycle
 #   sudo bash scripts/baseline/diff_baseline.sh    # reads /var/tmp/t09_live.log
 #   sudo bash scripts/baseline/diff_baseline.sh <dmesg-file>
 #

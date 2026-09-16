@@ -18,7 +18,7 @@
 ## 用法（每步 R0.x 重构后的验收关口）
 
 ```bash
-sudo bash scripts/t09_verify.sh 1                 # 跑一个新鲜周期
+sudo bash scripts/gate/t09_verify.sh 1                 # 跑一个新鲜周期
 sudo bash scripts/baseline/diff_baseline.sh           # 对比（默认读 /var/tmp/t09_live.log）
 # 或直接指定日志：bash scripts/baseline/diff_baseline.sh <dmesg-file>
 ```

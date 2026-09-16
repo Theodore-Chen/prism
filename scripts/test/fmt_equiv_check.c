@@ -9,7 +9,7 @@
  * baseline diff (scripts/baseline/diff_baseline.sh).
  *
  * Build & run (host gcc, no kernel headers):
- *   gcc -Wall -Wextra -O2 -I include fmt_equiv_check.c -o /tmp/fmt_equiv && /tmp/fmt_equiv
+ *   gcc -Wall -Wextra -O2 -I include -I ../../src fmt_equiv_check.c -o /tmp/fmt_equiv && /tmp/fmt_equiv
  * Exits 0 iff every case is byte-identical.
  */
 

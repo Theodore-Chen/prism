@@ -728,6 +728,13 @@
   - **后续动作（判决当日已执行）**：ifc 编码转正（fmt.h 旧编码删除、eq.c 去 eq_ifc 参数、读回解析改真窗口 eqc[12]&0x1f）、DESIGN §7 翻案改写、**基线失效待重采**（QUERY_EQ 行为有意变更，非漂移——重采流程见 scripts/baseline/README.md）。
   - **基线重采完成（2026-09-17，rebaseline.sh 二跑）**：ALL GREEN 8/8（G1 基线/G2 生产/G3 tracepoint 84+84+22/G4 40 循环）。新基线 47 行/口，差异全部落在预期族内；11 条事件的机制由 `eqe[1]: vector=0x00000002` 精确锁定——第 1 条事件是 QUERY_EQ 自身的积压完成事件（占 slot 0），自检首条命令因此拿 slot 1，时序结构固定、跨周期确定。首跑事故（protected_regular + 熔断路径 + 采集口径三重工具 bug）复盘见归档⑦。
 
+### 仓库布局重组（2026-09-17）
+
+- **动因**: 根目录松散堆放（11 个源文件 + 4 文档 + Makefile 与 scripts/ 平铺的 10 个脚本混杂），随 T12-T17 继续加文件只会更乱。
+- **目标布局**: 根目录收敛为构建入口与项目元数据（`Makefile` 薄转发、CLAUDE.md、progress.md、task.json）+ 三目录——`src/`（全部模块源码 + obj-m 清单）、`docs/`（DESIGN/READING）、`scripts/{gate,baseline,test,archive}/`（活跃门禁 / 基线数据与对比 / 宿主机测试 / 已完成任务一次性脚本）。用户拍板：进度/任务文件留根；脚本按生命周期分层。
+- **要点**: ①内核构建咒语（KDIR/M=src）收敛到根 Makefile 单点，docs/scripts 一律只说 `make`；②`KDIR ?=` 可覆盖（切 7.0.0 树：`make KDIR=/home/zqc/code/linux`）；③`.gitignore` 通配无锚定，自动覆盖 src/ 产物；④纯移动零代码字节改动——无需基线重采或硬件重验；⑤历史条目中的旧路径保留原样（历史不追改），live 引用（READING 动手路径、CLAUDE 构建命令、gate 脚本 insmod/内部调用、baseline README、test include）逐处更新。
+- **验证**: 根 `make CC=/usr/bin/gcc-11` → `src/mlx5_prism.ko` ✓；宿主机测试 ALL EQUIVALENT ✓；bash -n 全脚本 ✓；live 文档/脚本残留扫描（无 src/ 前缀的 insmod、M=$(pwd)）清零 ✓；git 识别纯重命名 ✓。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

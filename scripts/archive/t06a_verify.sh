@@ -1,19 +1,20 @@
 #!/bin/bash
-# T06b hardware verification — mailbox chains (QUERY_ISSI 112 B single block,
-# SET_ISSI, QUERY_HCA_CAP max/cur 8-block chain; MSI-X stays masked, EQ
-# untouched).
+# [已归档] T06a 已 completed——本脚本按当时仓库布局书写（ko 在根目录），
+# 不随 2026-09-17 仓库重组更新，不可直接重跑。
+# T06a hardware verification — CMDQ poll invoke (ENABLE_HCA / QUERY_PAGES /
+# bad-opcode probes run from probe; MSI-X stays masked, EQ untouched).
 #
-# Output: /tmp/t06b_run.log ; crash recorder: /var/tmp/t06b_live.log
+# Output: /tmp/t06a_run.log ; crash recorder: /var/tmp/t06a_live.log
 # (disk-backed, survives reboot/power loss; every line synced).
 #
-# Usage: sudo bash scripts/t06b_verify.sh [loops]
+# Usage: sudo bash scripts/t06a_verify.sh [loops]
 #   loops=1 (default): single load/unload cycle with full dmesg capture.
 #   loops=N          : N insmod/rmmod cycles — the stress leg of the exit
 #                      criteria; stops early if dmesg shows WARNING/Oops/BUG.
 LOOPS=${1:-1}
 
-LOG=/tmp/t06b_run.log
-LIVE=/var/tmp/t06b_live.log
+LOG=/tmp/t06a_run.log
+LIVE=/var/tmp/t06a_live.log
 exec > >(tee "$LOG") 2>&1
 cd /home/zqc/code/prism
 

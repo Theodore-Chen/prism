@@ -41,11 +41,11 @@ RoCEv2 + cudaHostRegister pinned memory 路径在当前硬件上完全可行。
 ## 构建方式
 
 ```bash
-# 当前运行内核
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+# 当前运行内核（根 Makefile 薄转发到 src/，KDIR 咒语只在根 Makefile 一处）
+make
 
 # 切换 7.0.0 内核后
-make -C /home/zqc/code/linux M=$(pwd) modules
+make KDIR=/home/zqc/code/linux
 ```
 
 ## 学习参考: 每做一个模块，先去读对应的 mlx5_core 源码
@@ -154,11 +154,11 @@ E810 的核心差异：没有 UAR 硬件隔离，控制面和数据面都在 VFI
 sudo modprobe -r mlx5_ib mlx5_core
 
 # 编译
-make -C /lib/modules/$(uname -r)/build M=$(pwd) clean
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+make clean
+make
 
 # 加载
-sudo insmod mlx5_prism.ko
+sudo insmod src/mlx5_prism.ko
 
 # 检查
 lspci -k -d 15b3:1015          # 应显示: Kernel driver in use: mlx5_prism

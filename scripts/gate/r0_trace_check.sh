@@ -10,7 +10,7 @@
 # teardown commands — so late commands find funcs == NULL and record
 # nothing. That asymmetry cost us an afternoon.)
 #
-# Usage: sudo bash scripts/r0_trace_check.sh   (~30 s)
+# Usage: sudo bash scripts/gate/r0_trace_check.sh   (~30 s)
 
 set -u
 cd /home/zqc/code/prism
@@ -33,7 +33,7 @@ echo 1 > "$TR/tracing_on"
   done ) &
 ARM=$!
 
-insmod mlx5_prism.ko selftest=1 || { echo "FAIL: insmod"; kill $ARM 2>/dev/null; exit 1; }
+insmod src/mlx5_prism.ko selftest=1 || { echo "FAIL: insmod"; kill $ARM 2>/dev/null; exit 1; }
 wait $ARM
 # Let the eq self-test tail (patience windows) land in the buffer.
 for i in $(seq 20); do

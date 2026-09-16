@@ -5,7 +5,7 @@
 # byte-equivalence proof. The runtime legs need root and are batched here
 # (DESIGN.md v2 §11.2 safety rules apply: any baseline diff = stop+bisect).
 #
-#   sudo bash scripts/r0_gate.sh
+#   sudo bash scripts/gate/r0_gate.sh
 #
 # Gates:
 #   G1  selftest=1 single cycle  → baseline diff, both ports zero-diff
@@ -23,8 +23,8 @@ say() { echo "== $*"; }
 res() { if [ "$1" -eq 0 ]; then echo "   [PASS] $2"; PASS=$((PASS+1)); else echo "   [FAIL] $2"; FAIL=$((FAIL+1)); fi; }
 
 say "G0 build"
-make -C /lib/modules/$(uname -r)/build M=$(pwd) clean >/dev/null
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules >/tmp/r0_build.log 2>&1
+make clean >/dev/null
+make >/tmp/r0_build.log 2>&1
 res $? "build"
 
 mv -f "$LIVE" "$LIVE.prev" 2>/dev/null
@@ -35,13 +35,13 @@ modprobe -r mlx5_ib 2>/dev/null; modprobe -r mlx5_core
 
 say "G1 baseline (selftest=1)"
 dmesg -c >/dev/null
-insmod mlx5_prism.ko selftest=1 && rmmod mlx5_prism; sleep 1
+insmod src/mlx5_prism.ko selftest=1 && rmmod mlx5_prism; sleep 1
 bash scripts/baseline/diff_baseline.sh "$LIVE"
 res $? "baseline diff both ports"
 
 say "G2 production path (selftest=0)"
 dmesg -c >/dev/null
-insmod mlx5_prism.ko && rmmod mlx5_prism; sleep 1
+insmod src/mlx5_prism.ko && rmmod mlx5_prism; sleep 1
 D=$(dmesg | grep mlx5_prism)
 echo "$D" | grep -q "ENABLE_HCA" && echo "$D" | grep -q "INIT_HCA ok" \
 	&& echo "$D" | grep -q "teardown: 2305/2305"
@@ -67,7 +67,7 @@ echo 1 > "$TR/tracing_on"
   done ) &
 ARM=$!
 dmesg -c >/dev/null
-insmod mlx5_prism.ko selftest=1
+insmod src/mlx5_prism.ko selftest=1
 res $? "insmod selftest=1"
 wait $ARM
 for i in $(seq 20); do
@@ -89,10 +89,10 @@ rmmod mlx5_prism
 
 say "G4 stress (20x selftest=1 + 20x default)"
 for n in $(seq 20); do
-	insmod mlx5_prism.ko selftest=1 && rmmod mlx5_prism || break
+	insmod src/mlx5_prism.ko selftest=1 && rmmod mlx5_prism || break
 done
 for n in $(seq 20); do
-	insmod mlx5_prism.ko && rmmod mlx5_prism || break
+	insmod src/mlx5_prism.ko && rmmod mlx5_prism || break
 done
 dmesg | grep -qE "WARNING|Oops|BUG|leak"
 [ $? -ne 0 ]; res $? "40 cycles zero complaints"

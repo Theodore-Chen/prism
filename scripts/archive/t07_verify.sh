@@ -1,23 +1,26 @@
 #!/bin/bash
-# T06a hardware verification — CMDQ poll invoke (ENABLE_HCA / QUERY_PAGES /
-# bad-opcode probes run from probe; MSI-X stays masked, EQ untouched).
+# [已归档] T07 已 completed——本脚本按当时仓库布局书写（ko 在根目录），
+# 不随 2026-09-17 仓库重组更新，不可直接重跑。
+# T07 hardware verification — fw bootstrap stage I (ISSI, boot pages give,
+# fw_initializing wait, HOST_ENDIANNESS, QUERY_HCA_CAP probe; teardown on
+# rmmod reclaims pages + DISABLE_HCA. MSI-X stays masked, EQ untouched).
 #
-# Output: /tmp/t06a_run.log ; crash recorder: /var/tmp/t06a_live.log
+# Output: /tmp/t07_run.log ; crash recorder: /var/tmp/t07_live.log
 # (disk-backed, survives reboot/power loss; every line synced).
 #
-# Usage: sudo bash scripts/t06a_verify.sh [loops]
+# Usage: sudo bash scripts/t07_verify.sh [loops]
 #   loops=1 (default): single load/unload cycle with full dmesg capture.
 #   loops=N          : N insmod/rmmod cycles — the stress leg of the exit
 #                      criteria; stops early if dmesg shows WARNING/Oops/BUG.
 LOOPS=${1:-1}
 
-LOG=/tmp/t06a_run.log
-LIVE=/var/tmp/t06a_live.log
+LOG=/tmp/t07_run.log
+LIVE=/var/tmp/t07_live.log
 exec > >(tee "$LOG") 2>&1
 cd /home/zqc/code/prism
 
 mv -f "$LIVE" "$LIVE.prev" 2>/dev/null
- stdbuf -oL dmesg -w | while IFS= read -r line; do
+stdbuf -oL dmesg -w | while IFS= read -r line; do
         printf '%s\n' "$line" >> "$LIVE"
         sync
 done &
@@ -42,6 +45,13 @@ for n in $(seq 1 "$LOOPS"); do
 
         echo "### cycle $n/$LOOPS: rmmod"
         rmmod mlx5_prism && echo "=== RMMOD OK ==="
+        sleep 1
+
+        if [ "$LOOPS" -le 1 ]; then
+                echo "### post-rmmod dmesg (teardown evidence)"
+                dmesg | grep mlx5_prism | tail -15
+                sync
+        fi
         if dmesg | grep -E 'WARNING|Oops|BUG' >/dev/null; then
                 echo "!!! kernel complaint detected — stopping"
                 dmesg | grep -E 'WARNING|Oops|BUG'
