@@ -701,6 +701,19 @@
 
 - **tracepoint 采集窗口时序（2026-09-16，G3 三轮追诊破案）**：模块的 tracepoint 探测在卸载路径的 `MODULE_STATE_GOING` 阶段即被内核分离（防 use-after-free），早于 `mod->exit()` 里发出的 teardown 命令——**"加载后使能、卸载时采集"的窗口里命令发出时 funcs==NULL，全部静默跳过**。症状极具迷惑性：事件目录在/使能位=1/调用点反汇编活着/内核自带事件（sched_switch 对照组 1418 条/s）正常/换编译器无效。正解：事件目录在模块 init 执行任何命令**之前**注册——轮询循环在目录出现的瞬间使能，加载期捕获全轨迹（实测 90/90 配对 + 20 条 eq_event）。与 EQ 双 doorbell 同类教训：**"使能"与"可见"是两个时刻，中间隔着生命周期钩子**。附带环境发现：PATH 的 ~/.local/gcc（gcc-15）遮蔽 /usr/bin/gcc（11.4，与内核同版），历史构建均为 gcc-15 产物——本案非根因（gcc-11 重编同样复现），但作为环境隐患记录在案（当前树内 .ko 为 CC=/usr/bin/gcc-11 构建）。
 
+### T10-prep-eqc-翻案实验（预登记，待上机）
+
+- **状态**: designed（判别式已预登记于 scripts/t10prep_eqc_probe.sh 头部；跑机器=用户，sudo 在用户侧）
+- **设计**: 模块参数 `eq_ifc`（默认 0——金样路径请求字节零改动）；fmt.h 新增 ifc 编码/解码各三助手（`prism_eqc_write_dw3_ifc`：dw3=(log<<24)|uar；`prism_eqc_set_intr_ifc`：dw5 低 12 位=vec；`prism_eqc_*_readback_ifc`：真窗口 BE 算术直算）；eq.c 创建路径按参数切换编码，QUERY_EQ 读回在 ifc 模式额外 dump 原始 dw3/dw5 + 真窗口解码，并**以真窗口读回采纳 eq->log_sz**（消费者必须走固件实建的环，否则 nent 错配、owner 奇偶全乱——这是实验内建的防呆）。判别式 A-E 与结论空间见脚本头（跑前写死，勿改）。
+- **核心发现（eqc 位几何修正，重要度最高）**：
+  1. **R0.2 归档两处笔误修正**：intr 真位号 **@180、12 位**（`reserved_at_a0[0x14]` 占 160-179；归档写的 @140-147 系误记）；log_eq_size 真窗口是 **eqc[12] 低 5 位**（归档写的"占该 dword 的 value bits 3-7"错误——按 MLX5_SET 代数 `dw_bit_off=32-5-3=24`，字段落在 value bits 24-28=eqc[12] bits 0-4）。翻案**结论**不受影响：旧编码 `(log&7)<<29|uar` 下 log_eq_size 读值 = `eqc[12]&0x1f` = `uar&0x1f` = 0（uar=4096），1 条目仍是字面请求的。
+  2. **双坐标系的第三道褶皱**：prism_get_bits 的字节内 LSB-first 编号与 ifc/PRM 的 dword 内 MSB-first 编号在**字节内窗口上翻转**——两者的"bit 99"都落在 eqc[12]，一个读高 5 位一个读低 5 位，重叠 bit3-4，字段恒 0 时不可分辨。**金样读回解析器 `PRISM_FLD_EQC_LOGSZ_READBACK(=99)` 一直在读翻转窗口却从未暴露**。处置：金样路径不动（字节冻结纪律），实验解码走 BE 算术直算的真窗口助手，fmt.h 几何注释写明两套约定的分叉点。caps 的 R0.2 常量是经验标定窗口（行为正确），但其数值≠真 ifc 位号——fmt.h 头部"与 mlx5_ifc 编号一致"的旧说法已删。
+  3. **宿主机证明（fmt_equiv_check.c 第 11 节）**：ifc 编码字节与 **MLX5_SET 宏代数的逐位仿真**等价（dw3=0x0C001000 for log12/uar4096），真窗口解码往返一致，新旧判别对钉死（legacy dw3=0x80001000 vs ifc dw3=0x0C001000）。全部 ALL EQUIVALENT。
+  4. **旁证（跑前推理）**：若固件用翻转（高 5 位）窗口，旧编码的 0x80 会被读成 log16——T09 应见巨型环或拒绝，与"接受+1 条目"观测不符；观测行为单方面支持 MLX5_SET 几何。
+  5. **遗留疑点（入档不动）**：7.0.0 ifc 的 log_max_qp @155（真窗口=byte19 低 5 位）与 T06 实证表"c[19]bits3-7"（高 5 位）不一致（num_ports@440=byte55 整字节，两说一致）。known-good 补丁字节全部金样门禁在案、行为无虞，仅字段解释未定；若本实验判据 A 成立（固件=MLX5_SET 几何），此疑点升格为后续 caps 窗口实验。
+- **预期（预登记，勿跑后改）**：A 成立 → 翻案：固件从没说谎，DESIGN §7 三个结论（1 条目环/~10% 激活/提交长尾）重审，ifc 编码转正进 known-good；A 不成立 → T10 严格官方路径直行；A∧(¬B∨¬C) → 环尺寸与激活/长尾解耦（两个独立怪癖）；D（中断计数）独立评估 intr 假设。
+- **安全**: eq_ifc 默认 0（G1 金样不受影响）；owner 预填 0x01 + 消费谓词 `(owner&1)^!!(ci&nent)` 本就是 nent-通用式（与 mlx5_core eq.c:792 同构——nent=1 时"碰巧成立"的公式原来是通用式，多条目环无需改消费者）；黑匣子记录器全程（/var/tmp/t10prep_live.log）。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

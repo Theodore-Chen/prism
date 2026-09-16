@@ -129,8 +129,19 @@ static inline void prism_set_bits(u8 *buf, u16 bit_off, u8 nbits, u32 val)
 #define PRISM_OFF_EQ_PAS		272	/* payload+256: pas[i] be64 @ +8i */
 
 /*
- * ifc-numbered eqc fields (for reference and future experiments):
- * log_eq_size @99 (5 bits), uar_page @104 (24 bits), intr @140 (7 bits).
+ * eqc field geometry (mlx5_ifc.h struct mlx5_ifc_eqc_bits, PRM numbering
+ * is MSB-first within each big-endian dword): log_eq_size @99 (5 bits),
+ * uar_page @104 (24 bits), intr @180 (12 bits).
+ *
+ * CAUTION — two bit-numbering conventions meet here and diverge WITHIN a
+ * byte: MLX5_SET algebra (dw_bit_off = 32 - sz - (bit_off & 31), stored
+ * big-endian) places ifc bit 99 at eqc[12] bit 4, so log_eq_size occupies
+ * eqc[12] bits 0-4; prism_get_bits counts LSB-first, so its "99" reads
+ * eqc[12] bits 3-7. The windows overlap on bits 3-4 and were
+ * indistinguishable while the readback field was always 0. Everything
+ * below the golden path uses plain BE arithmetic so exactly one
+ * convention is in play. (R0.2 notes said intr@140 — misread: reserved
+ * lives there, intr starts at 180.)
  */
 
 /*
@@ -141,13 +152,19 @@ static inline void prism_set_bits(u8 *buf, u16 bit_off, u8 nbits, u32 val)
  * returned 0 (the fw reports the 1-entry EQ it actually built).
  */
 #define PRISM_FLD_EQC_LOGSZ_READBACK	(12 * 8 + 3)
+/* Reads eqc[12] bits 3-7 — NOT the true ifc window for log_eq_size
+ * ([99,103] = bits 0-4, see the geometry note above); the two were
+ * indistinguishable while the readback only ever returned 0. Golden-path
+ * parser, do not touch; the T10-prep experiment decodes the true window
+ * via prism_eqc_logsz_readback_ifc() below.
+ */
 
 /*
  * eqc dword at bytes[12:16] — the exact legacy T09 encoding, byte for byte.
  * prism_eqc_write_dw3() writes ((log_sz & 7) << 29) | uar as one be32.
- * Under ifc numbering that spells log_eq_size = (uar >> 3) & 0x1f = 0 with
- * uar = 4096 — i.e. THE 1-ENTRY EQ WAS LITERALLY REQUESTED, which would
- * re-explain the T09 "firmware built 1 entry despite log12 accepted"
+ * Under ifc semantics that spells log_eq_size = eqc[12] & 0x1f = uar & 0x1f
+ * = 0 with uar = 4096 — i.e. THE 1-ENTRY EQ WAS LITERALLY REQUESTED, which
+ * would re-explain the T09 "firmware built 1 entry despite log12 accepted"
  * finding without any firmware misbehaviour. DO NOT change these bytes
  * without a hardware experiment (queued for T10 prep, progress.md R0.2):
  * golden behavior depends on them.
@@ -160,9 +177,9 @@ static inline void prism_eqc_write_dw3(u8 *in, u8 log_sz, u32 uar)
 
 /*
  * eqc intr (vector binding) — exact legacy T09 encoding: be16 at eqc bytes
- * [16:18] carrying (vec << 4). Not the ifc intr bit range (140-146); the
- * line has never fired under this encoding (T09: events arrive with polling
- * semantics), so its correctness is untested. Revisit with T10.
+ * [16:18] carrying (vec << 4). Not the ifc intr field (@180-191, dword 5
+ * low 12 bits); the line has never fired under this encoding (T09: events
+ * arrive with polling semantics).
  */
 static inline void prism_eqc_set_intr(u8 *in, u32 vec)
 {
@@ -170,6 +187,50 @@ static inline void prism_eqc_set_intr(u8 *in, u32 vec)
 
 	eqc[16] = (u8)(vec >> 4);
 	eqc[17] = (u8)((vec & 0xf) << 4);
+}
+
+/*
+ * ifc-authoritative encodings — the T10-prep experiment's probe bytes
+ * (progress.md T10-prep; scripts/t10prep_eqc_probe.sh pre-registers the
+ * verdict criteria). Same three fields as the legacy helpers above, at
+ * the mlx5_ifc bit positions: dword3 = (log_eq_size << 24) | uar_page,
+ * dword5 = intr. For the T09 request (log12, uar 4096) the two encodings
+ * differ in exactly the bytes under test: dw3 0x80001000 (legacy) vs
+ * 0x0c001000 (ifc) — under ifc semantics the legacy dword requests
+ * log_eq_size = 0, i.e. the 1-entry EQ would be literally what we asked
+ * for. Default path keeps the legacy bytes (golden behavior).
+ */
+static inline void prism_eqc_write_dw3_ifc(u8 *in, u8 log_sz, u32 uar)
+{
+	mlx5_prism_put_be32(in + PRISM_OFF_EQC + 12,
+			    ((u32)(log_sz & 0x1f) << 24) | (uar & 0xffffff));
+}
+
+static inline void prism_eqc_set_intr_ifc(u8 *in, u32 vec)
+{
+	mlx5_prism_put_be32(in + PRISM_OFF_EQC + 20, vec & 0xfff);
+}
+
+/*
+ * True-ifc-window decoders for the same three fields (QUERY_EQ readback;
+ * qeqc points at the 64B eqc payload): log_eq_size [99,103] = eqc[12]
+ * bits 0-4, uar_page [104,127] = be24 at eqc[13:16], intr [180,191] =
+ * low 12 bits of the be32 at eqc[20:24]. Matches MLX5_GET algebra
+ * exactly; prism_get_bits would read the flipped LSB-first windows.
+ */
+static inline u32 prism_eqc_logsz_readback_ifc(const u8 *eqc)
+{
+	return eqc[12] & 0x1f;
+}
+
+static inline u32 prism_eqc_uar_readback_ifc(const u8 *eqc)
+{
+	return mlx5_prism_get_be32(eqc + 12) & 0xffffff;
+}
+
+static inline u32 prism_eqc_intr_readback_ifc(const u8 *eqc)
+{
+	return mlx5_prism_get_be32(eqc + 20) & 0xfff;
 }
 
 #endif /* __MLX5_PRISM_FMT_H */

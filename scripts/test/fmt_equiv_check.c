@@ -104,6 +104,18 @@ static uint64_t host_cpu_to_be64(uint64_t v)
 #endif
 }
 
+/* MLX5_SET algebra, host-side emulation of include/linux/mlx5/device.h:
+ * dw_bit_off = 32 - sz - (bit_off & 31); the field is merged into the
+ * cpu dword which put_be32 then stores big-endian. */
+static uint32_t emu_mlx5_set(uint32_t old, uint32_t v, unsigned bit_off,
+			     unsigned sz)
+{
+	uint32_t dw_bit_off = 32 - sz - (bit_off & 31);
+	uint32_t mask = (1u << sz) - 1;
+
+	return (old & ~(mask << dw_bit_off)) | ((v & mask) << dw_bit_off);
+}
+
 int main(void)
 {
 	int i;
@@ -332,6 +344,81 @@ int main(void)
 
 		out[11] = 4;
 		check_val("eqn byte 11", out[11], out[PRISM_OFF_EQN]);
+	}
+
+	/* 11. ifc-position encodings (T10-prep): NEW probe bytes, not v0.26
+	 * equivalence — pinned against hand-computed mlx5_ifc expectations:
+	 * dword3 = (log_eq_size << 24) | uar_page (@99/@104), dword5 = intr
+	 * (@180, low 12 bits). Roundtrips go through the true-ifc-window
+	 * decoders (NOT prism_get_bits — its LSB-first numbering reads the
+	 * flipped within-byte window; see fmt.h geometry note), and the
+	 * emulated MLX5_SET algebra proves the helpers place bytes exactly
+	 * where mlx5_core would. Ends with the discriminating pair the whole
+	 * experiment rides on: legacy dw3 0x80001000 vs ifc dw3 0x0c001000
+	 * for the T09 request (log12, uar 4096). */
+	printf("create_eq eqc ifc encodings (T10-prep probe bytes)\n");
+	{
+		struct { uint32_t log, uar, dw3; } cases[] = {
+			{ 12, 4096,     0x0c001000u },
+			{ 9,  4096,     0x09001000u },
+			{ 8,  5,        0x08000005u },
+			{ 6,  0x123456, 0x06123456u },
+			{ 0,  0,        0x00000000u },
+		};
+		uint32_t vecs[] = { 0, 1, 2, 0xfff };
+		size_t a, b;
+
+		for (a = 0; a < sizeof(cases) / sizeof(cases[0]); a++) {
+			u8 exp[80] = { }, n[80] = { };
+			char name[64];
+
+			prism_eqc_write_dw3_ifc(n, cases[a].log, cases[a].uar);
+			mlx5_prism_put_be32(exp + 16 + 12, cases[a].dw3);
+			snprintf(name, sizeof(name), "ifc dw3 log%u uar=0x%x",
+				 cases[a].log, cases[a].uar);
+			check_eq(name, exp, n, 80);
+			check_val("  decode log_eq_size (true window)",
+				  prism_eqc_logsz_readback_ifc(n + 16),
+				  cases[a].log & 0x1f);
+			check_val("  decode uar_page (true window)",
+				  prism_eqc_uar_readback_ifc(n + 16),
+				  cases[a].uar & 0xffffff);
+		}
+		for (b = 0; b < sizeof(vecs) / sizeof(vecs[0]); b++) {
+			u8 exp[80] = { }, n[80] = { };
+			char name[64];
+
+			prism_eqc_set_intr_ifc(n, vecs[b]);
+			mlx5_prism_put_be32(exp + 16 + 20, vecs[b]);
+			snprintf(name, sizeof(name), "ifc dw5 vec=%u", vecs[b]);
+			check_eq(name, exp, n, 80);
+			check_val("  decode intr (true window)",
+				  prism_eqc_intr_readback_ifc(n + 16), vecs[b]);
+		}
+		{
+			u8 n[80] = { };
+			uint32_t dw3 = 0, dw5 = 0;
+
+			prism_eqc_write_dw3_ifc(n, 12, 4096);
+			prism_eqc_set_intr_ifc(n, 1);
+			dw3 = emu_mlx5_set(dw3, 12, 99, 5);
+			dw3 = emu_mlx5_set(dw3, 4096, 104, 24);
+			dw5 = emu_mlx5_set(dw5, 1, 180, 12);
+			check_val("MLX5_SET(emulated) dw3 == ifc helper",
+				  mlx5_prism_get_be32(n + 16 + 12), dw3);
+			check_val("MLX5_SET(emulated) dw5 == ifc helper",
+				  mlx5_prism_get_be32(n + 16 + 20), dw5);
+		}
+		{
+			u8 l[80] = { }, f[80] = { };
+
+			prism_eqc_write_dw3(l, 12, 4096);
+			prism_eqc_write_dw3_ifc(f, 12, 4096);
+			check_val("legacy dw3 (log12, uar 4096)",
+				  mlx5_prism_get_be32(l + 16 + 12), 0x80001000u);
+			check_val("ifc dw3 (log12, uar 4096)",
+				  mlx5_prism_get_be32(f + 16 + 12), 0x0c001000u);
+		}
 	}
 
 	printf(failures ? "FAILURES: %d\n" : "ALL EQUIVALENT (%d failures)\n",
