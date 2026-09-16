@@ -953,7 +953,7 @@
       "title": "R0.5 设备结构重组 + 统一 teardown + 自检分离",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "R0.4-fw-state-quirks"
       ],

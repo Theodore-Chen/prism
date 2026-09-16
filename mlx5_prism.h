@@ -213,6 +213,7 @@ struct mlx5_prism_irq {
  */
 enum mlx5_prism_fw_state {
 	MLX5_PRISM_FW_RESET,		/* nothing handed over yet */
+	MLX5_PRISM_FW_ENABLED,		/* ENABLE_HCA accepted */
 	MLX5_PRISM_FW_BOOT_PAGES,	/* boot pages given: caps/endian legal */
 	MLX5_PRISM_FW_CAPS_SET,		/* SET_HCA_CAP accepted: init pages legal */
 	MLX5_PRISM_FW_OPERATIONAL,	/* INIT_HCA ok: resources legal */
@@ -243,8 +244,10 @@ struct mlx5_prism_fw {
 	bool		active;		/* bootstrap entered; teardown may talk */
 	bool		initialized;	/* INIT_HCA ok; full teardown applies */
 	u8		state;		/* enum mlx5_prism_fw_state */
-	void		*pages[MLX5_PRISM_MAX_FW_PAGES];
-	dma_addr_t	pages_dma[MLX5_PRISM_MAX_FW_PAGES];
+	void		**pages;	/* given pages (lazy, MAX_FW_PAGES cap) */
+	dma_addr_t	*pages_dma;
+	u8		*caps_max;	/* cached QUERY_HCA_CAP payloads for L3 */
+	u8		*caps_cur;
 };
 
 struct mlx5_prism_dev {

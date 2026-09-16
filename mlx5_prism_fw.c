@@ -26,6 +26,7 @@
 #include <linux/ktime.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/vmalloc.h>
 
 #include "mlx5_prism.h"
 #include "mlx5_prism_fmt.h"
@@ -236,6 +237,21 @@ static int mlx5_prism_fw_supply_pages(struct mlx5_prism_dev *dev, u32 op_mod,
 	}
 
 	pci_info(dev->pdev, "%s pages: firmware wants %u\n", phase, requested);
+	if (!dev->fw.pages) {
+		struct mlx5_prism_fw *fw = &dev->fw;
+
+		fw->pages = kvcalloc(MLX5_PRISM_MAX_FW_PAGES,
+				     sizeof(*fw->pages), GFP_KERNEL);
+		fw->pages_dma = kvcalloc(MLX5_PRISM_MAX_FW_PAGES,
+					 sizeof(*fw->pages_dma), GFP_KERNEL);
+		if (!fw->pages || !fw->pages_dma) {
+			kvfree(fw->pages);
+			kvfree(fw->pages_dma);
+			fw->pages = NULL;
+			fw->pages_dma = NULL;
+			return -ENOMEM;
+		}
+	}
 	for (i = 0; i < requested; i++) {
 		struct mlx5_prism_fw *fw = &dev->fw;
 		void *p;
@@ -279,6 +295,7 @@ err_free_batch:
  */
 static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 {
+	struct mlx5_prism_fw *fw = &dev->fw;
 	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 *caps;
 	int err, i, nonzero = 0;
@@ -297,6 +314,13 @@ static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 		goto out;
 	pci_info(dev->pdev, "caps[max]: %64ph %64ph %64ph\n",
 		 caps, caps + 64, caps + 128);
+	if (!fw->caps_max) {
+		fw->caps_max = kzalloc(MLX5_PRISM_CAP_BYTES, GFP_KERNEL);
+		fw->caps_cur = kzalloc(MLX5_PRISM_CAP_BYTES, GFP_KERNEL);
+	}
+	if (fw->caps_max && fw->caps_cur)
+		memcpy(fw->caps_max, caps + MLX5_PRISM_CMD_HDR_SIZE,
+		       MLX5_PRISM_CAP_BYTES);
 
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,
 				     qin, sizeof(qin), caps,
@@ -306,6 +330,9 @@ static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 		goto out;
 	pci_info(dev->pdev, "caps[cur]: %64ph %64ph %64ph\n",
 		 caps, caps + 64, caps + 128);
+	if (fw->caps_max && fw->caps_cur)
+		memcpy(fw->caps_cur, caps + MLX5_PRISM_CMD_HDR_SIZE,
+		       MLX5_PRISM_CAP_BYTES);
 
 	/* Drain sanity: the payload must not be all zeros. */
 	for (i = MLX5_PRISM_CMD_HDR_SIZE; i < MLX5_PRISM_CMD_HDR_SIZE + 64; i++)
@@ -349,6 +376,7 @@ out:
  */
 static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 {
+	struct mlx5_prism_fw *fw = &dev->fw;
 	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 sout[MLX5_PRISM_CMD_HDR_SIZE];
 	u8 *caps, *c;
@@ -399,6 +427,9 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 		goto out;
 	pci_info(dev->pdev, "caps[post]: %64ph %64ph %64ph\n",
 		 caps, caps + 64, caps + 128);
+	if (fw->caps_cur)
+		memcpy(fw->caps_cur, caps + MLX5_PRISM_CMD_HDR_SIZE,
+		       MLX5_PRISM_CAP_BYTES);
 
 out:
 	kfree(caps);
@@ -415,6 +446,24 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 	t_boot = ktime_get_ns();
 	dev->fw.active = true;
 	mlx5_prism_fw_profile_defaults(dev);
+
+	/*
+	 * ENABLE_HCA is the first command the fw accepts; the self-test
+	 * already sent it (and advanced fw_state) when running, otherwise
+	 * this is the production path's turn.
+	 */
+	if (dev->fw.state == MLX5_PRISM_FW_RESET) {
+		u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
+		u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+
+		err = mlx5_prism_cmdq_invoke(dev,
+					     MLX5_PRISM_CMD_OP_ENABLE_HCA, 0,
+					     in, sizeof(in),
+					     out, sizeof(out));
+		if (err)
+			return err;
+		dev->fw.state = MLX5_PRISM_FW_ENABLED;
+	}
 
 	err = mlx5_prism_fw_set_issi(dev);
 	if (err)
@@ -559,6 +608,15 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
 	for (i = 0; i < fw->num_pages; i++)
 		dma_free_coherent(&dev->pdev->dev, MLX5_PRISM_PAGE_SIZE,
 				  fw->pages[i], fw->pages_dma[i]);
+	kvfree(fw->pages);
+	kvfree(fw->pages_dma);
+	fw->pages = NULL;
+	fw->pages_dma = NULL;
+
+	kfree(fw->caps_max);
+	kfree(fw->caps_cur);
+	fw->caps_max = NULL;
+	fw->caps_cur = NULL;
 
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_DISABLE_HCA, 0,
 				     in, sizeof(in), out, sizeof(out));

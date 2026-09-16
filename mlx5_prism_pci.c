@@ -19,6 +19,15 @@
 
 #include "mlx5_prism.h"
 
+/*
+ * Built-in self-tests (cmdq round trip, mailbox chain, EQ polling) run only
+ * when asked — the default probe is the plain production bring-up. The
+ * verify scripts load with selftest=1.
+ */
+static bool selftest;
+module_param(selftest, bool, 0444);
+MODULE_PARM_DESC(selftest, "run built-in self-tests at probe (default off)");
+
 const struct pci_device_id mlx5_prism_pci_ids[] = {
 	{ PCI_VDEVICE(MELLANOX, MLX5_PRISM_DEVICE_ID_CX4_LX) },
 	{ 0, }
@@ -41,6 +50,29 @@ static int mlx5_prism_set_dma_caps(struct pci_dev *pdev)
 
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 	return 0;
+}
+
+/*
+ * Single ordered teardown (DESIGN.md v2 §4.4): resources are acquired in a
+ * stack (allocs -> cmdq -> fw bootstrap -> EQ), so they are released in
+ * reverse. PRISM_TD_NO_EQ serves a bootstrap that failed before any EQ
+ * existed; PRISM_TD_ALL is the full path (eq teardown talks over the CMDQ,
+ * hence before fw teardown and the queues).
+ */
+enum mlx5_prism_td_stage {
+	PRISM_TD_NO_EQ,
+	PRISM_TD_ALL,
+};
+
+static void mlx5_prism_teardown(struct mlx5_prism_dev *dev,
+				enum mlx5_prism_td_stage stage)
+{
+	if (stage >= PRISM_TD_ALL)
+		mlx5_prism_eq_teardown(dev);
+	mlx5_prism_fw_teardown(dev);
+	mlx5_prism_irq_free(dev);
+	mlx5_prism_eq_free(dev);
+	mlx5_prism_cmdq_free(dev);
 }
 
 int mlx5_prism_pci_probe(struct pci_dev *pdev,
@@ -108,47 +140,50 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_irq;
 
-	/*
-	 * T06a: prove the blocking poll round trip (ENABLE_HCA, QUERY_PAGES,
-	 * bad opcode) before T07 starts mutating firmware state.
-	 */
-	err = mlx5_prism_cmdq_selftest(dev);
-	if (err)
-		goto err_free_irq;
+	if (selftest) {
+		/*
+		 * T06a: prove the blocking poll round trip (ENABLE_HCA,
+		 * QUERY_PAGES, bad opcode) before mutating firmware state.
+		 */
+		err = mlx5_prism_cmdq_selftest(dev);
+		if (err)
+			goto err_free_irq;
+		/* The self-test's ENABLE_HCA already advanced the fw state. */
+		dev->fw.state = MLX5_PRISM_FW_ENABLED;
 
-	/* T06b: mailbox chain — QUERY_ISSI (1-block out) + SET_ISSI. */
-	err = mlx5_prism_cmdq_mailbox_selftest(dev);
-	if (err)
-		goto err_free_irq;
+		/* T06b: mailbox chain — QUERY_ISSI (1-block out) + SET_ISSI. */
+		err = mlx5_prism_cmdq_mailbox_selftest(dev);
+		if (err)
+			goto err_free_irq;
+	}
 
 	/* T07/T08: full bootstrap — ISSI, pages, caps, INIT_HCA (M1). */
 	err = mlx5_prism_fw_bootstrap(dev);
-	if (err) {
-		/* Reclaim any pages already given (mlx5_core's failed-load path). */
-		mlx5_prism_fw_teardown(dev);
-		goto err_free_irq;
-	}
+	if (err)
+		goto err_fw_teardown;
 
 	/*
 	 * T09: EQ with interrupts masked — CREATE_EQ ladder, EQEs consumed
 	 * by polling; /proc/interrupts must stay at 0.
 	 */
 	err = mlx5_prism_eq_setup(dev);
-	if (err) {
-		mlx5_prism_eq_teardown(dev);
-		mlx5_prism_fw_teardown(dev);
-		goto err_free_irq;
-	}
-
-	err = mlx5_prism_eq_selftest(dev);
 	if (err)
 		goto err_eq_teardown;
+
+	if (selftest) {
+		err = mlx5_prism_eq_selftest(dev);
+		if (err)
+			goto err_eq_teardown;
+	}
 
 	return 0;
 
 err_eq_teardown:
-	mlx5_prism_eq_teardown(dev);
-	mlx5_prism_fw_teardown(dev);
+	mlx5_prism_teardown(dev, PRISM_TD_ALL);
+	return err;
+err_fw_teardown:
+	mlx5_prism_teardown(dev, PRISM_TD_NO_EQ);
+	return err;
 
 err_free_irq:
 	mlx5_prism_irq_free(dev);
@@ -173,12 +208,7 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
 
-	/* Teardown talks over the CMDQ — must run before the queues go away. */
-	mlx5_prism_eq_teardown(dev);
-	mlx5_prism_fw_teardown(dev);
-	mlx5_prism_irq_free(dev);
-	mlx5_prism_eq_free(dev);
-	mlx5_prism_cmdq_free(dev);
+	mlx5_prism_teardown(dev, PRISM_TD_ALL);
 	pci_clear_master(pdev);
 	pci_set_drvdata(pdev, NULL);
 }

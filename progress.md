@@ -28,7 +28,7 @@
 | R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | **completed** | 见 R0.2 节 | 2026-09-15 |
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | **completed** | 见 R0.3 节 | 2026-09-15 |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | **completed** | 见 R0.4 节 | 2026-09-15 |
-| R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | pending | — | — |
+| R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | **completed** | 见 R0.5 节 | 2026-09-15 |
 | R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | pending | — | — |
 | T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | pending | — | — |
 | T10-eq-irq-enable | MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径） | S5 | — | pending | — | — |
@@ -676,6 +676,13 @@
 - **交付物**: `enum mlx5_prism_fw_state`（fw->state）+ `mlx5_prism_fw_cmd_allowed()` 门禁表（fw.c，cmd_exec 入口调用，状态不符 -EINVAL）；`struct mlx5_prism_fw_profile`（known-good 四字段/EQ 激活重试/耐心窗）probe 时按 fw_rev 填充（未知版本告警沿用 14.32 档）；模块参数 `eq_patience_ms`/`eq_engagement_retries`（默认=实测值）；状态推进点：boot give→BOOT_PAGES、SET_HCA_CAP→CAPS_SET、INIT_HCA→OPERATIONAL、TEARDOWN→CAPS_SET
 - **验证**: make 零警告 + checkpatch 0/0/0；known-good 字节经 profile 路径仍与 fmt 等价测试覆盖的旧路径一致（值同为 18/清零四处）
 - **reflection 要点**: 驱动侧门禁是第一层"便宜失败"，固件门禁仍是最终裁决——两层分工：驱动拦"已知时序错误"，固件裁"一切"
+
+### R0.5-dev-ctx-teardown-selftest
+
+- **状态**: completed（selftest=1 路径金样等价：自检序列/顺序/日志不变；selftest=0 为新生产路径——bootstrap 补发 ENABLE_HCA（state==RESET 时），是 R0 中唯一"新增行为"，属设计内新增而非行为漂移）
+- **交付物**: `selftest=1` 模块参数（默认关，全部自检移出生产 probe）；fw.pages/pages_dma 懒分配（kvcalloc，上限 8192 不变，128KB 不再常驻设备结构）；caps_max/cur 缓存（probe_caps/set_hca_cap 填充，teardown 释放，T12/T13 消费）；`mlx5_prism_teardown(dev, stage)` 单一有序拆卸（PRISM_TD_NO_EQ/ALL，pci.c 三处重复清零）；fw state 增 ENABLED（自检 ENABLE_HCA 后由编排层推进）
+- **验证**: make 零警告 + checkpatch 0/0/0 + teardown 出现次数=1
+- **reflection 要点**: 生产/验证路径分离后，eq 自检最坏 80s 挂起不再进默认 probe；错误路径从失败层调 teardown(stage)——栈式获取逆序释放的单一表达
 
 ## 修改 DESIGN.md 的记录
 
