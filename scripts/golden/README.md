@@ -3,12 +3,17 @@
 ## 文件
 
 - `golden_dmesg_0.txt` / `golden_dmesg_1.txt` — 双口各自的归一化金样模板
-  （单口 46 行：probe 引导序列 + EQ 自检 + teardown 关键行）。
+  （单口 47 行：probe 引导序列 + EQ 自检 + teardown 关键行）。
   **两口不可互换**：caps hexdump 在 function 标识字节处有真实差异
-  （.0 口与 .1 口各差 1 字节），但各自跨 100 压测周期完全确定。
+  （.0 口与 .1 口各差 1 字节），但各自跨压测周期完全确定。
+  现行金样为 **T10-prep 重采版（2026-09-17，ALL GREEN 8/8）**：eqc ifc
+  编码后的行为——QUERY_EQ 回显 log12/4096 条目、11 条事件（含 QUERY_EQ
+  自身积压完成，eqe[1] 释放 slot 1 即其时序指纹）、DESTROY 计数 11。
 - `normalize.sh` — 归一化逻辑（唯一存放点，金样生成与对比共用）。
 - `diff_golden.sh` — 对比门禁：取日志中最后一个完整周期（锚点 = 最后一次
-  .0 口 BAR0 mapped），双口分别与金样 diff。
+  .0 口 BAR0 mapped），双口分别与金样 diff；临时文件走 mktemp 私有目录
+  （`PRISM_GOLDEN_WORK` 可注入——fs.protected_regular 教训，progress.md
+  归档⑦）。
 
 ## 用法（每步 R0.x 重构后的验收关口）
 

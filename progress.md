@@ -726,6 +726,7 @@
   - **C ?（长尾）未决**：自检每命令固定消耗 ~2000ms 耐心窗（等待结构掩盖提交时延），本次数据不可判；T11 用 tracepoint latency_ns 复测。
   - 每加载 11 events（10 命令 + 1 条 CREATE_EQ/QUERY_EQ 自身积压事件），interrupts 10-11（轻度聚合）。
   - **后续动作（判决当日已执行）**：ifc 编码转正（fmt.h 旧编码删除、eq.c 去 eq_ifc 参数、读回解析改真窗口 eqc[12]&0x1f）、DESIGN §7 翻案改写、**金样失效待重采**（QUERY_EQ 行为有意变更，非漂移——重采流程见 scripts/golden/README.md）。
+  - **金样重采完成（2026-09-17，rebaseline_golden.sh 二跑）**：ALL GREEN 8/8（G1 金样/G2 生产/G3 tracepoint 84+84+22/G4 40 循环）。新金样 47 行/口，差异全部落在预期族内；11 条事件的机制由 `eqe[1]: vector=0x00000002` 精确锁定——第 1 条事件是 QUERY_EQ 自身的积压完成事件（占 slot 0），自检首条命令因此拿 slot 1，时序结构固定、跨周期确定。首跑事故（protected_regular + 熔断路径 + 采集口径三重工具 bug）复盘见归档⑦。
 
 ## 修改 DESIGN.md 的记录
 

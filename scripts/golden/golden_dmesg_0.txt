@@ -28,10 +28,10 @@ init pages supplied in T ms
 INIT_HCA ok: HCA operational ( T ms)
 Bootstrap time: T ms
 ALLOC_UAR ok: uar=4096 doorbell=X
-QUERY_EQ: fw reports log_eq_size=0 (1 entries; requested 4096) eqn=4
-EQ ready: eqn=4 entries=1 (armed, irq enabled: counting stub)
+QUERY_EQ: fw reports log_eq_size=12 (4096 entries; requested 4096) eqn=4
+EQ ready: eqn=4 entries=4096 (armed, irq enabled: counting stub)
 eqe[0]: type=0x0a vector=0x00000001
-eqe[1]: type=0x0a vector=0x00000001
+eqe[1]: type=0x0a vector=0x00000002
 eqe[2]: type=0x0a vector=0x00000001
 eqe[3]: type=0x0a vector=0x00000001
 eqe[4]: type=0x0a vector=0x00000001
@@ -40,7 +40,8 @@ eqe[6]: type=0x0a vector=0x00000001
 eqe[7]: type=0x0a vector=0x00000001
 eqe[8]: type=0x0a vector=0x00000001
 eqe[9]: type=0x0a vector=0x00000001
-eq self-test: 10/10 commands ok with an EQE each (10 events total, 0 interrupts)
+eqe[10]: type=0x0a vector=0x00000001
+eq self-test: 10/10 commands ok with an EQE each (E events total, I interrupts)
 removing (fw_rev 14.32.1908)
-DESTROY_EQ ok: eq_number=4, 10 events consumed
+DESTROY_EQ ok: eq_number=4, 11 events consumed
 teardown: 2305/2305 pages reclaimed, HCA disabled
