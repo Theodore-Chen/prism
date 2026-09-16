@@ -703,7 +703,7 @@
 - **验证**: make 零警告 + checkpatch 8 文件 0/0/0（trace.h 为已入档的 TRACE_EVENT 布局豁免）+ 等价性测试 ALL EQUIVALENT
 - **反思**: 面向读者的三件套（剧本式日志/地图式文件头/全景式偏移表）与面向作者的资产（考古档案/基线/测试）分工明确——前者做减法，后者只增不减
 
-- **tracepoint 采集窗口时序（2026-09-16，G3 三轮追诊破案）**：模块的 tracepoint 探测在卸载路径的 `MODULE_STATE_GOING` 阶段即被内核分离（防 use-after-free），早于 `mod->exit()` 里发出的 teardown 命令——**"加载后使能、卸载时采集"的窗口里命令发出时 funcs==NULL，全部静默跳过**。症状极具迷惑性：事件目录在/使能位=1/调用点反汇编活着/内核自带事件（sched_switch 对照组 1418 条/s）正常/换编译器无效。正解：事件目录在模块 init 执行任何命令**之前**注册——轮询循环在目录出现的瞬间使能，加载期捕获全轨迹（实测 90/90 配对 + 20 条 eq_event）。与 EQ 双 doorbell 同类教训：**"使能"与"可见"是两个时刻，中间隔着生命周期钩子**。附带环境发现：PATH 的 ~/.local/gcc（gcc-15）遮蔽 /usr/bin/gcc（11.4，与内核同版），历史构建均为 gcc-15 产物——本案非根因（gcc-11 重编同样复现），但作为环境隐患记录在案（当前树内 .ko 为 CC=/usr/bin/gcc-11 构建）。
+- **tracepoint 采集窗口时序（2026-09-16，G3 三轮追诊破案）**：模块的 tracepoint 探测在卸载路径的 `MODULE_STATE_GOING` 阶段即被内核分离（防 use-after-free），早于 `mod->exit()` 里发出的 teardown 命令——**"加载后使能、卸载时采集"的窗口里命令发出时 funcs==NULL，全部静默跳过**。症状极具迷惑性：事件目录在/使能位=1/调用点反汇编活着/内核自带事件（sched_switch 对照组 1418 条/s）正常/换编译器无效。正解：事件目录在模块 init 执行任何命令**之前**注册——轮询循环在目录出现的瞬间使能，加载期捕获全轨迹（实测 90/90 配对 + 20 条 eq_event）。与 EQ 双 doorbell 同类教训：**"使能"与"可见"是两个时刻，中间隔着生命周期钩子**。附带环境发现：PATH 的 ~/.local/gcc（gcc-15）遮蔽 /usr/bin/gcc（11.4，与内核同版），历史构建均为 gcc-15 产物——本案非根因（gcc-11 重编同样复现），但作为环境隐患记录在案（当前树内 .ko 为 CC=/usr/bin/gcc-11 构建）。（补注 2026-09-17：源头定位为 `~/.local/env-toolchain.sh`（.bashrc/.zshrc source，刻意配置的 DPDK 现代工具链，不降级）；仓库侧对策 = 根 Makefile 钉死默认 CC，另注 sudo 下构建因 secure_path 本就走 /usr/bin/gcc。）
 
 ### T10-prep-eqc-翻案实验（预登记，待上机）
 
@@ -734,6 +734,7 @@
 - **目标布局**: 根目录收敛为构建入口与项目元数据（`Makefile` 薄转发、CLAUDE.md、progress.md、task.json）+ 三目录——`src/`（全部模块源码 + obj-m 清单）、`docs/`（DESIGN/READING）、`scripts/{gate,baseline,test,archive}/`（活跃门禁 / 基线数据与对比 / 宿主机测试 / 已完成任务一次性脚本）。用户拍板：进度/任务文件留根；脚本按生命周期分层。
 - **要点**: ①内核构建咒语（KDIR/M=src）收敛到根 Makefile 单点，docs/scripts 一律只说 `make`；②`KDIR ?=` 可覆盖（切 7.0.0 树：`make KDIR=/home/zqc/code/linux`）；③`.gitignore` 通配无锚定，自动覆盖 src/ 产物；④纯移动零代码字节改动——无需基线重采或硬件重验；⑤历史条目中的旧路径保留原样（历史不追改），live 引用（READING 动手路径、CLAUDE 构建命令、gate 脚本 insmod/内部调用、baseline README、test include）逐处更新。
 - **验证**: 根 `make CC=/usr/bin/gcc-11` → `src/mlx5_prism.ko` ✓；宿主机测试 ALL EQUIVALENT ✓；bash -n 全脚本 ✓；live 文档/脚本残留扫描（无 src/ 前缀的 insmod、M=$(pwd)）清零 ✓；git 识别纯重命名 ✓。
+- **收尾（同日）**: ①r0_gate G0 构建后 `chown -R $SUDO_UID src`（sudo 构建产物交还调用者，消除 root 属主 .o/.cmd 卡后续增量构建）；②新增根 README.md 门面（定位/快速开始/目录地图/深读指针）——此前门面内容藏在 READING.md §三且无 README，属缺口；③根 Makefile 钉死默认 `CC=/usr/bin/gcc-11`（命令行 `make CC=` 可覆盖）——gcc-15 遮蔽的仓库侧对策，用户工具链（~/.local/env-toolchain.sh，刻意配置的 DPDK 现代链）不动；裸 `make` 在任何身份/PATH 下都拿内核同款编译器，也顺带消除了".cmd 增量不感知裸 gcc 背后换编译器"的混编隐患。
 
 ## 修改 DESIGN.md 的记录
 

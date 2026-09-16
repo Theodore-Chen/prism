@@ -26,6 +26,9 @@ say "G0 build"
 make clean >/dev/null
 make >/tmp/r0_build.log 2>&1
 res $? "build"
+# Build ran under sudo: hand the artifacts back to the invoking user so
+# later non-root incremental builds don't hit root-owned .o/.cmd files.
+[ -n "${SUDO_UID:-}" ] && chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" src
 
 mv -f "$LIVE" "$LIVE.prev" 2>/dev/null
 stdbuf -oL dmesg -w | while IFS= read -r l; do printf '%s\n' "$l" >> "$LIVE"; sync; done &
