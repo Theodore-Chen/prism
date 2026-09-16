@@ -1,10 +1,14 @@
 #!/bin/bash
-# r0_trace_check.sh — minimal standalone tracefs verification of the prism
+# r0_trace_check.sh — standalone tracefs verification of the prism
 # tracepoints (G3 evidence, no perf dependency).
 #
-# Diagnoses the full chain: tracing_on master switch -> event registration
-# at module load -> event enable -> rmmod teardown commands firing the
-# events -> counts read back from the ring buffer.
+# v3 — capture during LOAD. The event directories register before module
+# init runs any command, so a poll loop arms them the instant they appear
+# and the whole bootstrap/self-test gets captured. (Arming after load and
+# capturing at rmmod does NOT work: the kernel detaches tracepoint probes
+# at MODULE_STATE_GOING — before the module exit function issues its
+# teardown commands — so late commands find funcs == NULL and record
+# nothing. That asymmetry cost us an afternoon.)
 #
 # Usage: sudo bash scripts/r0_trace_check.sh   (~30 s)
 
@@ -17,36 +21,26 @@ TR=/sys/kernel/tracing
 modprobe -r mlx5_ib 2>/dev/null; modprobe -r mlx5_core 2>/dev/null
 rmmod mlx5_prism 2>/dev/null
 
-echo "== tracing dir: $TR"
-echo "== env: tracing_on=$(cat $TR/tracing_on) buffer_kb=$(cat $TR/buffer_size_kb) cpumask=$(cat $TR/tracing_cpumask) pid_filter=[$(cat $TR/set_event_pid)] tracer=$(cat $TR/current_tracer)"
+echo "== env: tracing_on=$(cat $TR/tracing_on) buffer_kb=$(cat $TR/buffer_size_kb) tracer=$(cat $TR/current_tracer)"
 echo 1 > "$TR/tracing_on"
-
-# Control group: a kernel-builtin event (built by the kernel's own gcc).
-# Records but ours does not -> module-side fault; neither records ->
-# environmental (buffer/cpumask/pid filter).
-echo 1 > "$TR/events/sched/sched_switch/enable"
 : > "$TR/trace"
-sleep 1
-echo "== control (sched_switch in 1s): $(grep -c 'sched_switch:' $TR/trace)"
-echo 0 > "$TR/events/sched/sched_switch/enable"
 
-insmod mlx5_prism.ko || { echo "FAIL: insmod"; exit 1; }
-EV="$TR/events/mlx5_prism"
-if [ ! -d "$EV" ]; then
-	echo "FAIL: no mlx5_prism events dir — tracepoints not registered"
-	rmmod mlx5_prism
-	exit 1
-fi
-echo "== events registered: $(ls $EV | grep -c prism_)"
+# Arm the events the instant the module registers them (before init runs
+# any command). The spin is brief — registration precedes probe by far.
+( while [ ! -d "$TR/events/mlx5_prism/prism_cmdq_issue" ]; do :; done
+  for e in prism_cmdq_issue prism_cmdq_complete prism_eq_event; do
+	echo 1 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+  done ) &
+ARM=$!
 
-echo 1 > "$EV/prism_cmdq_issue/enable"
-echo 1 > "$EV/prism_cmdq_complete/enable"
-echo 1 > "$EV/prism_eq_event/enable"
-echo "== enable bits: issue=$(cat $EV/prism_cmdq_issue/enable) complete=$(cat $EV/prism_cmdq_complete/enable) eq_event=$(cat $EV/prism_eq_event/enable)"
-
-: > "$TR/trace"
-rmmod mlx5_prism
-sleep 1
+insmod mlx5_prism.ko selftest=1 || { echo "FAIL: insmod"; kill $ARM 2>/dev/null; exit 1; }
+wait $ARM
+# Let the eq self-test tail (patience windows) land in the buffer.
+for i in $(seq 20); do
+	NI=$(grep -c "prism_cmdq_issue:" "$TR/trace")
+	[ "$NI" -gt 30 ] && break
+	sleep 1
+done
 
 NI=$(grep -c "prism_cmdq_issue:" "$TR/trace")
 NC=$(grep -c "prism_cmdq_complete:" "$TR/trace")
@@ -54,9 +48,15 @@ NE=$(grep -c "prism_eq_event:" "$TR/trace")
 echo "== counts: issue=$NI complete=$NC eq_event=$NE"
 grep -m3 "prism_cmdq_issue:" "$TR/trace" | sed 's/^[^:]*: //'
 
+# Disarm before unload — enabled module events may pin the module.
+for e in prism_cmdq_issue prism_cmdq_complete prism_eq_event; do
+	echo 0 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+done
+rmmod mlx5_prism
 modprobe mlx5_core 2>/dev/null
-if [ "$NI" -gt 10 ] && [ "$NI" -eq "$NC" ]; then
-	echo "== PASS: teardown commands traced, issue/complete paired"
+
+if [ "$NI" -gt 30 ] && [ "$NI" -eq "$NC" ] && [ "$NE" -gt 0 ]; then
+	echo "== PASS: full-load capture, issue/complete paired, eq_event seen"
 	exit 0
 fi
 echo "== FAIL: no (or unpaired) events recorded — see diagnostics above"
