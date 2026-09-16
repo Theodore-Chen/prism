@@ -229,6 +229,17 @@ static inline u16 mlx5_prism_cmdif_rev(const struct mlx5_prism_dev *dev)
 }
 
 /* Big-endian field accessors (the Ubuntu header pack lacks asm/unaligned.h). */
+static inline u16 mlx5_prism_get_be16(const u8 *p)
+{
+	return (u16)((p[0] << 8) | p[1]);
+}
+
+static inline void mlx5_prism_put_be16(u8 *p, u16 v)
+{
+	p[0] = (u8)(v >> 8);
+	p[1] = (u8)v;
+}
+
 static inline u32 mlx5_prism_get_be32(const u8 *p)
 {
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];

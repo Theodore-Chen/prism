@@ -25,7 +25,7 @@
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **completed** | 24c9d80 | 2026-09-08 |
 | R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
-| R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | pending | — | — |
+| R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | **completed** | 见 R0.2 节 | 2026-09-15 |
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | pending | — | — |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | pending | — | — |
 | R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | pending | — | — |
@@ -643,6 +643,25 @@
 - **reflection_questions 答案**:
   - **Q: 没有基线的重构怎么验证"行为不变"？** A: 只能靠 code review + 祈祷。code review 对"搬运不改写"类重构的有效性随 diff 大小指数衰减；金样把验证从"人读代码"变成"机器读日志"，且成本不变、可无限重复。
   - **Q: 金样里哪些字段天然不稳定？** A: 三类：时间戳/地址（每次分配不同）、时延数字（毫秒统计量）、合法随机行为（激活怪癖变体）。diff 白名单必须显式枚举这三类，其余一律不许豁免——白名单越宽，门禁越没用。
+
+### R0.2-typed-cmd-layer
+
+- **状态**: completed（静态等价已证，硬件金样门禁待 sudo 恢复后补跑）
+- **开始/完成时间**: 2026-09-15
+- **交付物**: `mlx5_prism_fmt.h`（PRISM_OFF_* 字节偏移 + PRISM_FLD_* 子字节位域 + prism_set/get_bits + eqc dw3/intr 遗留编码助手）；fw.c/eq.c/cmdq.c 自检全部迁移；`scripts/test/fmt_equiv_check.c` 宿主机等价性证明
+- **核心发现（eqc dw3 翻案假设，重要度最高）**: 把 eqc 字段正式化时发现，原编码 `put_be32(eqc+12, (log_sz<<29)|uar)` 在 **ifc 位编号语义**（log_eq_size@99 占该 dword 的 value bits 3-7）下，log_eq_size 字段落在了 uar 的零位上——**uar=4096 时请求的就是 log_eq_size=0，即 1 条目 EQ**。这意味着 T09 的"固件接受 log12 但实建 1 条目（固件说谎）"结论很可能要翻案：**固件如实构建了被请求的 1 条目环**。同理 intr 编码（be16@eqc[16:18]=vec<<4）也不在 ifc intr@140-147 位区间，中断从未点火与此可能相关。两者都是假设——验证实验（按 ifc 位置正确写 log_eq_size → QUERY_EQ 读回 → 若得真多条目环则 T10 的事件引擎 ~10% 激活/长尾很可能一并消失）已列入 T10 准备清单。R0 纪律：**字节原样保留**（金样行为依赖），假设只入档。
+- **验证方法（无 sudo 的替代门禁）**:
+  1. 宿主机等价性证明 `fmt_equiv_check.c`：每个被替换的旧表达式按 v0.26 原样复现，与新 accessor 输出逐字节对比——穷举扫描（ISSI be16 全字节对、readback 全 256 值、caps 字段全值域）+ 1000 组随机 caps 载荷 + 阶梯全档位 × 多 uar 值。**ALL EQUIVALENT (0 failures)**。测试第一天就抓到迁移本身的真 bug（ifc 风格常数换算错位 8/16 位，ISSI/known-good 落点全错）——先证明工具，工具再证明迁移
+  2. make 零警告（顺带修掉两个 HEAD 就存在的历史小疣：eq.c pages=%d→%zu、eq_create 死变量 in/out）+ checkpatch 五文件 0/0/0
+  3. 层规则 grep：fw.c/eq.c/cmdq.c 无裸偏移算式（PRISM_* 命名常量 + be 助手 + 结构体字段之外为零）
+- **关键决策**:
+  - 访问器双约定：字节对齐 BE 字段走 `be16/32/64 助手 + PRISM_OFF_*`；子字节字段走 `prism_*_bits + PRISM_FLD_*`（字节内 LSB-first，现有全部子字节字段单字节内）。曾试 ifc 风格 dword 语义——换算易错（第一版常数就错了），弃
+  - `prism_eqc_write_dw3()`/`prism_eqc_set_intr()` 把两个"经验编码"连同翻案假设注释封装进 fmt.h——魔法数有名字、有出处、有实验入口
+  - be16 助手补进 mlx5_prism.h（消掉 ISSI/reg_id 最后两处手拼字节）
+- **学习心得**: "形式化偏移"本身就是一次免费的全量审计——14 轮实验也没发现的编码疑点，在给字段起名字时自己浮出来了。**给魔法数命名是性价比最高的代码考古。**
+- **reflection_questions 答案**:
+  - **Q: 为什么禁止迁移时'顺手修正'疑似错误的偏移？** A: 三步（发现→实验→改）不可合并。顺手改 = 未验证的行为变化混进"行为保持"的重构，金样一旦红了无法定位是迁移错还是修正错；而且"疑似错误"可能是未理解的正确（本案 dw3 编码"错"得能跑，说明固件行为尚未被理解）。
+  - **Q: 静态等价证明的边界在哪？** A: 它证明"新旧表达式在给定输入下产出相同字节"，输入覆盖穷举/随机；它不证明"固件接受这些字节"——那是金样门禁的职责。两腿互补：静态证机器可靠、硬件证环境可靠。
 
 ## 修改 DESIGN.md 的记录
 

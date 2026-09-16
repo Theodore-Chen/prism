@@ -28,6 +28,7 @@
 #include <linux/string.h>
 
 #include "mlx5_prism.h"
+#include "mlx5_prism_fmt.h"
 
 #define MLX5_PRISM_CMD_TIMEOUT_MSECS	2000
 
@@ -457,7 +458,7 @@ int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
 				i + 1, err);
 			return err;
 		}
-		boot_pages = mlx5_prism_get_be32(out + 12);
+		boot_pages = mlx5_prism_get_be32(out + PRISM_OFF_QP_NUM_PAGES);
 	}
 	pci_info(dev->pdev,
 		 "cmdq poll self-test: QUERY_PAGES(boot) x10 ok, boot pages=%u\n",
@@ -504,14 +505,14 @@ int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev)
 				     qin, sizeof(qin), qout, sizeof(qout));
 	if (err)
 		return err;
-	supported = mlx5_prism_get_be32(qout + 108);
+	supported = mlx5_prism_get_be32(qout + PRISM_OFF_ISSI_SUPPORTED);
 	pci_info(dev->pdev,
 		 "mailbox self-test: QUERY_ISSI ok (1 block): current=%u supported=0x%x\n",
-		 (qout[10] << 8) | qout[11], supported);
+		 mlx5_prism_get_be16(qout + PRISM_OFF_ISSI_CUR), supported);
 
 	if (supported & BIT(1)) {
 		/* current_issi: be16 at inline bytes[10:12]. */
-		sin[11] = 1;
+		mlx5_prism_put_be16(sin + PRISM_OFF_ISSI_CUR, 1);
 		err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_ISSI, 0,
 					     sin, sizeof(sin),
 					     sout, sizeof(sout));

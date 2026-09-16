@@ -35,6 +35,7 @@
 #include <linux/string.h>
 
 #include "mlx5_prism.h"
+#include "mlx5_prism_fmt.h"
 
 #define MLX5_PRISM_EQ_VEC_CMD	1	/* v4.19 MLX5_EQ_VEC_CMD */
 
@@ -81,7 +82,7 @@ int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev)
 	eq->doorbell = NULL;
 
 	pci_info(dev->pdev,
-		 "eq: cpu=%pK dma=%pad size=%zu pages=%d\n",
+		 "eq: cpu=%pK dma=%pad size=%zu pages=%zu\n",
 		 eq->buf, &eq->dma, eq->size, eq->size / MLX5_PRISM_PAGE_SIZE);
 
 	return 0;
@@ -218,8 +219,6 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
 static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 {
 	struct mlx5_prism_eq *eq = &dev->eq;
-	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
-	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
 	int err, i;
 
 	/* Fresh ring state for the new EQ instance. */
@@ -237,7 +236,7 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		u8 log_sz = mlx5_prism_eq_ladder[i].log_sz;
 		int npas = mlx5_prism_eq_ladder[i].npas;
 		int inlen = 272 + 8 * npas;
-		u8 *cin, *eqc;
+		u8 *cin;
 		u8 cout[MLX5_PRISM_CMD_HDR_SIZE];
 		int j;
 
@@ -245,14 +244,17 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		if (!cin)
 			return -ENOMEM;
 
-		eqc = cin + MLX5_PRISM_CMD_HDR_SIZE;
-		mlx5_prism_put_be32(eqc + 12, ((u32)log_sz << 29) | eq->uar);
-		eqc[16] = (u8)(MLX5_PRISM_EQ_VEC_CMD >> 4);
-		eqc[17] = (u8)((MLX5_PRISM_EQ_VEC_CMD & 0xf) << 4);
-		*(__be64 *)(cin + MLX5_PRISM_CMD_HDR_SIZE + 72) =
-			cpu_to_be64(BIT(MLX5_PRISM_EVENT_TYPE_CMD));
+		/*
+		 * eqc dword at payload bytes[12:16] and vector binding —
+		 * exact legacy T09 encoding, see prism_eqc_write_dw3()/
+		 * prism_eqc_set_intr() provenance in mlx5_prism_fmt.h.
+		 */
+		prism_eqc_write_dw3(cin, log_sz, eq->uar);
+		prism_eqc_set_intr(cin, MLX5_PRISM_EQ_VEC_CMD);
+		mlx5_prism_put_be64(cin + PRISM_OFF_EQ_EVENT_BITMASK,
+				    BIT(MLX5_PRISM_EVENT_TYPE_CMD));
 		for (j = 0; j < npas; j++)
-			mlx5_prism_put_be64(cin + 272 + 8 * j,
+			mlx5_prism_put_be64(cin + PRISM_OFF_EQ_PAS + 8 * j,
 					    eq->dma + (dma_addr_t)j *
 					    MLX5_PRISM_PAGE_SIZE);
 
@@ -262,7 +264,7 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		if (err)
 			continue;
 
-		eq->eqn = cout[11];
+		eq->eqn = cout[PRISM_OFF_EQN];
 		eq->log_sz = log_sz;
 		eq->created = true;
 
@@ -279,13 +281,15 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 			u8 log_fw;
 			int qerr;
 
-			qin[11] = eq->eqn;
+			qin[PRISM_OFF_EQN] = eq->eqn;
 			qerr = mlx5_prism_cmdq_invoke(dev,
 						      MLX5_PRISM_CMD_OP_QUERY_EQ,
 						      0, qin, sizeof(qin),
 						      qout, sizeof(qout));
 			if (!qerr) {
-				log_fw = (qeqc[12] >> 3) & 0x1f;
+				log_fw = prism_get_bits(qeqc,
+							PRISM_FLD_EQC_LOGSZ_READBACK,
+							5);
 				pci_info(dev->pdev,
 					 "QUERY_EQ: fw reports log_eq_size=%u (%u entries; requested %u) eqn=%u\n",
 					 log_fw, 1u << log_fw, 1u << log_sz,
@@ -313,7 +317,7 @@ static void mlx5_prism_eq_destroy(struct mlx5_prism_dev *dev)
 	if (!eq->created)
 		return;
 
-	in[11] = eq->eqn;
+	in[PRISM_OFF_EQN] = eq->eqn;
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_DESTROY_EQ, 0,
 				     in, sizeof(in), out, sizeof(out));
 	if (err)
@@ -340,7 +344,7 @@ int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
 				     in, sizeof(in), out, sizeof(out));
 	if (err)
 		return err;
-	uar = mlx5_prism_get_be32(out + 8) & 0xffffff;
+	uar = mlx5_prism_get_be32(out + PRISM_OFF_UAR_OUT) & 0xffffff;
 	eq->uar = uar;
 	eq->doorbell = dev->bar0 + (dma_addr_t)uar * MLX5_PRISM_PAGE_SIZE +
 		       MLX5_PRISM_EQ_DOORBELL_OFFSET;
@@ -424,7 +428,7 @@ void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev)
 	}
 
 	if (eq->doorbell) {
-		mlx5_prism_put_be32(in + 8, eq->uar);
+		mlx5_prism_put_be32(in + PRISM_OFF_UAR_IN, eq->uar);
 		err = mlx5_prism_cmdq_invoke(dev,
 					     MLX5_PRISM_CMD_OP_DEALLOC_UAR, 0,
 					     in, sizeof(in), out, sizeof(out));

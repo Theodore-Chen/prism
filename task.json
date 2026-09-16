@@ -783,7 +783,7 @@
       "title": "R0.2 类型化命令层：mlx5_prism_fmt.h + 存量命令迁移",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "R0.1-golden-baseline"
       ],

@@ -28,6 +28,7 @@
 #include <linux/string.h>
 
 #include "mlx5_prism.h"
+#include "mlx5_prism_fmt.h"
 
 /*
  * Interface version negotiation (ISSI). Old firmware without QUERY_ISSI
@@ -52,9 +53,9 @@ static int mlx5_prism_fw_set_issi(struct mlx5_prism_dev *dev)
 		return 0;
 	}
 
-	supported = mlx5_prism_get_be32(qout + 108);
+	supported = mlx5_prism_get_be32(qout + PRISM_OFF_ISSI_SUPPORTED);
 	pci_info(dev->pdev, "QUERY_ISSI ok: current=%u supported=0x%x\n",
-		 (qout[10] << 8) | qout[11], supported);
+		 mlx5_prism_get_be16(qout + PRISM_OFF_ISSI_CUR), supported);
 	if (!(supported & BIT(1))) {
 		pci_info(dev->pdev, "ISSI 1 not supported: staying at ISSI 0\n");
 		return 0;
@@ -64,7 +65,7 @@ static int mlx5_prism_fw_set_issi(struct mlx5_prism_dev *dev)
 	{
 		u8 sin[MLX5_PRISM_CMD_HDR_SIZE] = { };
 
-		sin[11] = 1;
+		mlx5_prism_put_be16(sin + PRISM_OFF_ISSI_CUR, 1);
 		err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_ISSI, 0,
 					     sin, sizeof(sin),
 					     sout, sizeof(sout));
@@ -86,8 +87,12 @@ static int mlx5_prism_fw_set_host_endianness(struct mlx5_prism_dev *dev)
 	u8 in[MLX5_PRISM_CMD_HDR_SIZE + 16] = { };
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE + 16];
 
-	in[10] = MLX5_PRISM_REG_HOST_ENDIANNESS >> 8;
-	in[11] = MLX5_PRISM_REG_HOST_ENDIANNESS & 0xff;
+	/*
+	 * register_id: be16 at inline bytes[10:12]; he = 0 (LE host) in the
+	 * 16-byte register payload, which stays zeroed.
+	 */
+	mlx5_prism_put_be16(in + PRISM_OFF_REG_ID,
+			    MLX5_PRISM_REG_HOST_ENDIANNESS);
 
 	return mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_ACCESS_REG, 0,
 				      in, sizeof(in), out, sizeof(out));
@@ -106,8 +111,8 @@ static int mlx5_prism_fw_query_pages(struct mlx5_prism_dev *dev, u32 op_mod,
 	if (err)
 		return err;
 
-	fw->func_id = mlx5_prism_get_be32(out + 8) & 0xffff;
-	*num_pages = mlx5_prism_get_be32(out + 12);
+	fw->func_id = mlx5_prism_get_be32(out + PRISM_OFF_QP_FUNC_ID) & 0xffff;
+	*num_pages = mlx5_prism_get_be32(out + PRISM_OFF_QP_NUM_PAGES);
 	return 0;
 }
 
@@ -130,10 +135,11 @@ static int mlx5_prism_fw_give_pages(struct mlx5_prism_dev *dev, u32 count)
 	if (!in)
 		return -ENOMEM;
 
-	mlx5_prism_put_be32(in + 8, fw->func_id);
-	mlx5_prism_put_be32(in + 12, count);
+	mlx5_prism_put_be32(in + PRISM_OFF_MP_FUNC_ID, fw->func_id);
+	mlx5_prism_put_be32(in + PRISM_OFF_MP_NUM_ENTRIES, count);
 	for (i = 0; i < count; i++)
-		mlx5_prism_put_be64(in + 16 + 8 * i, fw->pages_dma[first + i]);
+		mlx5_prism_put_be64(in + PRISM_OFF_MP_PAS + 8 * i,
+				    fw->pages_dma[first + i]);
 
 	err = mlx5_prism_cmdq_invoke_pages(dev,
 					   MLX5_PRISM_CMD_OP_MANAGE_PAGES,
@@ -144,7 +150,7 @@ static int mlx5_prism_fw_give_pages(struct mlx5_prism_dev *dev, u32 count)
 
 	fw->num_pages = first + count;
 	pci_info(dev->pdev, "MANAGE_PAGES(give %u): out entries %u\n",
-		 count, mlx5_prism_get_be32(out + 8));
+		 count, mlx5_prism_get_be32(out + PRISM_OFF_MP_OUT_ENTRIES));
 
 out:
 	kfree(in);
@@ -252,11 +258,15 @@ static int mlx5_prism_fw_probe_caps(struct mlx5_prism_dev *dev)
 		goto out;
 	}
 	/* log_max_srq_sz / log_max_qp_sz live at payload bytes[16:18]. */
-	pci_info(dev->pdev,
-		 "caps probe: max/cur ok (8-block chains), cur payload[16:18]=%02x %02x, num_ports=%u\n",
-		 caps[MLX5_PRISM_CMD_HDR_SIZE + 16],
-		 caps[MLX5_PRISM_CMD_HDR_SIZE + 17],
-		 caps[MLX5_PRISM_CMD_HDR_SIZE + 55]);
+	{
+		u8 *c = caps + MLX5_PRISM_CMD_HDR_SIZE;
+
+		pci_info(dev->pdev,
+			 "caps probe: max/cur ok (8-block chains), cur payload[16:18]=%02x %02x, num_ports=%u\n",
+			 prism_get_bits(c, PRISM_FLD_CAPS_LOG_MAX_SRQ_SZ, 8),
+			 prism_get_bits(c, PRISM_FLD_CAPS_LOG_MAX_QP_SZ, 8),
+			 prism_get_bits(c, PRISM_FLD_CAPS_NUM_PORTS, 8));
+	}
 
 out:
 	kfree(caps);
@@ -300,10 +310,11 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 	if (err)
 		goto out;
 
-	c[35] = (c[35] & (u8)~(0x1f << 3)) | (18 << 3);
-	memset(c + 66, 0, 2);
-	c[82] &= (u8)~0x3;
-	memset(c + 162, 0, 2);
+	/* Known-good profile, byte for byte (R0.2: names, same bytes). */
+	prism_set_bits(c, PRISM_FLD_CAPS_LOG_MAX_KLM, 5, 18);
+	memset(c + PRISM_OFF_CAPS_CMDIF_CHKSUM, 0, 2);
+	c[PRISM_OFF_CAPS_UNIDENT_82] &= (u8)~0x3;
+	memset(c + PRISM_OFF_CAPS_UNIDENT_162, 0, 2);
 
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_HCA_CAP, 0,
 				     caps, MLX5_PRISM_CMD_HDR_SIZE +
@@ -313,7 +324,8 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 		goto out;
 	pci_info(dev->pdev,
 		 "SET_HCA_CAP ok: profile known-good, num_ports=%u log_max_qp=%u\n",
-		 c[55], (c[19] >> 3) & 0x1f);
+		 prism_get_bits(c, PRISM_FLD_CAPS_NUM_PORTS, 8),
+		 prism_get_bits(c, PRISM_FLD_CAPS_LOG_MAX_QP, 5));
 
 	/* Read back: verifies the fw accepted and kept the profile. */
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,
@@ -454,8 +466,8 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
 		batch = min_t(u32, remaining, MLX5_PRISM_PAGES_PER_CMD);
 		memset(tin, 0, sizeof(tin));
 		memset(tout, 0, sizeof(tout));
-		mlx5_prism_put_be32(tin + 8, fw->func_id);
-		mlx5_prism_put_be32(tin + 12, batch);
+		mlx5_prism_put_be32(tin + PRISM_OFF_MP_FUNC_ID, fw->func_id);
+		mlx5_prism_put_be32(tin + PRISM_OFF_MP_NUM_ENTRIES, batch);
 
 		err = mlx5_prism_cmdq_invoke_pages(dev,
 						   MLX5_PRISM_CMD_OP_MANAGE_PAGES,
@@ -466,7 +478,7 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
 			pci_warn(dev->pdev, "page reclaim failed: %d\n", err);
 			break;
 		}
-		returned = mlx5_prism_get_be32(tout + 8);
+		returned = mlx5_prism_get_be32(tout + PRISM_OFF_MP_OUT_ENTRIES);
 		if (!returned)
 			break;
 		remaining -= min(returned, batch);
