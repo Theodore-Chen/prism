@@ -624,6 +624,8 @@
 
   **⑥ CREATE_EQ 之谜终章（T10-prep，2026-09-17）**：④ 的最终翻案——真凶是驱动侧 eqc 编码错位（dw3=(log&7)<<29|uar 把 log_eq_size 写进 reserved 位，固件读到 eqc[12]&0x1f=uar&0x1f=0；intr be16 编码从未落在 [180,191] 字段区间）。"固件接受 log12 但实建 1 条目"实为"如实构建被请求的 1 条目"；"~10% 激活竞态"与"中断不点火"同源。ifc 位号编码下：CREATE_EQ(log12/64pas) 10/10 接受、读回逐字回显、事件按序落环、MSI-X ≈1 次/事件。教训：**在协议字段编码被证明正确之前，"固件怪癖"与"驱动编码错误"不可区分——先审自己的位几何，再怪硬件**。本案的位几何错误同时骗过了编码者与读回解析器：两套编号约定（LSB-first per byte vs MSB-first per dword）在字节内翻转、窗口重叠 bit3-4，恒 0 字段无法自证。
 
+  **⑦ 金样重采事故复盘（2026-09-17，三重工具 bug 叠加）**：rebaseline 首跑全链失效——a) **fs.protected_regular=2**（Ubuntu 默认）下 root 对 /tmp 中他人所有的既有文件做 `>` 重定向（O_CREAT）也会 EACCES：diff_golden 的固定 /tmp 文件名撞上早前非 root 调试留下的同名文件，归一化/diff 全部失败；b) 一条龙脚本的"预期族熔断"查错了文件名（prism_diff_0.txt vs 实际 prism_diff_0000:08:00.0.txt）——**防线从未生效过，残缺金样仍被写入**（git checkout 挽回）；c) **采集口径错位**：t09_verify.sh 的 insmod 自 R0.5 后走的是生产路径（缺 selftest=1），用它重采的金样缺全部自检行（26 行 vs 46 行），自洽复验与 G1 必然双红。硬件行为本身全绿（G2/G3/G4 + 40 循环压测零抱怨）。修复：diff_golden 私有 mktemp 工作目录（PRISM_GOLDEN_WORK 可注入）、t09_verify 补 selftest=1、熔断改从工作目录读。教训：**临时文件一律 mktemp 私有目录；金样采集口径必须与门禁对比口径逐字一致；没被测试过的熔断防线等于没有**。
+
 
 ### R0.1-golden-baseline
 

@@ -5,7 +5,8 @@
 # 文件交给分析即可，无需拷贝终端。
 #
 # 流程（自动熔断，绝不盲目覆盖金样）：
-#   1. t09_verify.sh 3     — 3 个新鲜周期（黑匣子 /var/tmp/t09_live.log）
+#   1. t09_verify.sh 3     — 3 个新鲜 selftest=1 周期（口径与金样/门禁一致；
+#                            黑匣子 /var/tmp/t09_live.log）
 #   2. diff_golden.sh      — 对比旧金样【预期 FAIL，差异应仅为已知变更】
 #      差异行逐条过预期族白名单：QUERY_EQ / EQ ready / eqe[N] /
 #      eq self-test 10/10 / DESTROY_EQ ok——任何族外行 = 行为漂移，
@@ -21,6 +22,13 @@ cd /home/zqc/code/prism
 
 RUN=/var/tmp/rebaseline_run.log
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 1; }
+
+# 私有工作目录（diff 产物落这里，白名单熔断从这里读）：/tmp 固定文件名
+# 在 fs.protected_regular=2 下跨用户复用会 EACCES（2026-09-17 事故，
+# progress.md 归档⑦）。
+WORK=$(mktemp -d /tmp/prism_rebaseline.XXXXXX)
+trap 'rm -rf "$WORK"' EXIT
+export PRISM_GOLDEN_WORK="$WORK"
 
 mv -f "$RUN" "$RUN.prev" 2>/dev/null
 exec > >(tee "$RUN") 2>&1
@@ -39,7 +47,8 @@ bash scripts/golden/diff_golden.sh
 DG=$?
 
 UNEXPECTED=0
-for D in /tmp/prism_diff_0.txt /tmp/prism_diff_1.txt; do
+for PORT in 0 1; do
+    D="$WORK/prism_diff_0000:08:00.$PORT.txt"
     [ -s "$D" ] || { echo "   [skip] $D empty"; continue; }
     BAD=$(grep '^[+-]' "$D" | grep -v -e '^+++' -e '^---' \
         | grep -v -e 'QUERY_EQ: fw reports' \

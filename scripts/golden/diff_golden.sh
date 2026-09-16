@@ -18,6 +18,21 @@
 GOLDEN_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIVE="${1:-/var/tmp/t09_live.log}"
 
+# Scratch files go to a PRIVATE mktemp dir, never shared /tmp paths: with
+# fs.protected_regular=2 (Ubuntu default) even root gets EACCES writing
+# over a pre-existing /tmp file owned by another user — fixed filenames
+# across users are a trap (2026-09-17 rebaseline incident, progress.md
+# 归档⑦). Callers that need the per-port diff files afterwards (e.g.
+# rebaseline_golden.sh's expected-drift filter) set PRISM_GOLDEN_WORK and
+# own the directory's lifetime.
+if [ -n "${PRISM_GOLDEN_WORK:-}" ]; then
+    WORK="$PRISM_GOLDEN_WORK"
+    mkdir -p "$WORK"
+else
+    WORK=$(mktemp -d /tmp/prism_golden.XXXXXX)
+    trap 'rm -rf "$WORK"' EXIT
+fi
+
 [ -r "$LIVE" ] || { echo "dmesg source missing: $LIVE"; exit 2; }
 
 # Last cycle = everything after the final port-0 "BAR0 mapped" line.
@@ -25,26 +40,26 @@ LIVE="${1:-/var/tmp/t09_live.log}"
 # the cycle start marker.
 LAST_START=$(grep -n '0000:08:00.0: BAR0 mapped' "$LIVE" | tail -1 | cut -d: -f1)
 [ -n "$LAST_START" ] || { echo "no load cycle found in $LIVE"; exit 2; }
-tail -n +"$LAST_START" "$LIVE" | bash "$GOLDEN_DIR/normalize.sh" > /tmp/prism_norm_lastcycle.txt
+tail -n +"$LAST_START" "$LIVE" | bash "$GOLDEN_DIR/normalize.sh" > "$WORK/prism_norm_lastcycle.txt"
 
 RC=0
 for PORT in 0000:08:00.0 0000:08:00.1; do
     GOLDEN="$GOLDEN_DIR/golden_dmesg_${PORT##*.}.txt"
     [ -r "$GOLDEN" ] || { echo "[FAIL] $PORT: golden baseline missing: $GOLDEN"; RC=1; continue; }
-    grep " $PORT: " /tmp/prism_norm_lastcycle.txt > /tmp/prism_norm_$PORT.txt
+    grep " $PORT: " "$WORK/prism_norm_lastcycle.txt" > "$WORK/prism_norm_$PORT.txt"
     # Strip the BDF so the port streams are directly comparable to the
     # per-port golden template.
-    sed -i "s/mlx5_prism $PORT: //" /tmp/prism_norm_$PORT.txt
-    if [ ! -s /tmp/prism_norm_$PORT.txt ]; then
+    sed -i "s/mlx5_prism $PORT: //" "$WORK/prism_norm_$PORT.txt"
+    if [ ! -s "$WORK/prism_norm_$PORT.txt" ]; then
         echo "[FAIL] $PORT: no normalized lines extracted"
         RC=1
         continue
     fi
-    if diff -u "$GOLDEN" /tmp/prism_norm_$PORT.txt > /tmp/prism_diff_$PORT.txt; then
+    if diff -u "$GOLDEN" "$WORK/prism_norm_$PORT.txt" > "$WORK/prism_diff_$PORT.txt"; then
         echo "[PASS] $PORT: zero diff vs golden"
     else
-        echo "[FAIL] $PORT: behavior drift vs golden — see /tmp/prism_diff_$PORT.txt"
-        cat /tmp/prism_diff_$PORT.txt
+        echo "[FAIL] $PORT: behavior drift vs golden — see $WORK/prism_diff_$PORT.txt"
+        cat "$WORK/prism_diff_$PORT.txt"
         RC=1
     fi
 done
