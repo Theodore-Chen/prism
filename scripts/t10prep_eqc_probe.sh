@@ -1,6 +1,10 @@
 #!/bin/bash
 # t10prep_eqc_probe.sh — eqc 编码翻案实验（T10 前置；判别式预登记，跑前勿改）
 #
+# [已完成 2026-09-17：全面翻案（判据 A/B/D/E 成立，C 未决），判决见
+#  progress.md T10-prep 节。ifc 编码已转正、eq_ifc 参数已移除——本脚本
+#  不可原样重跑，保留为判别式与判据的预登记存档。]
+#
 # Hypotheses under test (progress.md R0.2 + T10-prep 预登记节):
 #   H1  固件按 mlx5_ifc/PRM 语义解读 eqc（MSB-first per dword）。旧编码
 #       ((log&7)<<29)|uar 把 log 写进了 reserved 位，log_eq_size 字段实际

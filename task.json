@@ -1119,9 +1119,9 @@
         ]
       },
       "goal": "事件模式往返成功（invoke 睡完成量、硬中断消费 EQE 唤醒），中断计数 >0 且与事件数可对账，零死机",
-      "context": "T06 两次 panic 的最终考验，但目标按 T09 实证重定义：原'中断计数≈命令数'在长尾+聚合+~10% 激活率下不可达，改为'中断 >0 且与事件数量级一致'。known-good first：先严格复刻 mlx5_core 官方事件路径拿到绿色基线，再考虑 prism 优化。全部前置语义已在 T09 无中断验证，tracepoint（T11/R0.6）已就位，本任务只引入中断这一变量；黑匣子记录器全程在案。",
+      "context": "T06 两次 panic 的最终考验，但目标按 T09 实证重定义：原'中断计数≈命令数'在长尾+聚合+~10% 激活率下不可达，改为'中断 >0 且与事件数量级一致'。known-good first：先严格复刻 mlx5_core 官方事件路径拿到绿色基线，再考虑 prism 优化。全部前置语义已在 T09 无中断验证，tracepoint（T11/R0.6）已就位，本任务只引入中断这一变量；黑匣子记录器全程在案。T10-prep 更新（2026-09-17）：MSI-X 已在轮询+计数 stub 形态下点火（≈1 次/事件），'中断>0'前置风险提前消解，风险面收窄为硬中断上下文工程（消费循环/完成唤醒/防风暴）；eqc ifc 编码已转正，金样随编码变更重采。",
       "steps": [
-        "0. 前置实验（scripts/t10prep_eqc_probe.sh，判别式预登记于 progress.md T10-prep 节）：eqc ifc 编码翻案——若 QUERY_EQ 真窗口读回 log_eq_size≥6（判据 A 成立），先改写 DESIGN §7 与 fw_profile（1 条目环/激活率/长尾三结论重审）再进本任务；若仍为 0 则按官方路径直行",
+        "0. [完成 2026-09-17] 前置实验判决：全面翻案（判据 A/B/D/E 成立，C 长尾未决 T11 复测）——eqc 旧编码系根因，ifc 编码已转正、DESIGN §7 已改写、金样待重采（见 progress.md T10-prep）",
         "1. EQE 消费循环移入硬中断 handler（budget 上限 + dma_rmb + 消费后重 arm），handler 保持最小化",
         "2. invoke 增加事件模式完成路径：睡完成量；complete_slots() 内 complete() 唤醒 + PENDING 位 claim/revoke",
         "3. printk 限流 + 风暴护栏（连续空中断超限 disable_irq_nosync）",

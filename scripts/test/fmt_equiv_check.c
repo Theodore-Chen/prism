@@ -181,46 +181,61 @@ int main(void)
 		check_eq("give header + 3 pas", o, n, 64);
 	}
 
-	/* 4. eqc dword at payload bytes[12:16]: (log_sz & 7) << 29 | uar.
-	 * Old side mirrors the original eq.c lines verbatim: eqc = cin + 16. */
-	printf("create_eq eqc dw3 (legacy T09 encoding, all rungs/uars)\n");
+	/* 4. eqc dw3/dw5 encodings: pinned against hand-computed mlx5_ifc
+	 * expectations (dword3 = (log_eq_size << 24) | uar_page for fields
+	 * [99,103]/[104,127]; dword5 low 12 bits = intr for [180,191]) and
+	 * against an emulation of the MLX5_SET algebra itself; decode
+	 * roundtrips go through the true-window readback helpers (NOT
+	 * prism_get_bits — its LSB-first numbering reads the flipped
+	 * within-byte window; see the fmt.h geometry note). The legacy T09
+	 * encodings these replaced are archived in progress.md T10-prep. */
+	printf("create_eq eqc dw3/dw5 (ifc-field encodings)\n");
 	{
-		unsigned char log_szs[] = { 12, 9, 8, 6 };
-		uint32_t uars[] = { 4096, 5, 0x123456, 0 };
+		struct { uint32_t log, uar, dw3; } cases[] = {
+			{ 12, 4096,     0x0c001000u },
+			{ 9,  4096,     0x09001000u },
+			{ 8,  5,        0x08000005u },
+			{ 6,  0x123456, 0x06123456u },
+			{ 0,  0,        0x00000000u },
+		};
+		uint32_t vecs[] = { 0, 1, 2, 0xfff };
 		size_t a, b;
 
-		for (a = 0; a < sizeof(log_szs); a++)
-			for (b = 0; b < sizeof(uars) / sizeof(uars[0]); b++) {
-				u8 o[80] = { }, n[80] = { };
-				u8 *eqc_o = o + 16, *eqc_n = n + 16;
-				char name[64];
-
-				mlx5_prism_put_be32(eqc_o + 12,
-					((uint32_t)log_szs[a] << 29) | uars[b]);
-				prism_eqc_write_dw3(n, log_szs[a], uars[b]);
-				(void)eqc_n;
-				snprintf(name, sizeof(name), "log%u uar=0x%x",
-					 log_szs[a], uars[b]);
-				check_eq(name, o, n, 80);
-			}
-	}
-
-	/* 5. eqc intr encoding: be16(vec << 4) at payload bytes[16:18]. */
-	printf("create_eq eqc intr (legacy T09 encoding)\n");
-	{
-		uint32_t vecs[] = { 0, 1, 2, 15, 16, 127 };
-		size_t a;
-
-		for (a = 0; a < sizeof(vecs) / sizeof(vecs[0]); a++) {
-			u8 o[80] = { }, n[80] = { };
-			u8 *eqc_o = o + 16;
+		for (a = 0; a < sizeof(cases) / sizeof(cases[0]); a++) {
+			u8 exp[80] = { }, n[80] = { };
+			uint32_t dw3 = 0;
 			char name[64];
 
-			eqc_o[16] = (uint8_t)(vecs[a] >> 4);
-			eqc_o[17] = (uint8_t)((vecs[a] & 0xf) << 4);
-			prism_eqc_set_intr(n, vecs[a]);
-			snprintf(name, sizeof(name), "vec=%u", vecs[a]);
-			check_eq(name, o, n, 80);
+			prism_eqc_write_dw3(n, cases[a].log, cases[a].uar);
+			mlx5_prism_put_be32(exp + 16 + 12, cases[a].dw3);
+			snprintf(name, sizeof(name), "dw3 log%u uar=0x%x",
+				 cases[a].log, cases[a].uar);
+			check_eq(name, exp, n, 80);
+			check_val("  decode log_eq_size",
+				  prism_eqc_logsz_readback(n + 16),
+				  cases[a].log & 0x1f);
+			check_val("  decode uar_page",
+				  prism_eqc_uar_readback(n + 16),
+				  cases[a].uar & 0xffffff);
+			dw3 = emu_mlx5_set(dw3, cases[a].log, 99, 5);
+			dw3 = emu_mlx5_set(dw3, cases[a].uar, 104, 24);
+			check_val("  MLX5_SET(emulated) dw3",
+				  mlx5_prism_get_be32(n + 16 + 12), dw3);
+		}
+		for (b = 0; b < sizeof(vecs) / sizeof(vecs[0]); b++) {
+			u8 exp[80] = { }, n[80] = { };
+			uint32_t dw5 = 0;
+			char name[64];
+
+			prism_eqc_set_intr(n, vecs[b]);
+			mlx5_prism_put_be32(exp + 16 + 20, vecs[b]);
+			snprintf(name, sizeof(name), "dw5 vec=%u", vecs[b]);
+			check_eq(name, exp, n, 80);
+			check_val("  decode intr",
+				  prism_eqc_intr_readback(n + 16), vecs[b]);
+			dw5 = emu_mlx5_set(dw5, vecs[b], 180, 12);
+			check_val("  MLX5_SET(emulated) dw5",
+				  mlx5_prism_get_be32(n + 16 + 20), dw5);
 		}
 	}
 
@@ -235,7 +250,7 @@ int main(void)
 		check_eq("bitmask BIT(0x0a)", o, n, 128);
 	}
 
-	/* 7. QUERY_EQ readback: (qeqc[12] >> 3) & 0x1f over all byte values. */
+	/* 7. QUERY_EQ readback: eqc[12] & 0x1f over all byte values. */
 	printf("QUERY_EQ log-size readback\n");
 	{
 		unsigned char seed = 0;
@@ -245,8 +260,8 @@ int main(void)
 			uint32_t o, n;
 
 			qeqc[12] = seed;
-			o = (qeqc[12] >> 3) & 0x1f;
-			n = prism_get_bits(qeqc, PRISM_FLD_EQC_LOGSZ_READBACK, 5);
+			o = qeqc[12] & 0x1f;
+			n = prism_eqc_logsz_readback(qeqc);
 			if (o != n) {
 				printf("  [FAIL] readback %02x: %u vs %u\n",
 				       seed, o, n);
@@ -344,81 +359,6 @@ int main(void)
 
 		out[11] = 4;
 		check_val("eqn byte 11", out[11], out[PRISM_OFF_EQN]);
-	}
-
-	/* 11. ifc-position encodings (T10-prep): NEW probe bytes, not v0.26
-	 * equivalence — pinned against hand-computed mlx5_ifc expectations:
-	 * dword3 = (log_eq_size << 24) | uar_page (@99/@104), dword5 = intr
-	 * (@180, low 12 bits). Roundtrips go through the true-ifc-window
-	 * decoders (NOT prism_get_bits — its LSB-first numbering reads the
-	 * flipped within-byte window; see fmt.h geometry note), and the
-	 * emulated MLX5_SET algebra proves the helpers place bytes exactly
-	 * where mlx5_core would. Ends with the discriminating pair the whole
-	 * experiment rides on: legacy dw3 0x80001000 vs ifc dw3 0x0c001000
-	 * for the T09 request (log12, uar 4096). */
-	printf("create_eq eqc ifc encodings (T10-prep probe bytes)\n");
-	{
-		struct { uint32_t log, uar, dw3; } cases[] = {
-			{ 12, 4096,     0x0c001000u },
-			{ 9,  4096,     0x09001000u },
-			{ 8,  5,        0x08000005u },
-			{ 6,  0x123456, 0x06123456u },
-			{ 0,  0,        0x00000000u },
-		};
-		uint32_t vecs[] = { 0, 1, 2, 0xfff };
-		size_t a, b;
-
-		for (a = 0; a < sizeof(cases) / sizeof(cases[0]); a++) {
-			u8 exp[80] = { }, n[80] = { };
-			char name[64];
-
-			prism_eqc_write_dw3_ifc(n, cases[a].log, cases[a].uar);
-			mlx5_prism_put_be32(exp + 16 + 12, cases[a].dw3);
-			snprintf(name, sizeof(name), "ifc dw3 log%u uar=0x%x",
-				 cases[a].log, cases[a].uar);
-			check_eq(name, exp, n, 80);
-			check_val("  decode log_eq_size (true window)",
-				  prism_eqc_logsz_readback_ifc(n + 16),
-				  cases[a].log & 0x1f);
-			check_val("  decode uar_page (true window)",
-				  prism_eqc_uar_readback_ifc(n + 16),
-				  cases[a].uar & 0xffffff);
-		}
-		for (b = 0; b < sizeof(vecs) / sizeof(vecs[0]); b++) {
-			u8 exp[80] = { }, n[80] = { };
-			char name[64];
-
-			prism_eqc_set_intr_ifc(n, vecs[b]);
-			mlx5_prism_put_be32(exp + 16 + 20, vecs[b]);
-			snprintf(name, sizeof(name), "ifc dw5 vec=%u", vecs[b]);
-			check_eq(name, exp, n, 80);
-			check_val("  decode intr (true window)",
-				  prism_eqc_intr_readback_ifc(n + 16), vecs[b]);
-		}
-		{
-			u8 n[80] = { };
-			uint32_t dw3 = 0, dw5 = 0;
-
-			prism_eqc_write_dw3_ifc(n, 12, 4096);
-			prism_eqc_set_intr_ifc(n, 1);
-			dw3 = emu_mlx5_set(dw3, 12, 99, 5);
-			dw3 = emu_mlx5_set(dw3, 4096, 104, 24);
-			dw5 = emu_mlx5_set(dw5, 1, 180, 12);
-			check_val("MLX5_SET(emulated) dw3 == ifc helper",
-				  mlx5_prism_get_be32(n + 16 + 12), dw3);
-			check_val("MLX5_SET(emulated) dw5 == ifc helper",
-				  mlx5_prism_get_be32(n + 16 + 20), dw5);
-		}
-		{
-			u8 l[80] = { }, f[80] = { };
-
-			prism_eqc_write_dw3(l, 12, 4096);
-			prism_eqc_write_dw3_ifc(f, 12, 4096);
-			check_val("legacy dw3 (log12, uar 4096)",
-				  mlx5_prism_get_be32(l + 16 + 12), 0x80001000u);
-			check_val("ifc dw3 (log12, uar 4096)",
-				  mlx5_prism_get_be32(f + 16 + 12), 0x0c001000u);
-		}
 	}
 
 	printf(failures ? "FAILURES: %d\n" : "ALL EQUIVALENT (%d failures)\n",

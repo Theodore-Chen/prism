@@ -234,8 +234,8 @@ struct mlx5_prism_fw_profile {
 	bool	caps_zero_162_163;	/* clear bytes 162-163 (unidentified) */
 
 	/* EQ behaviour. */
-	u8	eq_engagement_retries;	/* event engine ~10%/load: destroy+recreate */
-	u32	eq_poll_patience_ms;	/* event commit long tail: up to >500 ms */
+	u8	eq_engagement_retries;	/* defensive recreate on silence (encoding-era quirk; unused since) */
+	u32	eq_poll_patience_ms;	/* per-event commit wait (T09-era tail measured on the 1-entry ring; T11 re-measures) */
 };
 
 struct mlx5_prism_fw {

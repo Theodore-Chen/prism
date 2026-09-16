@@ -7,11 +7,13 @@
  * size readback, arm) -> eq_poll (process-context consumption) ->
  * eq_teardown. eq_selftest drives 10 commands each expecting one EQE.
  *
- * Measured fw behaviour (DESIGN.md v2 §7, T09): event data is staged
- * eagerly but the owner byte — the commit — flips only after the non-arm
- * doorbell (+0x48) publishes the consumer index; the arm doorbell (+0x40)
- * gates interrupt generation only; the event engine engages on ~10% of
- * loads, and a fresh EQ (destroy/recreate) re-rolls the dice.
+ * Measured fw behaviour (DESIGN.md §7; T09 + T10-prep): event data is
+ * staged eagerly but the owner byte — the commit — flips only after the
+ * non-arm doorbell (+0x48) publishes the consumer index; the arm doorbell
+ * (+0x40) gates interrupt generation only. The T09-era "~10% engagement"
+ * and "interrupts never fire" findings were artifacts of our own eqc
+ * encoding — the corrected encodings give deterministic first-attempt
+ * delivery and a live MSI-X line (progress.md T10-prep).
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -49,24 +51,10 @@ MODULE_PARM_DESC(eq_engagement_retries,
 		 "EQ destroy/recreate attempts when the event engine stays silent (default 3)");
 
 /*
- * T10-prep experiment: encode eqc log_eq_size/uar_page/intr at their
- * mlx5_ifc bit positions (prism_eqc_*_ifc in fmt.h) instead of the legacy
- * T09 bytes — the R0.2 case-overturning hypothesis. Default 0 keeps the
- * golden-path request bytes identical; scripts/t10prep_eqc_probe.sh
- * pre-registers the verdict criteria.
- */
-static bool eq_ifc;
-module_param_named(eq_ifc, eq_ifc, bool, 0444);
-MODULE_PARM_DESC(eq_ifc,
-		 "encode eqc at ifc bit positions (T10-prep experiment; default off)");
-
-/*
  * CREATE_EQ size ladder — record the first rung the firmware accepts.
- * Order is deliberate: mlx5_core never builds single-page EQs on this box
- * (all its EQs carry 64+ pages), and the one-event-then-stall behaviour of
- * the small rungs suggests this fw accepts them but runs a crippled event
- * engine — so try the mlx5_core-shaped rung first and only fall back to
- * the geometric sizes if it is rejected.
+ * Rung 0 (mlx5_core-shaped log12/64pas) has been accepted on every load
+ * since the eqc encoding fix (T10-prep: 10/10); the lower rungs are a
+ * defensive fallback for a fw that ever rejects the big ring.
  */
 static const struct {
 	u8	log_sz;
@@ -257,24 +245,12 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 			return -ENOMEM;
 
 		/*
-		 * eqc dword at payload bytes[12:16] and vector binding —
-		 * exact legacy T09 encoding, see prism_eqc_write_dw3()/
-		 * prism_eqc_set_intr() provenance in mlx5_prism_fmt.h.
-		 * eq_ifc swaps in the ifc-position encodings (T10-prep
-		 * experiment); the marker line makes each blackbox run
-		 * self-describing.
+		 * eqc dword3 (log_eq_size/uar_page) and dword5 (intr) —
+		 * ifc-field encodings, hw-confirmed; geometry note in
+		 * mlx5_prism_fmt.h.
 		 */
-		if (eq_ifc) {
-			prism_eqc_write_dw3_ifc(cin, log_sz, eq->uar);
-			prism_eqc_set_intr_ifc(cin, MLX5_PRISM_EQ_VEC_CMD);
-			pci_info(dev->pdev,
-				 "CREATE_EQ: ifc encoding, rung=%s, dw3=(log%u<<24)|uar%u intr@180=%u\n",
-				 mlx5_prism_eq_ladder[i].name, log_sz, eq->uar,
-				 MLX5_PRISM_EQ_VEC_CMD);
-		} else {
-			prism_eqc_write_dw3(cin, log_sz, eq->uar);
-			prism_eqc_set_intr(cin, MLX5_PRISM_EQ_VEC_CMD);
-		}
+		prism_eqc_write_dw3(cin, log_sz, eq->uar);
+		prism_eqc_set_intr(cin, MLX5_PRISM_EQ_VEC_CMD);
 		mlx5_prism_put_be64(cin + PRISM_OFF_EQ_EVENT_BITMASK,
 				    BIT(MLX5_PRISM_EVENT_TYPE_CMD));
 		for (j = 0; j < npas; j++)
@@ -295,10 +271,9 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		mlx5_prism_cmdq_eq_bound(dev);
 
 		/*
-		 * The fw's actual ring size can differ from the request
-		 * (measured: log12 requested, 1 entry built — every event
-		 * lands at entry 0, owner alternating per delivery). QUERY_EQ
-		 * is the authoritative size; adopt it for the consumer.
+		 * QUERY_EQ is the authoritative ring size; adopt it for the
+		 * consumer (was load-bearing in the T09 era, when the legacy
+		 * encoding requested a 1-entry ring).
 		 */
 		{
 			u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
@@ -313,39 +288,12 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 						      0, qin, sizeof(qin),
 						      qout, sizeof(qout));
 			if (!qerr) {
-				log_fw = prism_get_bits(qeqc,
-							PRISM_FLD_EQC_LOGSZ_READBACK,
-							5);
+				log_fw = prism_eqc_logsz_readback(qeqc);
 				pci_info(dev->pdev,
 					 "QUERY_EQ: fw reports log_eq_size=%u (%u entries; requested %u) eqn=%u\n",
 					 log_fw, 1u << log_fw, 1u << log_sz,
 					 eq->eqn);
 				eq->log_sz = log_fw;
-				if (eq_ifc) {
-					u8 log_true =
-						prism_eqc_logsz_readback_ifc(qeqc);
-
-					/*
-					 * Experiment evidence: raw dwords plus
-					 * true-ifc-window decode (the legacy
-					 * line above reads the flipped window
-					 * — both readings are evidence).
-					 */
-					pci_info(dev->pdev,
-						 "QUERY_EQ readback (ifc windows): dw3=%08x dw5=%08x → log_eq_size=%u uar_page=%u intr=%u\n",
-						 mlx5_prism_get_be32(qeqc + 12),
-						 mlx5_prism_get_be32(qeqc + 20),
-						 log_true,
-						 prism_eqc_uar_readback_ifc(qeqc),
-						 prism_eqc_intr_readback_ifc(qeqc));
-					/*
-					 * The consumer must walk the ring the
-					 * fw actually built — adopt the true
-					 * window's reading, not the legacy
-					 * parser's.
-					 */
-					eq->log_sz = log_true;
-				}
 			}
 		}
 
@@ -416,9 +364,10 @@ int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
 }
 
 /*
- * Fire commands and consume one EQE each, from process context. On a miss
- * (the fw's event engine engages on only ~10% of loads) retry by
- * destroying and re-creating the EQ — each creation re-rolls the dice.
+ * Fire commands and consume one EQE each, from process context. The
+ * recreate-retry ladder is defensive only: since the eqc encoding fix
+ * the engine has engaged first-attempt on every observed load
+ * (T10-prep: 10/10).
  */
 int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 {
