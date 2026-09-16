@@ -1,7 +1,7 @@
 {
   "project": {
     "name": "mlx5_prism",
-    "goal": "从零实现 ConnectX-4 Lx 智能网卡的控制面内核驱动 mlx5_prism.ko (~2000 行 C)：PCIe 探测 + CMDQ 引擎 + 7 步固件引导 + PHY 诊断 + 硬件冒烟测试 + 最小 netdev 骨架，与 mlx5_core 做双层对比验证。",
+    "goal": "从零实现 ConnectX-4 Lx 智能网卡的控制面内核驱动 mlx5_prism.ko (总量预算 ~4500 行)：PCIe 探测 + CMDQ 引擎 + 9 步固件引导 + EQ 事件 + PHY 诊断 + 硬件冒烟测试 + 最小 netdev 骨架，与 mlx5_core 做双层对比验证。架构基线为 DESIGN.md v2（四层模型 + 类型化命令层 + 固件状态机 + 怪癖档案）；R0 重构冲刺（R0.1-R0.6）在不改变硬件行为的前提下把 v0.26 迁移到该架构，此后所有任务在新架构上实施。",
     "codebase": "/home/zqc/code/prism",
     "kernel_headers_runtime": "/lib/modules/$(uname -r)/build",
     "kernel_headers_700": "/home/zqc/code/linux",
@@ -726,35 +726,386 @@
       }
     },
     {
-      "id": "T10-eq-irq-enable",
-      "title": "MSI-X 点亮 + 硬中断消费 EQE（分级放量）",
-      "phase": "S5",
+      "id": "R0.1-golden-baseline",
+      "title": "R0.1 金样采集：当前行为快照存档",
+      "phase": "S4.5",
       "milestone": null,
       "status": "pending",
       "prerequisites": [
         "T09-eq-create-poll-consume"
       ],
+      "estimated_loc": 0,
+      "learning": {
+        "objective": "建立'行为保持不变'的机械化判据——重构的每一步都有金样可比",
+        "concepts": [
+          "金样 dmesg：每口 cmdq ready/ISSI/页数/EQ/teardown 关键行集合",
+          "hexdump 对比：命令缓冲区字节级一致性验证方法（R0.2 用）",
+          "diff 白名单：时延数字与地址允许差异，计数与状态不允许"
+        ],
+        "keywords": [
+          "金样",
+          "回归基线",
+          "行为保持"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "—（本任务无代码改动）",
+            "focus": "—"
+          }
+        ],
+        "reflection_questions": [
+          "为什么重构前必须先有自动化基线？没有基线的重构怎么验证'行为不变'？",
+          "金样里哪些字段天然不稳定（时延/地址）？如何设计 diff 白名单？"
+        ]
+      },
+      "goal": "scripts/golden/ 存档当前 HEAD 的金样日志，作为 R0.2-R0.6 全部重构步骤的回归基线",
+      "context": "DESIGN.md v2 §10.3。t09_verify.sh 头部注释仍描述 T08 状态，一并修正。无代码改动。",
+      "steps": [
+        "1. 修正 scripts/t09_verify.sh 头部过时注释（描述 T08 状态 → T09 实际行为）",
+        "2. 运行 t09_verify.sh 压测 ≥20 循环，全程黑匣子在案",
+        "3. 从 live.log 提取每口金样关键行（cmdq ready / ISSI / boot pages / INIT_HCA / teardown / EQ 自检行）存 scripts/golden/golden_dmesg.txt",
+        "4. 编写 scripts/golden/diff_golden.sh：dmesg 与金样 diff，白名单过滤时延（ms/µs 数字）与地址，其余差异即 FAIL"
+      ],
+      "exit_criteria": {
+        "compile": "N/A（无代码改动）",
+        "load": "N/A",
+        "functional": [
+          "scripts/golden/ 含金样文件与 diff 脚本",
+          "对同一份日志跑 diff_golden.sh 两次结果稳定（PASS）"
+        ],
+        "manual_checks": [
+          "20 循环压测零 WARNING/Oops（黑匣子在案）"
+        ]
+      }
+    },
+    {
+      "id": "R0.2-typed-cmd-layer",
+      "title": "R0.2 类型化命令层：mlx5_prism_fmt.h + 存量命令迁移",
+      "phase": "S4.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "R0.1-golden-baseline"
+      ],
+      "estimated_loc": 300,
+      "learning": {
+        "objective": "理解线格式封装的抽象设计——bit 级 BE accessor 如何同时满足'偏移集中管理'与'字节级不变'",
+        "concepts": [
+          "prism_set_bits/prism_get_bits：LSB-first 全局 bit 编号（与 mlx5_ifc 编号一致），字段可跨字节",
+          "命名偏移表：裸偏移只允许出现在 mlx5_prism_fmt.h，每项注释实证来源",
+          "mlx5_ifc 的 MLX5_SET 宏对照：生成式（数万行）vs 手工微型（~300 行）的取舍",
+          "字节级回归验证：迁移前后命令缓冲区 hexdump 必须逐字节相同"
+        ],
+        "keywords": [
+          "accessor",
+          "bit field",
+          "大端",
+          "偏移表"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "include/linux/mlx5/mlx5_ifc.h",
+            "focus": "MLX5_SET/MLX5_GET 宏的 bit 操作实现（学语义，不抄规模）"
+          }
+        ],
+        "reflection_questions": [
+          "MLX5_SET 如何做到编译期字段定位？prism 为什么不需要同等通用性？",
+          "为什么禁止在迁移时'顺手修正'疑似错误的偏移？（发现→实验→改，三步不可合并）"
+        ]
+      },
+      "goal": "fw.c/eq.c/cmdq 自检里的全部手工字节偏移拼装替换为 accessor + 命名偏移表，命令字节级不变",
+      "context": "DESIGN.md v2 §5.5。迁移顺序 fw.c（ISSI/pages/caps/set_hca_cap）→ eq.c（create_eq/destroy/alloc_uar/query_eq）→ cmdq 自检。原偏移注释（实证依据）随迁移保留在偏移表注释中。",
+      "steps": [
+        "1. 新建 mlx5_prism_fmt.h：prism_set_bits/prism_get_bits 内联 + 全部命名偏移常量（含实证注释）",
+        "2. fw.c 迁移，编译 + 自定义 hexdump 验证（自检模式下 dump 迁移前后命令缓冲对比）",
+        "3. eq.c 迁移，同上验证",
+        "4. cmdq.c 自检迁移",
+        "5. make + checkpatch 0/0/0；跑 diff_golden.sh 必须零差异"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 全部文件 0 errors/0 warnings",
+        "load": "双口 probe 成功，dmesg 引导序列完整",
+        "functional": [
+          "grep 确认 fw.c/eq.c/cmdq.c 无裸 put_be 偏移算式（accessor 调用除外）",
+          "diff_golden.sh 零差异（时延/地址白名单除外）"
+        ],
+        "manual_checks": [
+          "20 次 insmod/rmmod 零告警"
+        ]
+      }
+    },
+    {
+      "id": "R0.3-completion-backend",
+      "title": "R0.3 完成后端解耦：cmdq mode 标志 + complete_slots 接口",
+      "phase": "S4.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "R0.2-typed-cmd-layer"
+      ],
+      "estimated_loc": 60,
+      "learning": {
+        "objective": "理解模块解耦的接口设计——slot 生命周期协议如何从'eq 反向触碰 cmdq 内部'变成声明式 API",
+        "concepts": [
+          "cmdq->mode（PRISM_CMD_MODE_POLL_DESC / PRISM_CMD_MODE_EVENT）由 eq 创建/销毁时设置，cmdq 不再读 eq.created",
+          "mlx5_prism_cmdq_complete_slots(dev, vector)：eq 消费事件后释放命令槽的唯一入口（forget_slots 合并为全置位语义）",
+          "T10 前瞻：PENDING 位 claim/revoke 裁决超时与真实完成的竞态（mlx5_core cmd.c 对照）",
+          "grep 可检查的层间规则：eq.c 不得出现 cmdq 内部字段直接操作"
+        ],
+        "keywords": [
+          "解耦",
+          "接口设计",
+          "slot 生命周期",
+          "completion"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "cmd.c",
+            "focus": "mlx5_cmd_comp_handler 的 vector 位图语义与 PENDING_COMP 状态位"
+          }
+        ],
+        "reflection_questions": [
+          "为什么 slot 位图必须只允许一个模块写？双向触碰在 T10 硬中断下会出什么竞态？",
+          "complete_slots 接口为什么接收位图而不是单个 idx？（EQE 聚合语义）"
+        ]
+      },
+      "goal": "cmdq 与 eq 双向耦合消除：eq.c 只经声明 API 释放 slot，cmdq 不反向读取 eq 状态",
+      "context": "DESIGN.md v2 §2.1 依赖规则 2、§5.3。行为完全不变——本任务只改'谁怎么碰'，不改'碰出什么结果'。slot 协议不变量注释随代码搬家（承重墙）。",
+      "steps": [
+        "1. cmdq 增加 mode 字段 + mlx5_prism_cmdq_complete_slots() 导出接口（含原 release_slots/forget_slots 逻辑合并）",
+        "2. eq.c 的 release_slots/forget_slots 调用点改为新接口",
+        "3. cmd_exec 的 eq.created 判断改为 cmdq->mode 判断",
+        "4. eq 创建/销毁路径设置/复位 mode",
+        "5. make + checkpatch；diff_golden.sh 零差异；100 次装卸压测"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口 probe 成功，EQ 自检 10/10 事件不变",
+        "functional": [
+          "grep 确认 eq.c 无 cmdq slot 位图/token 直接操作",
+          "diff_golden.sh 零差异",
+          "100 次 insmod/rmmod 零告警，/proc/interrupts 仍全零"
+        ],
+        "manual_checks": [
+          "黑匣子记录器全程在案"
+        ]
+      }
+    },
+    {
+      "id": "R0.4-fw-state-quirks",
+      "title": "R0.4 固件状态机 + 怪癖档案：门禁查表与魔法字节命名化",
+      "phase": "S4.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "R0.3-completion-backend"
+      ],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "把'固件自己有状态机'和'固件有未文档化行为'两类实验知识从注释/魔法数变成显式代码结构",
+        "concepts": [
+          "enum prism_fw_state（RESET→ENABLED→BOOT_PAGES→CAPS_SET→OPERATIONAL）+ 每命令门禁查表（DESIGN.md v2 §4.1）",
+          "fw_profile 结构体：known-good caps 补丁/EQ 阶梯/激活重试/耐心窗/ISSI outlen 全部字段命名化（§6）",
+          "boot 时按 fw_rev 填充 profile，未知版本用默认值并告警",
+          "门禁不匹配 → 驱动侧 -EINVAL 拒发（不发上机命令）"
+        ],
+        "keywords": [
+          "状态机",
+          "门禁",
+          "quirk",
+          "fw_profile"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "fw.c + main.c (mlx5_function_enable/open)",
+            "focus": "官方引导序列的状态推进点对照"
+          }
+        ],
+        "reflection_questions": [
+          "驱动侧门禁能拦住多少错误？哪些错误只有固件能裁决？（两层校验的分工）",
+          "quirk 档案换一个固件版本时怎么迁移？为什么数据比代码好迁移？"
+        ]
+      },
+      "goal": "fw_state 门禁查表落地 + fw_profile 命名化，全部魔法字节（known-good 四处补丁/EQ 阶梯/耐心窗）有名字、字节不变",
+      "context": "DESIGN.md v2 §4.1/§6。R0 最重要纪律：只搬家不改字节。known-good 补丁两处未识别字段（c[82]/c[162..163]）命名保留 unidentified 后缀并注明实证来源。",
+      "steps": [
+        "1. 定义 enum prism_fw_state + 命令门禁表；fw_bootstrap 各步推进 state",
+        "2. cmd_exec（或 invoke 包装层）接入门禁检查：状态不符 → -EINVAL + 明确日志",
+        "3. 定义 struct mlx5_prism_fw_profile，known-good 补丁/EQ 阶梯/重试/耐心窗迁入；fw.c/eq.c 改读 profile",
+        "4. 耐心窗/重试次数暴露为模块参数（默认=现值）",
+        "5. make + checkpatch；diff_golden.sh 零差异"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口 probe 成功，引导序列完整",
+        "functional": [
+          "grep 确认 fw.c/eq.c 无未命名魔法数字（偏移表内除外）",
+          "diff_golden.sh 零差异（含 teardown 2305/2305 计数行）",
+          "门禁自检：构造一次状态不符的调用（如自检路径提前查 caps 的防护检查）确认 -EINVAL"
+        ],
+        "manual_checks": [
+          "20 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "R0.5-dev-ctx-teardown-selftest",
+      "title": "R0.5 设备结构重组 + 统一 teardown + 自检分离",
+      "phase": "S4.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "R0.4-fw-state-quirks"
+      ],
       "estimated_loc": 120,
       "learning": {
-        "objective": "理解硬中断上下文约束、EQ 重挂与防风暴设计",
+        "objective": "掌握设备上下文的生命周期设计——动态资源、单一拆卸路径、生产/验证路径分离",
         "concepts": [
+          "fw.pages[8192] 内嵌数组 → 首次 supply 时动态分配（上限不变，防固件失控）",
+          "caps 缓存：QUERY_HCA_CAP max/cur 引导时缓存，T12/T13 不再重查",
+          "mlx5_prism_teardown(dev, stage) 单一有序拆卸：消灭 pci.c 三处手写重复",
+          "selftest=1 模块参数：自检全部移出生产 probe（eq 自检最坏 80s 挂起不再出现在默认路径）",
+          "probe 错误路径从失败层调用 teardown(stage)，remove 调 FULL——栈式获取逆序释放"
+        ],
+        "keywords": [
+          "生命周期",
+          "teardown",
+          "模块参数",
+          "probe 精简"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "main.c (mlx5_init_one/mlx5_uninit_one)",
+            "focus": "官方 probe/remove 的错误回滚 goto 链与 devres 分工"
+          }
+        ],
+        "reflection_questions": [
+          "为什么生产路径与验证路径必须分离？自检留在 probe 里有什么运维风险？",
+          "统一 teardown 的 stage 参数怎么定义才能同时服务'中途失败'与'完整卸载'？"
+        ]
+      },
+      "goal": "默认 probe 零自检、teardown 单点、pages 动态分配、caps 缓存就位",
+      "context": "DESIGN.md v2 §3.1/§4.4/§2.3。verify 脚本此后传 selftest=1 驱动自检；金样对比也在 selftest=1 模式下做。",
+      "steps": [
+        "1. pages 动态分配改造（含失败路径释放）",
+        "2. caps 缓存字段 + 引导时填充",
+        "3. 实现 mlx5_prism_teardown(stage)，pci.c 三处重复改调它",
+        "4. selftest 模块参数：cmdq/mailbox/EQ 自检移入；默认 probe 只剩生产序列",
+        "5. t09_verify.sh 与 diff_golden.sh 适配 selftest=1；make + checkpatch",
+        "6. 100 次装卸压测：默认模式 + selftest=1 模式各一遍"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "默认模式 probe dmesg 干净（无自检输出）；selftest=1 模式含完整自检序列",
+        "functional": [
+          "teardown 逻辑在代码中只出现一次",
+          "diff_golden.sh（selftest=1 模式）零差异",
+          "两种模式各 100 次装卸零告警"
+        ],
+        "manual_checks": [
+          "rmmod 后 mlx5_core 可正常恢复加载"
+        ]
+      }
+    },
+    {
+      "id": "R0.6-trace-scaffold",
+      "title": "R0.6 tracepoint 脚手架：cmdq_issue/cmdq_complete/eq_event 插桩（T11 核心提前）",
+      "phase": "S4.5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "R0.5-dev-ctx-teardown-selftest"
+      ],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "理解 tracepoint 机制与'可观测性先于事件模式'的工程决策",
+        "concepts": [
+          "TRACE_EVENT 宏五段结构（TP_PROTO/TP_ARGS/TP_STRUCT__entry/TP_fast_assign/TP_printk）",
+          "DECLARE_TRACE + CREATE_TRACE_POINTS 的头文件/实例文件分离",
+          "static_key/jump_label：tracepoint 关闭时零开销",
+          "T06 教训的工程化：上新中断/MMIO 路径前必须有观测手段（DESIGN.md v2 §11.1 顺序决策）",
+          "TP_printk 引用的辅助函数（prism_opcode_name）必须真实存在——v1 设计稿的教训"
+        ],
+        "keywords": [
+          "tracepoint",
+          "ftrace",
+          "perf",
+          "static_key"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "内核 samples/trace_events/",
+            "focus": "官方 tracepoint 示例（最权威参考）"
+          },
+          {
+            "file": "lib/eq_trace.h（如有）或 core/diag 目录",
+            "focus": "Mellanox 自己的 tracepoint 组织方式"
+          }
+        ],
+        "reflection_questions": [
+          "为什么 T10 事件模式调试必须先有 tracepoint？（对比 T06 死机无现场）",
+          "tracepoint 关闭时零开销的原理？什么时候这很重要？"
+        ]
+      },
+      "goal": "perf list 可见 prism tracepoint，cmdq_issue/cmdq_complete 成对、eq_event 可观测，驱动行为零变化",
+      "context": "DESIGN.md v2 §9.1。插桩点：cmd_exec doorbell 前（issue）、完成解析后（complete）、eq_poll 每事件（eq_event）。T11 剩余范围（延迟基线采集 SOP）另立任务。零行为变化：tracepoint 未启用时为 no-op。",
+      "steps": [
+        "1. 新建 mlx5_prism_trace.h（三个 TRACE_EVENT）+ mlx5_prism_trace.c（CREATE_TRACE_POINTS）",
+        "2. 实现 prism_opcode_name() switch 表（只覆盖 prism 用到的 opcode）",
+        "3. cmd_exec/eq_poll 插桩",
+        "4. Makefile 追加 trace.o",
+        "5. make + checkpatch；perf list/perf record 验证；diff_golden.sh 零差异"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "sudo perf list | grep mlx5_prism 显示三个事件",
+        "functional": [
+          "selftest=1 + perf record：cmdq_issue/cmdq_complete 成对、数量与命令数一致",
+          "eq_event 数量与 EQE 数量一致",
+          "diff_golden.sh 零差异"
+        ],
+        "manual_checks": [
+          "20 次装卸（含 perf 采集中）零告警"
+        ]
+      }
+    },
+    {
+      "id": "T10-eq-irq-enable",
+      "title": "MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径）",
+      "phase": "S5",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T11-tracepoints"
+      ],
+      "estimated_loc": 160,
+      "learning": {
+        "objective": "理解硬中断上下文约束、事件模式完成唤醒链路、防风暴设计，以及'官方路径优先'的调试纪律",
+        "concepts": [
+          "官方路径复刻：MSI-X handler(最小化) → EQE 消费循环(budget + dma_rmb + 重 arm) → vector → complete_slots() → complete() 唤醒 invoke（mlx5_core eq_async_int + cmd_comp_notifier 同形）",
           "enable_irq 时机：EQ 创建 + 首次 arm 之后（T04 的 IRQF_NO_AUTOEN 在此兑现）",
           "硬中断上下文约束：complete() 合法、printk 必须 dev_warn_ratelimited、不能睡眠",
           "风暴护栏：连续空中断计数超限 → disable_irq_nosync 自保（T06 死机教训的工程化）",
-          "claim/revoke 并发：comp_handler(硬中断) vs 超时路径(进程) 的锁协议；超时泄漏 slot 防位图别名",
-          "分级放量：1 → 5 → 100，每级 /proc/interrupts 对账"
+          "claim/revoke 并发：comp_handler(硬中断) vs 超时路径(进程) 的 PENDING 位裁决；超时泄漏 slot 防位图别名",
+          "轮询路径降级为模块参数恢复手段（激活异常时回退）",
+          "事件模式行为重验：DESIGN.md v2 §7.2 清单（激活率/长尾/entry0 投递）逐项对照，差异回写设计文档"
         ],
         "keywords": [
           "MSI-X",
           "硬中断",
           "arm doorbell",
           "风暴护栏",
-          "事件模式"
+          "事件模式",
+          "completion"
         ],
         "mlx5_reference": [
           {
             "file": "eq.c",
             "focus": "mlx5_eq_int：中断里的 EQE 消费循环与 eq_update_ci(arm)"
+          },
+          {
+            "file": "cmd.c",
+            "focus": "cmd_comp_notifier → mlx5_cmd_comp_handler(vector) 与 mlx5_cmd_use_events 模式切换"
           },
           {
             "file": "lib/eq.h",
@@ -763,92 +1114,93 @@
         ],
         "reflection_questions": [
           "为什么 arm 必须在 enable_irq 之前？（窗口期空触发）",
-          "风暴护栏阈值怎么权衡误报与漏报？",
-          "中断计数与命令数何时不相等？（EQE 聚合）"
+          "事件模式与轮询模式下，固件的投递行为可能有哪些差异？如何用 §7.2 清单验证？",
+          "中断计数与命令数何时不相等？（EQE 聚合 + 长尾）原'≈命令数'判据为何作废？"
         ]
       },
-      "goal": "事件模式 100/100 往返 + 中断计数对账 + 100 次加载压测，零死机",
-      "context": "T06 两次 panic 的最终考验。全部前置语义已在 T09 无中断验证，本任务只引入中断这一变量；黑匣子记录器全程在案。",
+      "goal": "事件模式往返成功（invoke 睡完成量、硬中断消费 EQE 唤醒），中断计数 >0 且与事件数可对账，零死机",
+      "context": "T06 两次 panic 的最终考验，但目标按 T09 实证重定义：原'中断计数≈命令数'在长尾+聚合+~10% 激活率下不可达，改为'中断 >0 且与事件数量级一致'。known-good first：先严格复刻 mlx5_core 官方事件路径拿到绿色基线，再考虑 prism 优化。全部前置语义已在 T09 无中断验证，tracepoint（T11/R0.6）已就位，本任务只引入中断这一变量；黑匣子记录器全程在案。",
       "steps": [
-        "1. eq_process 挂入 T04 handler（计数 + 分发 + 重 arm）",
-        "2. printk 限流 + 风暴护栏",
-        "3. 分级自检：1 条（单独打印）→ 5 条 → 100 条 + 坏 opcode 快速拒绝",
-        "4. /proc/interrupts 对账（≈ 命令数）",
-        "5. 100 次 insmod/rmmod 压测（黑匣子在案）"
+        "1. EQE 消费循环移入硬中断 handler（budget 上限 + dma_rmb + 消费后重 arm），handler 保持最小化",
+        "2. invoke 增加事件模式完成路径：睡完成量；complete_slots() 内 complete() 唤醒 + PENDING 位 claim/revoke",
+        "3. printk 限流 + 风暴护栏（连续空中断超限 disable_irq_nosync）",
+        "4. cmdq->mode 在 eq_setup 后切事件模式；模块参数保留轮询回退",
+        "5. 分级放量：1 条（单独打印）→ 5 条 → 100 条 + 坏 opcode 快速拒绝",
+        "6. /proc/interrupts 对账：中断计数 >0、与事件数同数量级（不求等于命令数）",
+        "7. 100 次 insmod/rmmod 压测（黑匣子在案）",
+        "8. 按 DESIGN.md v2 §7.2 清单逐项重验事件模式行为，差异更新设计文档"
       ],
       "exit_criteria": {
         "compile": "make 通过，checkpatch 无 ERROR",
-        "load": "dmesg 含 'EQ up' 与 'cmdq event round-trip: 100/100'",
+        "load": "dmesg 含 'EQ up (event mode)' 与事件模式自检通过行",
         "functional": [
-          "100/100 QUERY_PAGES 事件往返 status=0",
-          "/proc/interrupts 计数与命令数量级一致",
-          "无风暴、无死机、坏 opcode 快速 -EIO"
+          "事件模式往返 ≥99/100（含激活重试恢复后）",
+          "/proc/interrupts 中断计数 >0 且与事件数同数量级",
+          "无风暴、无死机、坏 opcode 快速 -EIO",
+          "轮询回退参数可用（降级路径仍工作）"
         ],
         "manual_checks": [
           "100 次压测全绿",
-          "黑匣子记录器全程在案"
+          "黑匣子记录器全程在案",
+          "§7.2 清单重验结论回写 DESIGN.md"
         ]
       }
     },
     {
       "id": "T11-tracepoints",
-      "title": "ftrace tracepoint 插桩（cmdq_issue / cmdq_complete）",
-      "phase": "S6",
+      "title": "tracepoint 完善与延迟基线采集（P1'/P2'）",
+      "phase": "S5",
       "milestone": null,
       "status": "pending",
       "prerequisites": [
-        "T10-eq-irq-enable"
+        "R0.6-trace-scaffold"
       ],
-      "estimated_loc": 150,
+      "estimated_loc": 60,
       "learning": {
-        "objective": "理解内核 tracepoint 机制和 perf_event 集成",
+        "objective": "掌握基于 tracepoint 的延迟分析：分布采集、p99 解读、与 bpftrace 基准的口径对齐",
         "concepts": [
-          "DECLARE_TRACE / DEFINE_TRACE / CREATE_TRACE_POINTS 宏",
-          "TRACE_EVENT 宏的多段：TP_PROTO/TP_ARGS/TP_STRUCT__entry/TP_fast_assign/TP_printk",
-          "tracepoint vs kprobe：编译期 vs 运行期插桩，性能开销差异",
-          "perf record -e mlx5_prism:*：tracepoint 如何暴露给 perf",
-          "static_key / jump_label：tracepoint 关闭时零开销的原理"
+          "R0.6 已建脚手架（cmdq_issue/cmdq_complete/eq_event 插桩）——本任务只补采集与报告侧",
+          "perf record/script + awk 聚合延迟分布的 SOP（固化进 scripts/）",
+          "P1' 口径：命令描述符往返（doorbell→status_own），prism 轮询实现 vs mlx5_core 事件模式——同数量级对比",
+          "P2' 口径：事件提交延迟（owner 翻转）分布记录，不设硬目标（长尾实证 >500ms）",
+          "静态口径陷阱：对比双方必须同口径，否则数字没有可比性"
         ],
         "keywords": [
-          "tracepoint",
-          "ftrace",
           "perf",
-          "DECLARE_TRACE",
-          "static_key"
+          "延迟分布",
+          "p99",
+          "基线采集"
         ],
         "mlx5_reference": [
           {
-            "file": "diagnostics/traces（如有）或 lib/trace.*",
-            "focus": "Mellanox 自己的 tracepoint 写法"
-          },
-          {
-            "file": "内核 samples/trace_events/",
-            "focus": "内核官方 tracepoint 示例，最权威的参考"
+            "file": "DESIGN.md v2 §10.1",
+            "focus": "P1'/P2' 判据定义与口径说明"
           }
         ],
         "reflection_questions": [
-          "tracepoint 在关闭状态下为什么零开销？（static_key/jump_label 原理）",
-          "tracepoint 和 kprobe 都能采集 CMDQ 延迟，区别在哪？为什么生产环境用 tracepoint？",
-          "TP_printk 是给谁看的？为什么要在 tracepoint 定义里写格式字符串？"
+          "p99 比 avg 更能说明什么？长尾事件（>500ms 提交）对均值/p99 各有什么影响？",
+          "prism 轮询往返与 mlx5_core 事件往返口径差异在哪？如何向读者说明白？"
         ]
       },
-      "goal": "perf record 能采集 mlx5_prism:cmdq_issue 和 cmdq_complete 事件",
-      "context": "把 T06 临时用的 trace_printk/pr_info 换成正式 tracepoint。提前到 T11 做（不一定要等到 S6）是因为 tracepoint 一旦定义好，后续 task 调试时就能用 perf 观察时序，比 printk 准确得多。",
+      "goal": "scripts/collect_latency.sh 产出 P1'（命令往返分布）与 P2'（事件提交分布）基线数据，供 T16 对比报告引用",
+      "context": "原 T11（tracepoint 定义+插桩）已由 R0.6 提前完成（DESIGN.md v2 §11.1 顺序决策：可观测性先于事件模式）。本任务瘦身为核心剩余：延迟基线采集 SOP。顺序上仍在 T10 之前——T10 调试要用这些观测手段。",
       "steps": [
-        "1. 创建 mlx5_prism_trace.h：按 DESIGN.md 第 3 节定义 TRACE_EVENT(cmdq_issue) 和 TRACE_EVENT(cmdq_complete)",
-        "2. 创建 mlx5_prism_trace.c：#define CREATE_TRACE_POINTS + include 自己的 .h",
-        "3. 在 T05 的 submit 和 T06 的 complete 处插桩：trace_mlx5_prism_cmdq_issue(...) / trace_mlx5_prism_cmdq_complete(...)",
-        "4. Makefile 加 mlx5_prism-objs += mlx5_prism_trace.o",
-        "5. 验证 perf 能采集"
+        "1. 编写 scripts/collect_latency.sh：perf 采集 + 聚合（avg/p50/p99/max）",
+        "2. selftest=1 模式跑一轮，产出 P1' 分布（n≥1000 命令）",
+        "3. 采集 P2' 事件提交延迟分布（eq_event 时间戳差）",
+        "4. 与 bpftrace 采集的 mlx5_core 基准做同数量级 sanity check",
+        "5. 数据格式对齐 T16 报告模板"
       ],
       "exit_criteria": {
-        "compile": "make modules 通过，tracepoint 定义无 ERROR",
-        "load": "sudo perf list | grep mlx5_prism 显示两个事件",
+        "compile": "bash -n 通过",
+        "load": "脚本在 selftest=1 会话中完整运行",
         "functional": [
-          "sudo perf record -a -e mlx5_prism:cmdq_issue -e mlx5_prism:cmdq_complete sleep 5 && sudo perf script 显示成对事件"
+          "P1' 分布产出（n≥1000），数值与历史实测（72-173µs）同数量级",
+          "P2' 分布产出，长尾形态可见",
+          "mlx5_core 基线采集成功"
         ],
         "manual_checks": [
-          "issue 和 complete 成对出现，零丢失"
+          "口径说明写在脚本头部注释（轮询 vs 事件）"
         ]
       }
     },
@@ -859,7 +1211,8 @@
       "milestone": null,
       "status": "pending",
       "prerequisites": [
-        "T08-fw-bootstrap-2"
+        "T08-fw-bootstrap-2",
+        "R0.6-trace-scaffold"
       ],
       "estimated_loc": 200,
       "learning": {
@@ -991,7 +1344,8 @@
       "milestone": null,
       "status": "pending",
       "prerequisites": [
-        "T08-fw-bootstrap-2"
+        "T08-fw-bootstrap-2",
+        "R0.6-trace-scaffold"
       ],
       "estimated_loc": 300,
       "learning": {
@@ -1039,7 +1393,7 @@
         "3. MODIFY_QP 到 RTS（loopback：port=1, source_qpn=自己）",
         "4. 分配 DMA 内存写最小以太网帧（64 字节）",
         "5. 构造 Send WQE：ctrl + eth + data segment，DMA 地址指向帧",
-        "6. wmb() + writeq(BF doorbell)",
+        "6. wmb() + Send WQE doorbell（BF 写法实施前先读 en/txrx 源码核准——勿沿用过时的 writeq 假设，见 DESIGN.md v2 修订登记）",
         "7. 轮询 CQE（最多 100 次，每次 udelay(10)），检查 owner + opcode + status",
         "8. probe 末尾调用，PASSED/FAILED 打印"
       ],

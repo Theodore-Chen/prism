@@ -24,8 +24,14 @@
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **completed** | 24c9d80 | 2026-09-08 |
-| T10-eq-irq-enable | MSI-X 点亮 + 硬中断消费 EQE（分级放量） | S5 | — | pending | — | — |
-| T11-tracepoints | ftrace tracepoint 插桩 | S6 | — | pending | — | — |
+| R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | pending | — | — |
+| R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | pending | — | — |
+| R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | pending | — | — |
+| R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | pending | — | — |
+| R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | pending | — | — |
+| R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | pending | — | — |
+| T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | pending | — | — |
+| T10-eq-irq-enable | MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径） | S5 | — | pending | — | — |
 | T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | pending | — | — |
 | T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | pending | — | — |
 | T14-smoke-test | 硬件冒烟测试（QP→WQE→CQE） | S5 | — | pending | — | — |
@@ -621,4 +627,5 @@
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
+- **架构重设计（2026-09-15）**：DESIGN.md 全量重写为 **v2**（git 历史保留 v1）。动因：九个任务纯追加导致结构缠结（cmdq↔eq 双向耦合、teardown 三处重复、自检嵌在生产 probe）、v1 约 1/3 内容被硬件实证推翻（writeq doorbell、7 步缺 ISSI/字节序/SET_HCA_CAP、页数、P1/P2 延迟目标）、EQ/事件设计整章缺失。v2 新增：四层架构（§2）、类型化命令层（§5.5）、完成后端接口（§5.3）、固件状态机门禁表（§4.1）、**怪癖档案 fw_profile（§6，mlx5_core 没有的层）**、EQ 与事件设计（§7，T09 十四轮实验全部编码）。配套：task.json 新增 R0.1-R0.6 重构冲刺（行为保持不变，金样对比验收）、T10 按 T09 实证重定义（"中断计数≈命令数"改为"中断>0 且与事件数同数量级"）、T11 拆分（核心提前进 R0.6，剩余为延迟基线采集）并前移到 T10 之前（可观测性优先）。执行顺序：R0 → T11 → T10 → T12-T17。
 - **T05（2026-08-09）**：C2 校验项"固件版本"由 `QUERY_FW (opcode 0x103)` 改为"init segment `fw_rev` 寄存器"。原因：CX-4 Lx 固件（FW 14.32.1908）**无 QUERY_FW 命令**——7.0.0 内核 `mlx5_ifc.h` 中 0x103=TEARDOWN_HCA，opcode 表无 QUERY_FW 枚举；mlx5_core 引导序列（main.c:1182-1193）也是 wait_fw_init → ENABLE_HCA，不发 QUERY_FW。fw 版本从 init segment 的 `fw_rev` 寄存器直接读（T02 已实现 `mlx5_prism_fw_rev_major/minor/sub`）。task.json T05/T06 step 中的"QUERY_FW"需相应改为 ENABLE_HCA 或其他真实存在的命令。
