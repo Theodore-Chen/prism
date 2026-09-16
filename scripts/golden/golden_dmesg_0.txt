@@ -1,0 +1,46 @@
+BAR0 mapped at [mem X], fw_rev 14.32.1908, cmdif_rev 5
+cmdq ring: cpu=X dma=X size=4096
+eq: cpu=X dma=X size=262144 pages=64
+MSI-X enabled: 2 vectors (masked until EQ bind)
+cmdq ready: log_sz=5 (32 slots) log_stride=6 (64 bytes/slot)
+cmdq poll self-test: ENABLE_HCA ok
+cmdq poll self-test: QUERY_PAGES(boot) x10 ok, boot pages=6
+opcode 0xdead: command status 0x4, syndrome 0x408b33
+cmdq poll self-test: bad opcode 0xdead rejected fast (-5)
+mailbox self-test: QUERY_ISSI ok (1 block): current=0 supported=0x2
+mailbox self-test: ISSI set to 1
+QUERY_ISSI ok: current=1 supported=0x2
+ISSI set to 1
+boot pages: firmware wants 6
+MANAGE_PAGES(give 6): out entries 0
+boot pages: firmware still wants 6
+post-boot-pages: initializing clear after <= T ms
+host endianness declared (reg 0x7004)
+caps[max]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 a0 00 00 00 00 00 00 00 2e 1b 9b 1b 0f 0f 80 0e 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 80 44 20 04 f1 e1 00 00 fc ff 00 00 ff f0 f5 01 7e 00 b0 00 00 01 80 81 c0 08 0e 1f fb fb cb 8f 00 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 00 0f 18 00 7c 90 00 00 00 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 00 01 00 00 04 8f 00 00 00 00
+caps[cur]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 bf 00 00 00 00 00 00 00 2e 1b 9b 1b 0f 0f 80 11 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 84 44 60 04 f9 e1 00 04 fc ff 00 05 ff f0 fd 01 7e 00 b0 00 00 01 c0 81 c0 08 ce 1f fb fb cb 8f 80 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 01 0f 18 00 7c 90 00 00 0c 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 10 00 00 00 04 8f 00 00 00 00
+caps probe: max/cur ok (8-block chains), cur payload[16:18]=0f 0f, num_ports=1
+SET_HCA_CAP ok: profile known-good, num_ports=1 log_max_qp=2
+caps[post]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 bf 00 00 00 00 00 00 00 2e 1b 9b 1b 0f 0f 80 11 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 84 44 60 04 f9 e1 00 04 fc ff 00 05 ff f0 fd 01 7e 00 b0 00 00 01 c0 81 c0 08 ce 1f fb fb cb 8f 80 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 01 0f 18 00 7c 90 00 00 0c 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 10 00 00 00 04 8f 00 00 00 00
+init pages: firmware wants 2299
+MANAGE_PAGES(give 2299): out entries 0
+init pages: firmware still wants 2299
+init pages supplied in T ms
+INIT_HCA ok: HCA operational ( T ms)
+Bootstrap time: T ms
+ALLOC_UAR ok: uar=4096 doorbell=X
+QUERY_EQ: fw reports log_eq_size=0 (1 entries; requested 4096) eqn=4
+EQ ready: eqn=4 entries=1 (armed, irq enabled: counting stub)
+eqe[0]: type=0x0a vector=0x00000001
+eqe[1]: type=0x0a vector=0x00000001
+eqe[2]: type=0x0a vector=0x00000001
+eqe[3]: type=0x0a vector=0x00000001
+eqe[4]: type=0x0a vector=0x00000001
+eqe[5]: type=0x0a vector=0x00000001
+eqe[6]: type=0x0a vector=0x00000001
+eqe[7]: type=0x0a vector=0x00000001
+eqe[8]: type=0x0a vector=0x00000001
+eqe[9]: type=0x0a vector=0x00000001
+eq self-test: 10/10 commands ok with an EQE each (10 events total, 0 interrupts)
+removing (fw_rev 14.32.1908)
+DESTROY_EQ ok: eq_number=4, 10 events consumed
+teardown: 2305/2305 pages reclaimed, HCA disabled

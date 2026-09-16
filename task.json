@@ -730,7 +730,7 @@
       "title": "R0.1 金样采集：当前行为快照存档",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T09-eq-create-poll-consume"
       ],

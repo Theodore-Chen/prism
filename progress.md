@@ -24,7 +24,7 @@
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **completed** | 24c9d80 | 2026-09-08 |
-| R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | pending | — | — |
+| R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
 | R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | pending | — | — |
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | pending | — | — |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | pending | — | — |
@@ -622,6 +622,27 @@
 
   **⑤ 两次 panic 复盘与风控工具箱**：两次均死在 insmod（probe 执行中）、CREATE_EQ 门后代码（arm/enable_irq/事件模式）从未安全执行过。教训固化：风险分级上机（eq_irq 参数：先"不点火"跑通 CREATE_EQ+arm+teardown，再单独点亮中断）；硬中断 printk 必须 dev_warn_ratelimited；风暴护栏（连续空中断超限 → disable_irq_nosync）；黑匣子记录器必须落 **/var/tmp**（磁盘backed，逐行 sync）——/tmp 是 tmpfs，断电即失（第一次现场就这么丢的）。mlx5_core debugfs 命令统计（/sys/kernel/debug/mlx5/<bdf>/commands/）是行为对照的免费基准。
 
+
+### R0.1-golden-baseline
+
+- **状态**: completed
+- **开始时间**: 2026-09-15
+- **完成时间**: 2026-09-15
+- **Commit**: 本提交（随 R0.1 工具一并入库）
+- **基线来源（重要说明）**: 金样取自 **T09 收官压测的黑匣子日志**（/var/tmp/t09_live.log，10609 行，100 循环，HEAD 24c9d80 代码，零 WARNING/Oops）——代码自那之后只有文档改动，日志即当前 HEAD 行为的有效快照，满足"≥20 循环"要求（100 循环）。sudo 密码不可用，**新鲜单周期重跑**挪到 R0.2 门禁一并执行。
+- **交付物**: scripts/golden/{golden_dmesg_0.txt, golden_dmesg_1.txt, normalize.sh, diff_golden.sh, README.md}；t09_verify.sh 头部过时注释已修（描述 T08 状态 → T09 实际行为）
+- **关键决策**:
+  - **分口金样**：开发中发现双口 caps hexdump 有 1 字节真实差异（function 标识，.0=0x00/.1=0x01），但各自跨 100 周期完全确定——金样按口分档，比"单模板+归一化该字节"保留更强的回归锚点
+  - **怪癖变体归一化**：~10% 激活怪癖是合法随机行为（静默→重建块出现与否随机），normalize.sh 删除该块并折叠重复 QUERY_EQ——否则门禁会随机 FAIL
+  - **刻意不归一**：caps hexdump / 页数 6/2299/2305 / log_sz=5 / eqn=4 / 10/10 / eqe vector 位图——这些是抓回归的核心锚点
+- **门禁三重验证**（scripts/golden/README.md 有记录）:
+  1. 同周期自洽：双口 PASS
+  2. 中间周期（不同怪癖变体）：双口 PASS
+  3. 负对照（篡改 2299→2298）：精确 FAIL，双口均抓到
+- **学习心得**: 行为保持重构的验收不能靠"看起来没改什么"——必须有机械化工样。开发过程本身验证了门禁价值：第一天就抓到两口 caps 差异（真差异）和测试切片多带一行的锚点漂移（门禁正确拒绝）。
+- **reflection_questions 答案**:
+  - **Q: 没有基线的重构怎么验证"行为不变"？** A: 只能靠 code review + 祈祷。code review 对"搬运不改写"类重构的有效性随 diff 大小指数衰减；金样把验证从"人读代码"变成"机器读日志"，且成本不变、可无限重复。
+  - **Q: 金样里哪些字段天然不稳定？** A: 三类：时间戳/地址（每次分配不同）、时延数字（毫秒统计量）、合法随机行为（激活怪癖变体）。diff 白名单必须显式枚举这三类，其余一律不许豁免——白名单越宽，门禁越没用。
 
 ## 修改 DESIGN.md 的记录
 

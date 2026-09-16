@@ -1,8 +1,13 @@
 #!/bin/bash
-# T09 hardware verification — full fw bootstrap = M1 (ISSI, boot pages,
+# T09 hardware verification — full fw bootstrap (ISSI, boot pages,
 # HOST_ENDIANNESS, caps probe, SET_HCA_CAP known-good, init pages ~2299,
-# INIT_HCA -> OPERATIONAL with timing; full teardown on rmmod:
-# TEARDOWN_HCA -> TAKE -> DISABLE_HCA. MSI-X stays masked, EQ untouched).
+# INIT_HCA -> OPERATIONAL with timing) + EQ lifecycle: ALLOC_UAR ->
+# CREATE_EQ (ladder, QUERY_EQ readback authoritative) -> polling EQE
+# consumption (selftest: 10x QUERY_PAGES, one EQE each; event engine
+# engages on ~10% of loads -> destroy/recreate retry ladder) ->
+# DESTROY_EQ + DEALLOC_UAR; rmmod teardown: TEARDOWN_HCA -> TAKE (2305)
+# -> DISABLE_HCA. Interrupt line is enabled but inert: events arrive
+# with polling semantics, /proc/interrupts counts stay zero.
 #
 # Output: /tmp/t09_run.log ; crash recorder: /var/tmp/t09_live.log
 # (disk-backed, survives reboot/power loss; every line synced).
