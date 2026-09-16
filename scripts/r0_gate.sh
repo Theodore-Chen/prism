@@ -55,6 +55,9 @@ say "G3 tracepoints (tracefs — no perf dependency)"
 TR=/sys/kernel/tracing
 [ -d "$TR/events" ] || TR=/sys/kernel/debug/tracing
 [ -d "$TR/events" ] || { mount -t tracefs tracefs /sys/kernel/tracing; TR=/sys/kernel/tracing; }
+# Events enable AND the master recording switch must both be on — tracefs
+# has two layers, like the EQ's arm/commit doorbells.
+echo 1 > "$TR/tracing_on"
 dmesg -c >/dev/null
 insmod mlx5_prism.ko selftest=1
 EV=$TR/events/mlx5_prism
