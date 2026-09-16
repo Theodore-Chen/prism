@@ -9,9 +9,14 @@ all:
 
 obj-m := mlx5_prism.o
 
+# trace/define_trace.h re-includes the trace header via a string-literal
+# include; the module source dir must be on the -I path for it to resolve.
+ccflags-y += -I$(src)
+
 mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \
 		mlx5_prism_cmdq.o mlx5_prism_fw.o \
-		mlx5_prism_eq.o mlx5_prism_irq.o
+		mlx5_prism_eq.o mlx5_prism_irq.o \
+		mlx5_prism_trace.o
 
 # Generate compile_commands.json for clangd / IDE code navigation.
 # Uses the kernel's native GEN compile_commands.json target which invokes

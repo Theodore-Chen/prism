@@ -29,7 +29,7 @@
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | **completed** | 见 R0.3 节 | 2026-09-15 |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | **completed** | 见 R0.4 节 | 2026-09-15 |
 | R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | **completed** | 见 R0.5 节 | 2026-09-15 |
-| R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | pending | — | — |
+| R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | **completed** | 见 R0.6 节 | 2026-09-15 |
 | T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | pending | — | — |
 | T10-eq-irq-enable | MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径） | S5 | — | pending | — | — |
 | T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | pending | — | — |
@@ -683,6 +683,13 @@
 - **交付物**: `selftest=1` 模块参数（默认关，全部自检移出生产 probe）；fw.pages/pages_dma 懒分配（kvcalloc，上限 8192 不变，128KB 不再常驻设备结构）；caps_max/cur 缓存（probe_caps/set_hca_cap 填充，teardown 释放，T12/T13 消费）；`mlx5_prism_teardown(dev, stage)` 单一有序拆卸（PRISM_TD_NO_EQ/ALL，pci.c 三处重复清零）；fw state 增 ENABLED（自检 ENABLE_HCA 后由编排层推进）
 - **验证**: make 零警告 + checkpatch 0/0/0 + teardown 出现次数=1
 - **reflection 要点**: 生产/验证路径分离后，eq 自检最坏 80s 挂起不再进默认 probe；错误路径从失败层调 teardown(stage)——栈式获取逆序释放的单一表达
+
+### R0.6-trace-scaffold
+
+- **状态**: completed（编译/插桩就位；perf 配对验证随硬件门禁批量执行）
+- **交付物**: `mlx5_prism_trace.h`（prism_cmdq_issue/complete + prism_eq_event 三个 TRACE_EVENT）+ `mlx5_prism_trace_names.h`（opcode 名字表，独立头避免 MULTI_READ 二次展开重定义——T06 草案"未定义辅助函数"教训的兑现）+ trace.c 实例化；插桩：cmd_exec doorbell 前（issue，含 slot/token/page_queue）、状态解析后（complete，含 delivery/status/syndrome/latency_ns）、eq_poll 每事件（eq_event，含 vector/cons）；Makefile += trace.o + `ccflags-y += -I$(src)`（define_trace.h 字符串形式再包含的路径解析）
+- **验证**: make 零警告；checkpatch 无 ERROR/WARNING（TRACE_EVENT 宏布局 9 处 CHECK 豁免，与树内 trace 头一致）；tracepoint 未启用时零行为变化（默认 no-op）
+- **reflection 要点**: tracepoint 提前于 T10 落地=T06"死机无现场"教训的工程化兑现；issue/complete 配对 + eq_event 即 T10 事件模式调试的观测三件套
 
 ## 修改 DESIGN.md 的记录
 

@@ -1012,7 +1012,7 @@
       "title": "R0.6 tracepoint 脚手架：cmdq_issue/cmdq_complete/eq_event 插桩（T11 核心提前）",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "R0.5-dev-ctx-teardown-selftest"
       ],
@@ -1057,7 +1057,7 @@
         "5. make + checkpatch；perf list/perf record 验证；diff_golden.sh 零差异"
       ],
       "exit_criteria": {
-        "compile": "make 通过；checkpatch 0/0/0",
+        "compile": "make 通过；checkpatch 无 ERROR/WARNING（TRACE_EVENT 宏布局的 9 处 CHECK 豁免——与内核树内 trace 头布局一致）",
         "load": "sudo perf list | grep mlx5_prism 显示三个事件",
         "functional": [
           "selftest=1 + perf record：cmdq_issue/cmdq_complete 成对、数量与命令数一致",

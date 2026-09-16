@@ -23,12 +23,14 @@
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/jiffies.h>
+#include <linux/ktime.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
 #include "mlx5_prism.h"
 #include "mlx5_prism_fmt.h"
+#include "mlx5_prism_trace.h"
 
 #define MLX5_PRISM_CMD_TIMEOUT_MSECS	2000
 
@@ -218,6 +220,7 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 	unsigned long deadline, flags;
 	u8 delivery, status, own = MLX5_PRISM_CMD_OWNER_HW;
 	u32 syndrome;
+	u64 t0;
 	int err, idx, n_in, n_out;
 
 	if (!mlx5_prism_fw_cmd_allowed(dev, opcode))
@@ -301,6 +304,9 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 	 * write. wmb() — not smp_wmb() — because the consumer is the firmware
 	 * reading via PCIe DMA, not another CPU.
 	 */
+	t0 = ktime_get_ns();
+	trace_prism_cmdq_issue(opcode, op_mod, idx, cmdq->token_next,
+			       page_queue);
 	wmb();
 	iowrite32be(1 << idx, &dev->iseg->cmd_dbell);
 
@@ -366,6 +372,11 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 			opcode, delivery);
 		return -EIO;
 	}
+
+	trace_prism_cmdq_complete(opcode, idx, delivery, status, syndrome,
+				  ktime_get_ns() - t0,
+				  status ? -EIO : 0);
+
 	if (status) {
 		pci_err(dev->pdev,
 			"opcode 0x%x: command status 0x%x, syndrome 0x%06x\n",

@@ -37,6 +37,7 @@
 
 #include "mlx5_prism.h"
 #include "mlx5_prism_fmt.h"
+#include "mlx5_prism_trace.h"
 
 #define MLX5_PRISM_EQ_VEC_CMD	1	/* v4.19 MLX5_EQ_VEC_CMD */
 
@@ -169,12 +170,16 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
 			if (e->type == MLX5_PRISM_EVENT_TYPE_CMD) {
 				u32 v = be32_to_cpu(e->data.cmd_vector);
 
+				trace_prism_eq_event(eq->eqn, e->type, v,
+						     eq->cons_index);
 				pci_info(dev->pdev,
 					 "eqe[%u]: type=0x%02x vector=0x%08x\n",
 					 eq->cons_index, e->type, v);
 				/* The EQE acknowledges these slots — free them. */
 				mlx5_prism_cmdq_complete_slots(dev, v);
 			} else {
+				trace_prism_eq_event(eq->eqn, e->type, 0,
+						     eq->cons_index);
 				pci_info(dev->pdev, "eqe[%u]: type=0x%02x\n",
 					 eq->cons_index, e->type);
 			}
