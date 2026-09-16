@@ -896,7 +896,7 @@
       "title": "R0.4 固件状态机 + 怪癖档案：门禁查表与魔法字节命名化",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "R0.3-completion-backend"
       ],

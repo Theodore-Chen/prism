@@ -31,6 +31,7 @@
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -38,6 +39,21 @@
 #include "mlx5_prism_fmt.h"
 
 #define MLX5_PRISM_EQ_VEC_CMD	1	/* v4.19 MLX5_EQ_VEC_CMD */
+
+/*
+ * Event-commit patience window and silent-engine recreate retries —
+ * measured fw behaviour (T09), tunable for experiments; the quirk profile
+ * snapshots them for readers.
+ */
+u32 mlx5_prism_eq_patience_ms = 2000;
+u32 mlx5_prism_eq_engagement_retries = 3;
+module_param_named(eq_patience_ms, mlx5_prism_eq_patience_ms, uint, 0644);
+module_param_named(eq_engagement_retries, mlx5_prism_eq_engagement_retries,
+		   uint, 0644);
+MODULE_PARM_DESC(eq_patience_ms,
+		 "ms to wait for an EQE commit before declaring silence (default 2000)");
+MODULE_PARM_DESC(eq_engagement_retries,
+		 "EQ destroy/recreate attempts when the event engine stays silent (default 3)");
 
 /*
  * CREATE_EQ size ladder — record the first rung the firmware accepts.
@@ -362,6 +378,8 @@ int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 {
 	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
+	u32 patience = dev->profile.eq_poll_patience_ms;
+	u32 max_retries = dev->profile.eq_engagement_retries;
 	int i, err, eqes, retries, total = 0;
 
 	for (i = 0; i < 10; i++) {
@@ -376,10 +394,10 @@ int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 			return err;
 		}
 		for (retries = 0; ; retries++) {
-			eqes = mlx5_prism_eq_poll(dev, 2000);
+			eqes = mlx5_prism_eq_poll(dev, patience);
 			if (eqes > 0)
 				break;
-			if (retries >= 3) {
+			if (retries >= max_retries) {
 				pci_err(dev->pdev,
 					"eq self-test: no EQE for command %d/10 after %d recreations\n",
 					i + 1, retries);

@@ -201,13 +201,48 @@ struct mlx5_prism_irq {
  * the HCA to operational. One MANAGE_PAGES gives at most 63 pages.
  */
 #define MLX5_PRISM_MAX_FW_PAGES		8192
-#define MLX5_PRISM_PAGES_PER_CMD		63
+#define MLX5_PRISM_PAGES_PER_CMD	63
+
+/*
+ * Driver-side mirror of the firmware's interface state machine. The fw
+ * gates commands on its own bootstrap stage (measured: QUERY_HCA_CAP before
+ * the boot-page give draws status 0x4 / syndrome 0x2b69b6); this enum lets
+ * the driver reject such mistakes locally instead of paying a round trip.
+ * The pre-ENABLE_HCA window is deliberately NOT mirrored — bootstrap owns
+ * that sequence (mlx5_core doesn't gate boot commands driver-side either).
+ */
+enum mlx5_prism_fw_state {
+	MLX5_PRISM_FW_RESET,		/* nothing handed over yet */
+	MLX5_PRISM_FW_BOOT_PAGES,	/* boot pages given: caps/endian legal */
+	MLX5_PRISM_FW_CAPS_SET,		/* SET_HCA_CAP accepted: init pages legal */
+	MLX5_PRISM_FW_OPERATIONAL,	/* INIT_HCA ok: resources legal */
+};
+
+/*
+ * Quirk profile — the fw's measured (not documented) behaviour, filled per
+ * firmware revision at probe (see mlx5_prism_fw_profile_defaults()). mlx5_core
+ * has no such layer: it only needs documented behaviour. Consumers read the
+ * profile instead of re-deriving these constants. FW 14.32.1908 provenance
+ * in progress.md 历史问题归档.
+ */
+struct mlx5_prism_fw_profile {
+	/* SET_HCA_CAP known-good patch (DESIGN.md v2 §6.2). */
+	u8	caps_log_max_klm_cap;	/* clamp log_max_klm_list_size to 18 */
+	bool	caps_zero_cmdif_checksum;/* clear cmdif_checksum bytes 66-67 */
+	bool	caps_clear_82_bits01;	/* clear byte 82 bits 0-1 (unidentified) */
+	bool	caps_zero_162_163;	/* clear bytes 162-163 (unidentified) */
+
+	/* EQ behaviour. */
+	u8	eq_engagement_retries;	/* event engine ~10%/load: destroy+recreate */
+	u32	eq_poll_patience_ms;	/* event commit long tail: up to >500 ms */
+};
 
 struct mlx5_prism_fw {
 	u32		func_id;	/* reported by QUERY_PAGES, reused in gives */
 	u32		num_pages;	/* total given, reclaimed on teardown */
 	bool		active;		/* bootstrap entered; teardown may talk */
 	bool		initialized;	/* INIT_HCA ok; full teardown applies */
+	u8		state;		/* enum mlx5_prism_fw_state */
 	void		*pages[MLX5_PRISM_MAX_FW_PAGES];
 	dma_addr_t	pages_dma[MLX5_PRISM_MAX_FW_PAGES];
 };
@@ -221,6 +256,7 @@ struct mlx5_prism_dev {
 	struct mlx5_prism_eq		eq;
 	struct mlx5_prism_irq		irq;
 	struct mlx5_prism_fw		fw;
+	struct mlx5_prism_fw_profile	profile;
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -322,12 +358,18 @@ int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
 
 int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev);
 void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev);
+void mlx5_prism_fw_profile_defaults(struct mlx5_prism_dev *dev);
+bool mlx5_prism_fw_cmd_allowed(struct mlx5_prism_dev *dev, u16 opcode);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev);
+
+/* EQ quirk knobs (module params, defaults = measured values, see profile). */
+extern u32 mlx5_prism_eq_patience_ms;
+extern u32 mlx5_prism_eq_engagement_retries;
 
 int mlx5_prism_irq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);

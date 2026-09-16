@@ -220,6 +220,9 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 	u32 syndrome;
 	int err, idx, n_in, n_out;
 
+	if (!mlx5_prism_fw_cmd_allowed(dev, opcode))
+		return -EINVAL;
+
 	chain_max = MLX5_PRISM_CMD_DATA_BLOCK_SIZE * MLX5_PRISM_CMD_MAX_CHAIN;
 	if (in_len < MLX5_PRISM_CMD_HDR_SIZE ||
 	    out_len < MLX5_PRISM_CMD_HDR_SIZE ||

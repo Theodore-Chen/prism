@@ -37,6 +37,64 @@
  * with fw status 0x51 "bad output length". supported_issi_dw0 is a be32 at
  * out bytes[108:112], one bit per ISSI.
  */
+/*
+ * Quirk profile for the measured firmware. FW 14.32.1908 is the only
+ * revision prism has run on; an unknown revision gets the same values plus
+ * a warning — the profile is data, so a new fw only touches this table.
+ */
+void mlx5_prism_fw_profile_defaults(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_fw_profile *p = &dev->profile;
+
+	p->caps_log_max_klm_cap = 18;
+	p->caps_zero_cmdif_checksum = true;
+	p->caps_clear_82_bits01 = true;
+	p->caps_zero_162_163 = true;
+	p->eq_engagement_retries = mlx5_prism_eq_engagement_retries;
+	p->eq_poll_patience_ms = mlx5_prism_eq_patience_ms;
+
+	if (mlx5_prism_fw_rev_major(dev) != 14 || mlx5_prism_fw_rev_minor(dev) != 32)
+		pci_warn(dev->pdev,
+			 "unprofiled firmware %u.%u.%u: using 14.32 quirks\n",
+			 mlx5_prism_fw_rev_major(dev),
+			 mlx5_prism_fw_rev_minor(dev),
+			 mlx5_prism_fw_rev_sub(dev));
+}
+
+/*
+ * Interface-state gate: the minimum fw_state at which each opcode is legal
+ * (DESIGN.md v2 §4.1). Commands not listed ride unchecked — the firmware
+ * remains the final judge (unknown opcodes must reach it to be rejected
+ * there, as the self-test's 0xdead probe verifies).
+ */
+bool mlx5_prism_fw_cmd_allowed(struct mlx5_prism_dev *dev, u16 opcode)
+{
+	static const u8 min_state[] = {
+		[MLX5_PRISM_CMD_OP_QUERY_HCA_CAP]	= MLX5_PRISM_FW_BOOT_PAGES,
+		[MLX5_PRISM_CMD_OP_SET_HCA_CAP]		= MLX5_PRISM_FW_BOOT_PAGES,
+		[MLX5_PRISM_CMD_OP_ACCESS_REG]		= MLX5_PRISM_FW_BOOT_PAGES,
+		[MLX5_PRISM_CMD_OP_INIT_HCA]		= MLX5_PRISM_FW_CAPS_SET,
+		[MLX5_PRISM_CMD_OP_TEARDOWN_HCA]	= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_ALLOC_UAR]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DEALLOC_UAR]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_CREATE_EQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DESTROY_EQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_QUERY_EQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_GEN_EQE]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_NOP]		= MLX5_PRISM_FW_OPERATIONAL,
+	};
+
+	if (opcode >= ARRAY_SIZE(min_state) || !min_state[opcode])
+		return true;
+	if (dev->fw.state >= min_state[opcode])
+		return true;
+
+	pci_err(dev->pdev,
+		"opcode 0x%x needs fw_state >= %u (currently %u) — rejected driver-side\n",
+		opcode, min_state[opcode], dev->fw.state);
+	return false;
+}
+
 static int mlx5_prism_fw_set_issi(struct mlx5_prism_dev *dev)
 {
 	u8 qin[MLX5_PRISM_CMD_HDR_SIZE] = { };
@@ -310,11 +368,15 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 	if (err)
 		goto out;
 
-	/* Known-good profile, byte for byte (R0.2: names, same bytes). */
-	prism_set_bits(c, PRISM_FLD_CAPS_LOG_MAX_KLM, 5, 18);
-	memset(c + PRISM_OFF_CAPS_CMDIF_CHKSUM, 0, 2);
-	c[PRISM_OFF_CAPS_UNIDENT_82] &= (u8)~0x3;
-	memset(c + PRISM_OFF_CAPS_UNIDENT_162, 0, 2);
+	/* Known-good profile from the quirk table — same bytes as v0.26. */
+	prism_set_bits(c, PRISM_FLD_CAPS_LOG_MAX_KLM, 5,
+		       dev->profile.caps_log_max_klm_cap);
+	if (dev->profile.caps_zero_cmdif_checksum)
+		memset(c + PRISM_OFF_CAPS_CMDIF_CHKSUM, 0, 2);
+	if (dev->profile.caps_clear_82_bits01)
+		c[PRISM_OFF_CAPS_UNIDENT_82] &= (u8)~0x3;
+	if (dev->profile.caps_zero_162_163)
+		memset(c + PRISM_OFF_CAPS_UNIDENT_162, 0, 2);
 
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_SET_HCA_CAP, 0,
 				     caps, MLX5_PRISM_CMD_HDR_SIZE +
@@ -322,6 +384,7 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 				     sout, sizeof(sout));
 	if (err)
 		goto out;
+	dev->fw.state = MLX5_PRISM_FW_CAPS_SET;
 	pci_info(dev->pdev,
 		 "SET_HCA_CAP ok: profile known-good, num_ports=%u log_max_qp=%u\n",
 		 prism_get_bits(c, PRISM_FLD_CAPS_NUM_PORTS, 8),
@@ -351,6 +414,7 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 
 	t_boot = ktime_get_ns();
 	dev->fw.active = true;
+	mlx5_prism_fw_profile_defaults(dev);
 
 	err = mlx5_prism_fw_set_issi(dev);
 	if (err)
@@ -360,6 +424,7 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 					 "boot");
 	if (err)
 		return err;
+	dev->fw.state = MLX5_PRISM_FW_BOOT_PAGES;
 
 	/*
 	 * The firmware boots its boot image from the pages just handed over.
@@ -419,6 +484,7 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 	if (err)
 		return err;
 	dev->fw.initialized = true;
+	dev->fw.state = MLX5_PRISM_FW_OPERATIONAL;
 	pci_info(dev->pdev, "INIT_HCA ok: HCA operational (%llu ms)\n",
 		 (ktime_get_ns() - t0) / NSEC_PER_MSEC);
 	pci_info(dev->pdev, "Bootstrap time: %llu ms\n",
@@ -454,6 +520,7 @@ void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev)
 		if (err)
 			pci_warn(dev->pdev, "TEARDOWN_HCA failed: %d\n", err);
 		fw->initialized = false;
+		fw->state = MLX5_PRISM_FW_CAPS_SET;
 	}
 
 	/*

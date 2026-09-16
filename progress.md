@@ -27,7 +27,7 @@
 | R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
 | R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | **completed** | 见 R0.2 节 | 2026-09-15 |
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | **completed** | 见 R0.3 节 | 2026-09-15 |
-| R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | pending | — | — |
+| R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | **completed** | 见 R0.4 节 | 2026-09-15 |
 | R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | pending | — | — |
 | R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | pending | — | — |
 | T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | pending | — | — |
@@ -669,6 +669,13 @@
 - **交付物**: `enum mlx5_prism_cmdq_mode`（POLL_INLINE / EQ_DEFERRED）+ EQ→CMDQ 唯一接口三函数：`complete_slots(vector)`（原 release_slots 更名）/`eq_bound()`/`eq_gone()`（含原 eq.c forget_slots 逻辑）；eq.c 本地 forget_slots 删除；cmd_exec 的 `dev->eq.created` 反向读取改为 `cmdq->mode` 判断；slot 生命周期不变量注释随代码迁移至枚举定义处
 - **验证**: make 零警告 + checkpatch 0/0/0 + grep 确认 eq.c 无任何 slot 位图直接操作、cmdq.c 无 eq 字段引用（双向耦合清零）
 - **reflection 要点**: T10 硬中断消费 EQE 时唯一跨中断入口将是 complete_slots()——单一入口 + irqsave 锁在先，竞态面已收敛；位图参数保留 EQE 聚合语义（一条 EQE 可确认多 slot）
+
+### R0.4-fw-state-quirks
+
+- **状态**: completed（门禁表只拦陷阱区：caps/endian 需 ≥BOOT_PAGES、INIT_HCA 需 ≥CAPS_SET、EQ/UAR 需 ≥OPERATIONAL；ENABLE_HCA 前窗口刻意不拦——自检流程不变、未知 opcode 放行给固件裁决，金样不受影响）
+- **交付物**: `enum mlx5_prism_fw_state`（fw->state）+ `mlx5_prism_fw_cmd_allowed()` 门禁表（fw.c，cmd_exec 入口调用，状态不符 -EINVAL）；`struct mlx5_prism_fw_profile`（known-good 四字段/EQ 激活重试/耐心窗）probe 时按 fw_rev 填充（未知版本告警沿用 14.32 档）；模块参数 `eq_patience_ms`/`eq_engagement_retries`（默认=实测值）；状态推进点：boot give→BOOT_PAGES、SET_HCA_CAP→CAPS_SET、INIT_HCA→OPERATIONAL、TEARDOWN→CAPS_SET
+- **验证**: make 零警告 + checkpatch 0/0/0；known-good 字节经 profile 路径仍与 fmt 等价测试覆盖的旧路径一致（值同为 18/清零四处）
+- **reflection 要点**: 驱动侧门禁是第一层"便宜失败"，固件门禁仍是最终裁决——两层分工：驱动拦"已知时序错误"，固件裁"一切"
 
 ## 修改 DESIGN.md 的记录
 
