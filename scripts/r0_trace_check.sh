@@ -18,9 +18,17 @@ modprobe -r mlx5_ib 2>/dev/null; modprobe -r mlx5_core 2>/dev/null
 rmmod mlx5_prism 2>/dev/null
 
 echo "== tracing dir: $TR"
-echo "== tracing_on BEFORE: $(cat $TR/tracing_on)"
+echo "== env: tracing_on=$(cat $TR/tracing_on) buffer_kb=$(cat $TR/buffer_size_kb) cpumask=$(cat $TR/tracing_cpumask) pid_filter=[$(cat $TR/set_event_pid)] tracer=$(cat $TR/current_tracer)"
 echo 1 > "$TR/tracing_on"
-echo "== tracing_on AFTER:  $(cat $TR/tracing_on)"
+
+# Control group: a kernel-builtin event (built by the kernel's own gcc).
+# Records but ours does not -> module-side fault; neither records ->
+# environmental (buffer/cpumask/pid filter).
+echo 1 > "$TR/events/sched/sched_switch/enable"
+: > "$TR/trace"
+sleep 1
+echo "== control (sched_switch in 1s): $(grep -c 'sched_switch:' $TR/trace)"
+echo 0 > "$TR/events/sched/sched_switch/enable"
 
 insmod mlx5_prism.ko || { echo "FAIL: insmod"; exit 1; }
 EV="$TR/events/mlx5_prism"
