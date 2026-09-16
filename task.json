@@ -839,7 +839,7 @@
       "title": "R0.3 完成后端解耦：cmdq mode 标志 + complete_slots 接口",
       "phase": "S4.5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "R0.2-typed-cmd-layer"
       ],

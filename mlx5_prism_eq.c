@@ -102,19 +102,6 @@ void mlx5_prism_eq_free(struct mlx5_prism_dev *dev)
 	eq->cons_index = 0;
 }
 
-/* EQ destroyed: pending EQEs will never arrive — free every held slot. */
-static void mlx5_prism_eq_forget_slots(struct mlx5_prism_dev *dev)
-{
-	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&cmdq->lock, flags);
-	for (i = 0; i < cmdq->max_cmds - 1; i++)
-		__clear_bit(i, cmdq->slots);
-	spin_unlock_irqrestore(&cmdq->lock, flags);
-}
-
 /*
  * EQ doorbell (v5.15 mlx5_eq_update_ci): consumer index | eqn in the high
  * byte, big-endian, to uar + 0x40 to arm (re-enable event generation) or
@@ -170,7 +157,7 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
 					 "eqe[%u]: type=0x%02x vector=0x%08x\n",
 					 eq->cons_index, e->type, v);
 				/* The EQE acknowledges these slots — free them. */
-				mlx5_prism_cmdq_release_slots(dev, v);
+				mlx5_prism_cmdq_complete_slots(dev, v);
 			} else {
 				pci_info(dev->pdev, "eqe[%u]: type=0x%02x\n",
 					 eq->cons_index, e->type);
@@ -267,6 +254,8 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		eq->eqn = cout[PRISM_OFF_EQN];
 		eq->log_sz = log_sz;
 		eq->created = true;
+		/* Slot release now defers to completion EQEs (cmdq->mode). */
+		mlx5_prism_cmdq_eq_bound(dev);
 
 		/*
 		 * The fw's actual ring size can differ from the request
@@ -329,7 +318,7 @@ static void mlx5_prism_eq_destroy(struct mlx5_prism_dev *dev)
 	eq->created = false;
 	eq->eqn = 0;
 	eq->log_sz = 0;
-	mlx5_prism_eq_forget_slots(dev);
+	mlx5_prism_cmdq_eq_gone(dev);
 }
 
 int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)

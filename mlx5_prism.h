@@ -124,6 +124,20 @@ struct mlx5_prism_cmd_block {
 
 static_assert(sizeof(struct mlx5_prism_cmd_block) == 576);
 
+/*
+ * Slot-release policy, owned by the CMDQ and switched by the EQ lifecycle
+ * API (mlx5_prism_cmdq_eq_bound/eq_gone). With no EQ the slot is released
+ * inline right after the ownership poll; with an EQ alive the slot stays
+ * BUSY until its completion EQE (vector bit) is consumed — this fw stops
+ * generating completion events for slots it considers acknowledged
+ * (measured: reusing slot 0 yielded exactly one EQE per EQ lifetime;
+ * mlx5_core likewise frees the slot from the EQE path in events mode).
+ */
+enum mlx5_prism_cmdq_mode {
+	MLX5_PRISM_CMDQ_POLL_INLINE,	/* no EQ: release slot inline */
+	MLX5_PRISM_CMDQ_EQ_DEFERRED,	/* EQ alive: release via EQE vector */
+};
+
 struct mlx5_prism_cmdq {
 	void		*buf;		/* cpu virtual address */
 	dma_addr_t	dma;		/* pci bus address for firmware */
@@ -132,6 +146,7 @@ struct mlx5_prism_cmdq {
 	u8		log_stride;
 	int		max_cmds;
 	u16		token_next;	/* rolling token; 0 is reserved */
+	u8		mode;		/* enum mlx5_prism_cmdq_mode */
 	DECLARE_BITMAP(slots, MLX5_PRISM_MAX_COMMANDS);
 	spinlock_t	lock;		/* serialise producers (used from T05) */
 };
@@ -276,8 +291,9 @@ int mlx5_prism_cmdq_init(struct mlx5_prism_dev *dev);
  * inline out back. `in`/`out` are FULL command buffers — bytes[0:8] of `in`
  * are the opcode/op_mod passed separately, bytes[8:16] are caller-set inline
  * args, and bytes[16:len) travel through 1 KiB-aligned mailbox blocks
- * (single block up to 512 B of payload, up to 128 blocks chained). The
- * EQ/interrupt completion path arrives in T09/T10.
+ * (single block up to 512 B of payload, up to 128 blocks chained). Slot
+ * release follows cmdq->mode: inline without an EQ, deferred to the
+ * completion EQE otherwise (see enum mlx5_prism_cmdq_mode).
  */
 int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 			   u16 opcode, u16 op_mod,
@@ -290,7 +306,17 @@ int mlx5_prism_cmdq_invoke(struct mlx5_prism_dev *dev,
 int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
 				 u16 opcode, u16 op_mod,
 				 u8 *in, u32 in_len, u8 *out, u32 out_len);
-int mlx5_prism_cmdq_release_slots(struct mlx5_prism_dev *dev, u32 vector);
+/*
+ * EQ→CMDQ completion interface — the only way the EQ side touches slots
+ * (DESIGN.md v2 §2.1 rule 2). complete_slots() releases the slots named
+ * by a command-completion EQE's vector bitmap and returns how many it
+ * freed; eq_bound()/eq_gone() bracket the EQ lifetime and switch the
+ * slot-release mode. eq_gone() also forgets every held regular slot —
+ * pending EQEs will never arrive.
+ */
+int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector);
+void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev);
+void mlx5_prism_cmdq_eq_gone(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
 

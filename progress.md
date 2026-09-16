@@ -26,7 +26,7 @@
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **completed** | 24c9d80 | 2026-09-08 |
 | R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
 | R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | **completed** | 见 R0.2 节 | 2026-09-15 |
-| R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | pending | — | — |
+| R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | **completed** | 见 R0.3 节 | 2026-09-15 |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | pending | — | — |
 | R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | pending | — | — |
 | R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | pending | — | — |
@@ -662,6 +662,13 @@
 - **reflection_questions 答案**:
   - **Q: 为什么禁止迁移时'顺手修正'疑似错误的偏移？** A: 三步（发现→实验→改）不可合并。顺手改 = 未验证的行为变化混进"行为保持"的重构，金样一旦红了无法定位是迁移错还是修正错；而且"疑似错误"可能是未理解的正确（本案 dw3 编码"错"得能跑，说明固件行为尚未被理解）。
   - **Q: 静态等价证明的边界在哪？** A: 它证明"新旧表达式在给定输入下产出相同字节"，输入覆盖穷举/随机；它不证明"固件接受这些字节"——那是金样门禁的职责。两腿互补：静态证机器可靠、硬件证环境可靠。
+
+### R0.3-completion-backend
+
+- **状态**: completed（行为不变：位运算与次序逐行等价；硬件金样门禁待 sudo）
+- **交付物**: `enum mlx5_prism_cmdq_mode`（POLL_INLINE / EQ_DEFERRED）+ EQ→CMDQ 唯一接口三函数：`complete_slots(vector)`（原 release_slots 更名）/`eq_bound()`/`eq_gone()`（含原 eq.c forget_slots 逻辑）；eq.c 本地 forget_slots 删除；cmd_exec 的 `dev->eq.created` 反向读取改为 `cmdq->mode` 判断；slot 生命周期不变量注释随代码迁移至枚举定义处
+- **验证**: make 零警告 + checkpatch 0/0/0 + grep 确认 eq.c 无任何 slot 位图直接操作、cmdq.c 无 eq 字段引用（双向耦合清零）
+- **reflection 要点**: T10 硬中断消费 EQE 时唯一跨中断入口将是 complete_slots()——单一入口 + irqsave 锁在先，竞态面已收敛；位图参数保留 EQE 聚合语义（一条 EQE 可确认多 slot）
 
 ## 修改 DESIGN.md 的记录
 

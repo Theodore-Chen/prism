@@ -44,6 +44,7 @@ int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev)
 
 	spin_lock_init(&cmdq->lock);
 	cmdq->token_next = 0;
+	cmdq->mode = MLX5_PRISM_CMDQ_POLL_INLINE;
 	bitmap_zero(cmdq->slots, MLX5_PRISM_MAX_COMMANDS);
 
 	pci_info(dev->pdev,
@@ -339,14 +340,12 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 
 	spin_lock_irqsave(&cmdq->lock, flags);
 	/*
-	 * Slot lifecycle: with an EQ alive the slot stays BUSY until the
-	 * command's completion EQE (vector bit) is consumed — this fw stops
-	 * generating completion events for slots it considers acknowledged
-	 * (measured: reusing slot 0 yielded exactly one EQE per EQ lifetime;
-	 * mlx5_core likewise frees the slot from the EQE path in events
-	 * mode). Without an EQ there is nobody to release it — clear here.
+	 * Slot lifecycle follows cmdq->mode: with an EQ alive the slot stays
+	 * BUSY until the command's completion EQE (vector bit) is consumed —
+	 * see enum mlx5_prism_cmdq_mode. Without an EQ there is nobody to
+	 * release it — clear here.
 	 */
-	if (!dev->eq.created)
+	if (cmdq->mode == MLX5_PRISM_CMDQ_POLL_INLINE)
 		__clear_bit(idx, cmdq->slots);
 	spin_unlock_irqrestore(&cmdq->lock, flags);
 
@@ -402,8 +401,11 @@ int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
 				   out, out_len, true);
 }
 
-/* Release CMDQ slots named by a command-completion vector bitmap. */
-int mlx5_prism_cmdq_release_slots(struct mlx5_prism_dev *dev, u32 vector)
+/*
+ * Release CMDQ slots named by a command-completion vector bitmap — the
+ * EQ side's single entry point into slot state (DESIGN.md v2 §2.1 rule 2).
+ */
+int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
 	unsigned long v = vector, flags;
@@ -417,6 +419,30 @@ int mlx5_prism_cmdq_release_slots(struct mlx5_prism_dev *dev, u32 vector)
 	spin_unlock_irqrestore(&cmdq->lock, flags);
 
 	return n;
+}
+
+/* EQ created: hold each regular slot until its completion EQE arrives. */
+void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->cmdq.lock, flags);
+	dev->cmdq.mode = MLX5_PRISM_CMDQ_EQ_DEFERRED;
+	spin_unlock_irqrestore(&dev->cmdq.lock, flags);
+}
+
+/* EQ destroyed: pending EQEs will never arrive — forget every held slot. */
+void mlx5_prism_cmdq_eq_gone(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&cmdq->lock, flags);
+	cmdq->mode = MLX5_PRISM_CMDQ_POLL_INLINE;
+	for (i = 0; i < cmdq->max_cmds - 1; i++)
+		__clear_bit(i, cmdq->slots);
+	spin_unlock_irqrestore(&cmdq->lock, flags);
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)
