@@ -14,7 +14,7 @@
 
 辅助：`mlx5_prism.h`（全部结构体与线格式定义）、`mlx5_prism_fmt.h`（**唯一**偏移表 + 每命令 ASCII 布局图）、`mlx5_prism_trace.h`（tracepoint）。
 
-## 二、文件到层的映射（DESIGN.md v2 §2）
+## 二、文件到层的映射（DESIGN.md v2.1 §2）
 
 ```
 L0 硬件访问   mlx5_prism_pci.c (BAR0/iseg)
@@ -52,7 +52,7 @@ sudo bash scripts/r0_gate.sh
 
 ## 四、知识索引（深挖入口）
 
-- **DESIGN.md v2**：四层架构 §2、命令引擎 §5（含错误分类学 §5.4）、EQ 与事件设计 §7（T09 实验全记录）、怪癖档案 §6
+- **DESIGN.md v2.1**：设计价值观与抽象准入三问 §1.7、四层架构 §2、命令引擎 §5（含错误分类学 §5.4）、EQ 与事件设计 §7（T09 实验全记录）、怪癖档案 §6
 - **progress.md**：每任务的学习记录 + "历史问题归档"（字节偏移实证表、known-good 考古、syndrome 速查、两次死机复盘）
 - **eqc dw3 翻案假设**（progress.md R0.2 节）：现存"1 条目 EQ"很可能是驱动编码请求的——T10 前置实验清单
 - **mlx5_core 对照读法**：`/home/zqc/code/linux/drivers/net/ethernet/mellanox/mlx5/core/`（cmd.c 命令引擎 / eq.c 事件 / main.c 引导序列）
