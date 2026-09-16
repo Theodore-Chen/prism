@@ -456,6 +456,7 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev)
 					     out, sizeof(out));
 		if (err)
 			return err;
+		pci_info(dev->pdev, "ENABLE_HCA ok\n");
 		dev->fw.state = MLX5_PRISM_FW_ENABLED;
 	}
 

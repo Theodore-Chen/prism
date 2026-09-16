@@ -692,6 +692,7 @@
 - **reflection 要点**: tracepoint 提前于 T10 落地=T06"死机无现场"教训的工程化兑现；issue/complete 配对 + eq_event 即 T10 事件模式调试的观测三件套
 
 ### R0.7-可读性整改
+- **硬件门禁首轮复盘（2026-09-16，用户跑 r0_gate.sh，黑匣子 3475 行）**：G1 金样双口零差异（复验通过）；G4 全绿——44 个自检周期 10/10（双口×22），怪癖恢复触发 35 次全部自愈，40 压测循环零告警；**两处修正**：①G2 断言 grep 不到 ENABLE_HCA——R0.5 给 bootstrap 生产路径加了自发命令但漏了日志行，已补（该行仅在 selftest=0 出现，金样不受影响）；②G3 无证据——**本机未安装 perf**（脚本缺陷），G3 改用 tracefs 重写（rmmod teardown 的 40+ 条命令足够验证 issue/complete 配对，零外部依赖）。修正后需整门禁重跑一次。
 
 - **状态**: completed（行为保持：selftest=1 路径日志序列与金样逐行一致，硬件门禁 G1 复跑覆盖；默认路径新增的唯一变化 = 三面 caps hexdump 墙不再打印——设计内收敛）
 - **交付物**: ①日志瘦身——`mlx5_prism_selftest` 全局化（module_param 同名），caps[max]/[cur]/[post] hexdump 仅 selftest 打印（缓存 memcpy 不受影响），默认 dmesg 成纯文本剧本；②注释节食——set_hca_cap 考古块 15→6 行（不变量+指针），eq.c/cmdq.c 文件头从任务流水账改为"阅读地图+不变量"；③fmt.h 新增 9 条命令的 ASCII 布局图（命名偏移表补上字段全景）；④新增 READING.md——600 行脊柱读法/分层映射/动手路径/知识索引（含宏魔法专题沉淀：三世界、÷8/÷32 双坐标系、量尺结构体与 sizeof 不求值语义）
