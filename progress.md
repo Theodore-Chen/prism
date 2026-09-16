@@ -24,7 +24,7 @@
 | T07-fw-bootstrap-1 | 固件引导 I：ISSI + 字节序 + boot pages + 回收 | S4 | — | **completed** | 10ccbad | 2026-09-08 |
 | T08-fw-bootstrap-2 | 固件引导 II：SET_HCA_CAP + init pages + INIT_HCA | S4 | **M1** | **completed** | 436ea84 | 2026-09-08 |
 | T09-eq-create-poll-consume | EQ 创建 + 轮询消费 EQE（零中断点亮） | S5 | — | **completed** | 24c9d80 | 2026-09-08 |
-| R0.1-golden-baseline | R0 重构 I：金样采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
+| R0.1-baseline | R0 重构 I：基线采集（行为基线存档） | S4.5 | — | **completed** | 见 R0.1 节 | 2026-09-15 |
 | R0.2-typed-cmd-layer | R0 重构 II：类型化命令层 mlx5_prism_fmt.h | S4.5 | — | **completed** | 见 R0.2 节 | 2026-09-15 |
 | R0.3-completion-backend | R0 重构 III：完成后端解耦（cmdq mode + complete_slots） | S4.5 | — | **completed** | 见 R0.3 节 | 2026-09-15 |
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | **completed** | 见 R0.4 节 | 2026-09-15 |
@@ -624,36 +624,36 @@
 
   **⑥ CREATE_EQ 之谜终章（T10-prep，2026-09-17）**：④ 的最终翻案——真凶是驱动侧 eqc 编码错位（dw3=(log&7)<<29|uar 把 log_eq_size 写进 reserved 位，固件读到 eqc[12]&0x1f=uar&0x1f=0；intr be16 编码从未落在 [180,191] 字段区间）。"固件接受 log12 但实建 1 条目"实为"如实构建被请求的 1 条目"；"~10% 激活竞态"与"中断不点火"同源。ifc 位号编码下：CREATE_EQ(log12/64pas) 10/10 接受、读回逐字回显、事件按序落环、MSI-X ≈1 次/事件。教训：**在协议字段编码被证明正确之前，"固件怪癖"与"驱动编码错误"不可区分——先审自己的位几何，再怪硬件**。本案的位几何错误同时骗过了编码者与读回解析器：两套编号约定（LSB-first per byte vs MSB-first per dword）在字节内翻转、窗口重叠 bit3-4，恒 0 字段无法自证。
 
-  **⑦ 金样重采事故复盘（2026-09-17，三重工具 bug 叠加）**：rebaseline 首跑全链失效——a) **fs.protected_regular=2**（Ubuntu 默认）下 root 对 /tmp 中他人所有的既有文件做 `>` 重定向（O_CREAT）也会 EACCES：diff_golden 的固定 /tmp 文件名撞上早前非 root 调试留下的同名文件，归一化/diff 全部失败；b) 一条龙脚本的"预期族熔断"查错了文件名（prism_diff_0.txt vs 实际 prism_diff_0000:08:00.0.txt）——**防线从未生效过，残缺金样仍被写入**（git checkout 挽回）；c) **采集口径错位**：t09_verify.sh 的 insmod 自 R0.5 后走的是生产路径（缺 selftest=1），用它重采的金样缺全部自检行（26 行 vs 46 行），自洽复验与 G1 必然双红。硬件行为本身全绿（G2/G3/G4 + 40 循环压测零抱怨）。修复：diff_golden 私有 mktemp 工作目录（PRISM_GOLDEN_WORK 可注入）、t09_verify 补 selftest=1、熔断改从工作目录读。教训：**临时文件一律 mktemp 私有目录；金样采集口径必须与门禁对比口径逐字一致；没被测试过的熔断防线等于没有**。
+  **⑦ 基线重采事故复盘（2026-09-17，三重工具 bug 叠加）**：rebaseline 首跑全链失效——a) **fs.protected_regular=2**（Ubuntu 默认）下 root 对 /tmp 中他人所有的既有文件做 `>` 重定向（O_CREAT）也会 EACCES：diff_baseline 的固定 /tmp 文件名撞上早前非 root 调试留下的同名文件，归一化/diff 全部失败；b) 一条龙脚本的"预期族熔断"查错了文件名（prism_diff_0.txt vs 实际 prism_diff_0000:08:00.0.txt）——**防线从未生效过，残缺基线仍被写入**（git checkout 挽回）；c) **采集口径错位**：t09_verify.sh 的 insmod 自 R0.5 后走的是生产路径（缺 selftest=1），用它重采的基线缺全部自检行（26 行 vs 46 行），自洽复验与 G1 必然双红。硬件行为本身全绿（G2/G3/G4 + 40 循环压测零抱怨）。修复：diff_baseline 私有 mktemp 工作目录（PRISM_BASELINE_WORK 可注入）、t09_verify 补 selftest=1、熔断改从工作目录读。教训：**临时文件一律 mktemp 私有目录；基线采集口径必须与门禁对比口径逐字一致；没被测试过的熔断防线等于没有**。
 
 
-### R0.1-golden-baseline
+### R0.1-baseline
 
 - **状态**: completed
 - **开始时间**: 2026-09-15
 - **完成时间**: 2026-09-15
 - **Commit**: 本提交（随 R0.1 工具一并入库）
-- **基线来源（重要说明）**: 金样取自 **T09 收官压测的黑匣子日志**（/var/tmp/t09_live.log，10609 行，100 循环，HEAD 24c9d80 代码，零 WARNING/Oops）——代码自那之后只有文档改动，日志即当前 HEAD 行为的有效快照，满足"≥20 循环"要求（100 循环）。sudo 密码不可用，**新鲜单周期重跑**挪到 R0.2 门禁一并执行。
-- **交付物**: scripts/golden/{golden_dmesg_0.txt, golden_dmesg_1.txt, normalize.sh, diff_golden.sh, README.md}；t09_verify.sh 头部过时注释已修（描述 T08 状态 → T09 实际行为）
+- **基线来源（重要说明）**: 基线取自 **T09 收官压测的黑匣子日志**（/var/tmp/t09_live.log，10609 行，100 循环，HEAD 24c9d80 代码，零 WARNING/Oops）——代码自那之后只有文档改动，日志即当前 HEAD 行为的有效快照，满足"≥20 循环"要求（100 循环）。sudo 密码不可用，**新鲜单周期重跑**挪到 R0.2 门禁一并执行。
+- **交付物**: scripts/baseline/{baseline_dmesg_0.txt, baseline_dmesg_1.txt, normalize.sh, diff_baseline.sh, README.md}；t09_verify.sh 头部过时注释已修（描述 T08 状态 → T09 实际行为）
 - **关键决策**:
-  - **分口金样**：开发中发现双口 caps hexdump 有 1 字节真实差异（function 标识，.0=0x00/.1=0x01），但各自跨 100 周期完全确定——金样按口分档，比"单模板+归一化该字节"保留更强的回归锚点
+  - **分口基线**：开发中发现双口 caps hexdump 有 1 字节真实差异（function 标识，.0=0x00/.1=0x01），但各自跨 100 周期完全确定——基线按口分档，比"单模板+归一化该字节"保留更强的回归锚点
   - **怪癖变体归一化**：~10% 激活怪癖是合法随机行为（静默→重建块出现与否随机），normalize.sh 删除该块并折叠重复 QUERY_EQ——否则门禁会随机 FAIL
   - **刻意不归一**：caps hexdump / 页数 6/2299/2305 / log_sz=5 / eqn=4 / 10/10 / eqe vector 位图——这些是抓回归的核心锚点
-- **门禁三重验证**（scripts/golden/README.md 有记录）:
+- **门禁三重验证**（scripts/baseline/README.md 有记录）:
   1. 同周期自洽：双口 PASS
   2. 中间周期（不同怪癖变体）：双口 PASS
   3. 负对照（篡改 2299→2298）：精确 FAIL，双口均抓到
 - **学习心得**: 行为保持重构的验收不能靠"看起来没改什么"——必须有机械化工样。开发过程本身验证了门禁价值：第一天就抓到两口 caps 差异（真差异）和测试切片多带一行的锚点漂移（门禁正确拒绝）。
 - **reflection_questions 答案**:
-  - **Q: 没有基线的重构怎么验证"行为不变"？** A: 只能靠 code review + 祈祷。code review 对"搬运不改写"类重构的有效性随 diff 大小指数衰减；金样把验证从"人读代码"变成"机器读日志"，且成本不变、可无限重复。
-  - **Q: 金样里哪些字段天然不稳定？** A: 三类：时间戳/地址（每次分配不同）、时延数字（毫秒统计量）、合法随机行为（激活怪癖变体）。diff 白名单必须显式枚举这三类，其余一律不许豁免——白名单越宽，门禁越没用。
+  - **Q: 没有基线的重构怎么验证"行为不变"？** A: 只能靠 code review + 祈祷。code review 对"搬运不改写"类重构的有效性随 diff 大小指数衰减；基线把验证从"人读代码"变成"机器读日志"，且成本不变、可无限重复。
+  - **Q: 基线里哪些字段天然不稳定？** A: 三类：时间戳/地址（每次分配不同）、时延数字（毫秒统计量）、合法随机行为（激活怪癖变体）。diff 白名单必须显式枚举这三类，其余一律不许豁免——白名单越宽，门禁越没用。
 
 ### R0.2-typed-cmd-layer
 
-- **状态**: completed（静态等价已证，硬件金样门禁待 sudo 恢复后补跑）
+- **状态**: completed（静态等价已证，硬件基线门禁待 sudo 恢复后补跑）
 - **开始/完成时间**: 2026-09-15
 - **交付物**: `mlx5_prism_fmt.h`（PRISM_OFF_* 字节偏移 + PRISM_FLD_* 子字节位域 + prism_set/get_bits + eqc dw3/intr 遗留编码助手）；fw.c/eq.c/cmdq.c 自检全部迁移；`scripts/test/fmt_equiv_check.c` 宿主机等价性证明
-- **核心发现（eqc dw3 翻案假设，重要度最高）**: 把 eqc 字段正式化时发现，原编码 `put_be32(eqc+12, (log_sz<<29)|uar)` 在 **ifc 位编号语义**（log_eq_size@99 占该 dword 的 value bits 3-7）下，log_eq_size 字段落在了 uar 的零位上——**uar=4096 时请求的就是 log_eq_size=0，即 1 条目 EQ**。这意味着 T09 的"固件接受 log12 但实建 1 条目（固件说谎）"结论很可能要翻案：**固件如实构建了被请求的 1 条目环**。同理 intr 编码（be16@eqc[16:18]=vec<<4）也不在 ifc intr@140-147 位区间，中断从未点火与此可能相关。两者都是假设——验证实验（按 ifc 位置正确写 log_eq_size → QUERY_EQ 读回 → 若得真多条目环则 T10 的事件引擎 ~10% 激活/长尾很可能一并消失）已列入 T10 准备清单。R0 纪律：**字节原样保留**（金样行为依赖），假设只入档。
+- **核心发现（eqc dw3 翻案假设，重要度最高）**: 把 eqc 字段正式化时发现，原编码 `put_be32(eqc+12, (log_sz<<29)|uar)` 在 **ifc 位编号语义**（log_eq_size@99 占该 dword 的 value bits 3-7）下，log_eq_size 字段落在了 uar 的零位上——**uar=4096 时请求的就是 log_eq_size=0，即 1 条目 EQ**。这意味着 T09 的"固件接受 log12 但实建 1 条目（固件说谎）"结论很可能要翻案：**固件如实构建了被请求的 1 条目环**。同理 intr 编码（be16@eqc[16:18]=vec<<4）也不在 ifc intr@140-147 位区间，中断从未点火与此可能相关。两者都是假设——验证实验（按 ifc 位置正确写 log_eq_size → QUERY_EQ 读回 → 若得真多条目环则 T10 的事件引擎 ~10% 激活/长尾很可能一并消失）已列入 T10 准备清单。R0 纪律：**字节原样保留**（基线行为依赖），假设只入档。
 - **验证方法（无 sudo 的替代门禁）**:
   1. 宿主机等价性证明 `fmt_equiv_check.c`：每个被替换的旧表达式按 v0.26 原样复现，与新 accessor 输出逐字节对比——穷举扫描（ISSI be16 全字节对、readback 全 256 值、caps 字段全值域）+ 1000 组随机 caps 载荷 + 阶梯全档位 × 多 uar 值。**ALL EQUIVALENT (0 failures)**。测试第一天就抓到迁移本身的真 bug（ifc 风格常数换算错位 8/16 位，ISSI/known-good 落点全错）——先证明工具，工具再证明迁移
   2. make 零警告（顺带修掉两个 HEAD 就存在的历史小疣：eq.c pages=%d→%zu、eq_create 死变量 in/out）+ checkpatch 五文件 0/0/0
@@ -664,26 +664,26 @@
   - be16 助手补进 mlx5_prism.h（消掉 ISSI/reg_id 最后两处手拼字节）
 - **学习心得**: "形式化偏移"本身就是一次免费的全量审计——14 轮实验也没发现的编码疑点，在给字段起名字时自己浮出来了。**给魔法数命名是性价比最高的代码考古。**
 - **reflection_questions 答案**:
-  - **Q: 为什么禁止迁移时'顺手修正'疑似错误的偏移？** A: 三步（发现→实验→改）不可合并。顺手改 = 未验证的行为变化混进"行为保持"的重构，金样一旦红了无法定位是迁移错还是修正错；而且"疑似错误"可能是未理解的正确（本案 dw3 编码"错"得能跑，说明固件行为尚未被理解）。
-  - **Q: 静态等价证明的边界在哪？** A: 它证明"新旧表达式在给定输入下产出相同字节"，输入覆盖穷举/随机；它不证明"固件接受这些字节"——那是金样门禁的职责。两腿互补：静态证机器可靠、硬件证环境可靠。
+  - **Q: 为什么禁止迁移时'顺手修正'疑似错误的偏移？** A: 三步（发现→实验→改）不可合并。顺手改 = 未验证的行为变化混进"行为保持"的重构，基线一旦红了无法定位是迁移错还是修正错；而且"疑似错误"可能是未理解的正确（本案 dw3 编码"错"得能跑，说明固件行为尚未被理解）。
+  - **Q: 静态等价证明的边界在哪？** A: 它证明"新旧表达式在给定输入下产出相同字节"，输入覆盖穷举/随机；它不证明"固件接受这些字节"——那是基线门禁的职责。两腿互补：静态证机器可靠、硬件证环境可靠。
 
 ### R0.3-completion-backend
 
-- **状态**: completed（行为不变：位运算与次序逐行等价；硬件金样门禁待 sudo）
+- **状态**: completed（行为不变：位运算与次序逐行等价；硬件基线门禁待 sudo）
 - **交付物**: `enum mlx5_prism_cmdq_mode`（POLL_INLINE / EQ_DEFERRED）+ EQ→CMDQ 唯一接口三函数：`complete_slots(vector)`（原 release_slots 更名）/`eq_bound()`/`eq_gone()`（含原 eq.c forget_slots 逻辑）；eq.c 本地 forget_slots 删除；cmd_exec 的 `dev->eq.created` 反向读取改为 `cmdq->mode` 判断；slot 生命周期不变量注释随代码迁移至枚举定义处
 - **验证**: make 零警告 + checkpatch 0/0/0 + grep 确认 eq.c 无任何 slot 位图直接操作、cmdq.c 无 eq 字段引用（双向耦合清零）
 - **reflection 要点**: T10 硬中断消费 EQE 时唯一跨中断入口将是 complete_slots()——单一入口 + irqsave 锁在先，竞态面已收敛；位图参数保留 EQE 聚合语义（一条 EQE 可确认多 slot）
 
 ### R0.4-fw-state-quirks
 
-- **状态**: completed（门禁表只拦陷阱区：caps/endian 需 ≥BOOT_PAGES、INIT_HCA 需 ≥CAPS_SET、EQ/UAR 需 ≥OPERATIONAL；ENABLE_HCA 前窗口刻意不拦——自检流程不变、未知 opcode 放行给固件裁决，金样不受影响）
+- **状态**: completed（门禁表只拦陷阱区：caps/endian 需 ≥BOOT_PAGES、INIT_HCA 需 ≥CAPS_SET、EQ/UAR 需 ≥OPERATIONAL；ENABLE_HCA 前窗口刻意不拦——自检流程不变、未知 opcode 放行给固件裁决，基线不受影响）
 - **交付物**: `enum mlx5_prism_fw_state`（fw->state）+ `mlx5_prism_fw_cmd_allowed()` 门禁表（fw.c，cmd_exec 入口调用，状态不符 -EINVAL）；`struct mlx5_prism_fw_profile`（known-good 四字段/EQ 激活重试/耐心窗）probe 时按 fw_rev 填充（未知版本告警沿用 14.32 档）；模块参数 `eq_patience_ms`/`eq_engagement_retries`（默认=实测值）；状态推进点：boot give→BOOT_PAGES、SET_HCA_CAP→CAPS_SET、INIT_HCA→OPERATIONAL、TEARDOWN→CAPS_SET
 - **验证**: make 零警告 + checkpatch 0/0/0；known-good 字节经 profile 路径仍与 fmt 等价测试覆盖的旧路径一致（值同为 18/清零四处）
 - **reflection 要点**: 驱动侧门禁是第一层"便宜失败"，固件门禁仍是最终裁决——两层分工：驱动拦"已知时序错误"，固件裁"一切"
 
 ### R0.5-dev-ctx-teardown-selftest
 
-- **状态**: completed（selftest=1 路径金样等价：自检序列/顺序/日志不变；selftest=0 为新生产路径——bootstrap 补发 ENABLE_HCA（state==RESET 时），是 R0 中唯一"新增行为"，属设计内新增而非行为漂移）
+- **状态**: completed（selftest=1 路径基线等价：自检序列/顺序/日志不变；selftest=0 为新生产路径——bootstrap 补发 ENABLE_HCA（state==RESET 时），是 R0 中唯一"新增行为"，属设计内新增而非行为漂移）
 - **交付物**: `selftest=1` 模块参数（默认关，全部自检移出生产 probe）；fw.pages/pages_dma 懒分配（kvcalloc，上限 8192 不变，128KB 不再常驻设备结构）；caps_max/cur 缓存（probe_caps/set_hca_cap 填充，teardown 释放，T12/T13 消费）；`mlx5_prism_teardown(dev, stage)` 单一有序拆卸（PRISM_TD_NO_EQ/ALL，pci.c 三处重复清零）；fw state 增 ENABLED（自检 ENABLE_HCA 后由编排层推进）
 - **验证**: make 零警告 + checkpatch 0/0/0 + teardown 出现次数=1
 - **reflection 要点**: 生产/验证路径分离后，eq 自检最坏 80s 挂起不再进默认 probe；错误路径从失败层调 teardown(stage)——栈式获取逆序释放的单一表达
@@ -696,43 +696,43 @@
 - **reflection 要点**: tracepoint 提前于 T10 落地=T06"死机无现场"教训的工程化兑现；issue/complete 配对 + eq_event 即 T10 事件模式调试的观测三件套
 
 ### R0.7-可读性整改
-- **硬件门禁首轮复盘（2026-09-16，用户跑 r0_gate.sh，黑匣子 3475 行）**：G1 金样双口零差异（复验通过）；G4 全绿——44 个自检周期 10/10（双口×22），怪癖恢复触发 35 次全部自愈，40 压测循环零告警；**两处修正**：①G2 断言 grep 不到 ENABLE_HCA——R0.5 给 bootstrap 生产路径加了自发命令但漏了日志行，已补（该行仅在 selftest=0 出现，金样不受影响）；②G3 无证据——**本机未安装 perf**（脚本缺陷），G3 改用 tracefs 重写（rmmod teardown 的 40+ 条命令足够验证 issue/complete 配对，零外部依赖）。修正后需整门禁重跑一次。
+- **硬件门禁首轮复盘（2026-09-16，用户跑 r0_gate.sh，黑匣子 3475 行）**：G1 基线双口零差异（复验通过）；G4 全绿——44 个自检周期 10/10（双口×22），怪癖恢复触发 35 次全部自愈，40 压测循环零告警；**两处修正**：①G2 断言 grep 不到 ENABLE_HCA——R0.5 给 bootstrap 生产路径加了自发命令但漏了日志行，已补（该行仅在 selftest=0 出现，基线不受影响）；②G3 无证据——**本机未安装 perf**（脚本缺陷），G3 改用 tracefs 重写（rmmod teardown 的 40+ 条命令足够验证 issue/complete 配对，零外部依赖）。修正后需整门禁重跑一次。
 
-- **状态**: completed（行为保持：selftest=1 路径日志序列与金样逐行一致，硬件门禁 G1 复跑覆盖；默认路径新增的唯一变化 = 三面 caps hexdump 墙不再打印——设计内收敛）
+- **状态**: completed（行为保持：selftest=1 路径日志序列与基线逐行一致，硬件门禁 G1 复跑覆盖；默认路径新增的唯一变化 = 三面 caps hexdump 墙不再打印——设计内收敛）
 - **交付物**: ①日志瘦身——`mlx5_prism_selftest` 全局化（module_param 同名），caps[max]/[cur]/[post] hexdump 仅 selftest 打印（缓存 memcpy 不受影响），默认 dmesg 成纯文本剧本；②注释节食——set_hca_cap 考古块 15→6 行（不变量+指针），eq.c/cmdq.c 文件头从任务流水账改为"阅读地图+不变量"；③fmt.h 新增 9 条命令的 ASCII 布局图（命名偏移表补上字段全景）；④新增 READING.md——600 行脊柱读法/分层映射/动手路径/知识索引（含宏魔法专题沉淀：三世界、÷8/÷32 双坐标系、量尺结构体与 sizeof 不求值语义）
 - **验证**: make 零警告 + checkpatch 8 文件 0/0/0（trace.h 为已入档的 TRACE_EVENT 布局豁免）+ 等价性测试 ALL EQUIVALENT
-- **反思**: 面向读者的三件套（剧本式日志/地图式文件头/全景式偏移表）与面向作者的资产（考古档案/金样/测试）分工明确——前者做减法，后者只增不减
+- **反思**: 面向读者的三件套（剧本式日志/地图式文件头/全景式偏移表）与面向作者的资产（考古档案/基线/测试）分工明确——前者做减法，后者只增不减
 
 - **tracepoint 采集窗口时序（2026-09-16，G3 三轮追诊破案）**：模块的 tracepoint 探测在卸载路径的 `MODULE_STATE_GOING` 阶段即被内核分离（防 use-after-free），早于 `mod->exit()` 里发出的 teardown 命令——**"加载后使能、卸载时采集"的窗口里命令发出时 funcs==NULL，全部静默跳过**。症状极具迷惑性：事件目录在/使能位=1/调用点反汇编活着/内核自带事件（sched_switch 对照组 1418 条/s）正常/换编译器无效。正解：事件目录在模块 init 执行任何命令**之前**注册——轮询循环在目录出现的瞬间使能，加载期捕获全轨迹（实测 90/90 配对 + 20 条 eq_event）。与 EQ 双 doorbell 同类教训：**"使能"与"可见"是两个时刻，中间隔着生命周期钩子**。附带环境发现：PATH 的 ~/.local/gcc（gcc-15）遮蔽 /usr/bin/gcc（11.4，与内核同版），历史构建均为 gcc-15 产物——本案非根因（gcc-11 重编同样复现），但作为环境隐患记录在案（当前树内 .ko 为 CC=/usr/bin/gcc-11 构建）。
 
 ### T10-prep-eqc-翻案实验（预登记，待上机）
 
 - **状态**: designed（判别式已预登记于 scripts/t10prep_eqc_probe.sh 头部；跑机器=用户，sudo 在用户侧）
-- **设计**: 模块参数 `eq_ifc`（默认 0——金样路径请求字节零改动）；fmt.h 新增 ifc 编码/解码各三助手（`prism_eqc_write_dw3_ifc`：dw3=(log<<24)|uar；`prism_eqc_set_intr_ifc`：dw5 低 12 位=vec；`prism_eqc_*_readback_ifc`：真窗口 BE 算术直算）；eq.c 创建路径按参数切换编码，QUERY_EQ 读回在 ifc 模式额外 dump 原始 dw3/dw5 + 真窗口解码，并**以真窗口读回采纳 eq->log_sz**（消费者必须走固件实建的环，否则 nent 错配、owner 奇偶全乱——这是实验内建的防呆）。判别式 A-E 与结论空间见脚本头（跑前写死，勿改）。
+- **设计**: 模块参数 `eq_ifc`（默认 0——基线路径请求字节零改动）；fmt.h 新增 ifc 编码/解码各三助手（`prism_eqc_write_dw3_ifc`：dw3=(log<<24)|uar；`prism_eqc_set_intr_ifc`：dw5 低 12 位=vec；`prism_eqc_*_readback_ifc`：真窗口 BE 算术直算）；eq.c 创建路径按参数切换编码，QUERY_EQ 读回在 ifc 模式额外 dump 原始 dw3/dw5 + 真窗口解码，并**以真窗口读回采纳 eq->log_sz**（消费者必须走固件实建的环，否则 nent 错配、owner 奇偶全乱——这是实验内建的防呆）。判别式 A-E 与结论空间见脚本头（跑前写死，勿改）。
 - **核心发现（eqc 位几何修正，重要度最高）**：
   1. **R0.2 归档两处笔误修正**：intr 真位号 **@180、12 位**（`reserved_at_a0[0x14]` 占 160-179；归档写的 @140-147 系误记）；log_eq_size 真窗口是 **eqc[12] 低 5 位**（归档写的"占该 dword 的 value bits 3-7"错误——按 MLX5_SET 代数 `dw_bit_off=32-5-3=24`，字段落在 value bits 24-28=eqc[12] bits 0-4）。翻案**结论**不受影响：旧编码 `(log&7)<<29|uar` 下 log_eq_size 读值 = `eqc[12]&0x1f` = `uar&0x1f` = 0（uar=4096），1 条目仍是字面请求的。
-  2. **双坐标系的第三道褶皱**：prism_get_bits 的字节内 LSB-first 编号与 ifc/PRM 的 dword 内 MSB-first 编号在**字节内窗口上翻转**——两者的"bit 99"都落在 eqc[12]，一个读高 5 位一个读低 5 位，重叠 bit3-4，字段恒 0 时不可分辨。**金样读回解析器 `PRISM_FLD_EQC_LOGSZ_READBACK(=99)` 一直在读翻转窗口却从未暴露**。处置：金样路径不动（字节冻结纪律），实验解码走 BE 算术直算的真窗口助手，fmt.h 几何注释写明两套约定的分叉点。caps 的 R0.2 常量是经验标定窗口（行为正确），但其数值≠真 ifc 位号——fmt.h 头部"与 mlx5_ifc 编号一致"的旧说法已删。
+  2. **双坐标系的第三道褶皱**：prism_get_bits 的字节内 LSB-first 编号与 ifc/PRM 的 dword 内 MSB-first 编号在**字节内窗口上翻转**——两者的"bit 99"都落在 eqc[12]，一个读高 5 位一个读低 5 位，重叠 bit3-4，字段恒 0 时不可分辨。**基线读回解析器 `PRISM_FLD_EQC_LOGSZ_READBACK(=99)` 一直在读翻转窗口却从未暴露**。处置：基线路径不动（字节冻结纪律），实验解码走 BE 算术直算的真窗口助手，fmt.h 几何注释写明两套约定的分叉点。caps 的 R0.2 常量是经验标定窗口（行为正确），但其数值≠真 ifc 位号——fmt.h 头部"与 mlx5_ifc 编号一致"的旧说法已删。
   3. **宿主机证明（fmt_equiv_check.c 第 11 节）**：ifc 编码字节与 **MLX5_SET 宏代数的逐位仿真**等价（dw3=0x0C001000 for log12/uar4096），真窗口解码往返一致，新旧判别对钉死（legacy dw3=0x80001000 vs ifc dw3=0x0C001000）。全部 ALL EQUIVALENT。
   4. **旁证（跑前推理）**：若固件用翻转（高 5 位）窗口，旧编码的 0x80 会被读成 log16——T09 应见巨型环或拒绝，与"接受+1 条目"观测不符；观测行为单方面支持 MLX5_SET 几何。
-  5. **遗留疑点（入档不动）**：7.0.0 ifc 的 log_max_qp @155（真窗口=byte19 低 5 位）与 T06 实证表"c[19]bits3-7"（高 5 位）不一致（num_ports@440=byte55 整字节，两说一致）。known-good 补丁字节全部金样门禁在案、行为无虞，仅字段解释未定；若本实验判据 A 成立（固件=MLX5_SET 几何），此疑点升格为后续 caps 窗口实验。
+  5. **遗留疑点（入档不动）**：7.0.0 ifc 的 log_max_qp @155（真窗口=byte19 低 5 位）与 T06 实证表"c[19]bits3-7"（高 5 位）不一致（num_ports@440=byte55 整字节，两说一致）。known-good 补丁字节全部基线门禁在案、行为无虞，仅字段解释未定；若本实验判据 A 成立（固件=MLX5_SET 几何），此疑点升格为后续 caps 窗口实验。
 - **预期（预登记，勿跑后改）**：A 成立 → 翻案：固件从没说谎，DESIGN §7 三个结论（1 条目环/~10% 激活/提交长尾）重审，ifc 编码转正进 known-good；A 不成立 → T10 严格官方路径直行；A∧(¬B∨¬C) → 环尺寸与激活/长尾解耦（两个独立怪癖）；D（中断计数）独立评估 intr 假设。
-- **安全**: eq_ifc 默认 0（G1 金样不受影响）；owner 预填 0x01 + 消费谓词 `(owner&1)^!!(ci&nent)` 本就是 nent-通用式（与 mlx5_core eq.c:792 同构——nent=1 时"碰巧成立"的公式原来是通用式，多条目环无需改消费者）；黑匣子记录器全程（/var/tmp/t10prep_live.log）。
+- **安全**: eq_ifc 默认 0（G1 基线不受影响）；owner 预填 0x01 + 消费谓词 `(owner&1)^!!(ci&nent)` 本就是 nent-通用式（与 mlx5_core eq.c:792 同构——nent=1 时"碰巧成立"的公式原来是通用式，多条目环无需改消费者）；黑匣子记录器全程（/var/tmp/t10prep_live.log）。
 
 - **判决（2026-09-17 上机，scripts/t10prep_eqc_probe.sh，7 次加载）**: **全面翻案成立**。
   - **A ✓（尺寸）**：ifc 组 QUERY_EQ 读回 **dw3=0x0c001000——固件逐字回显请求**（log_eq_size=12/uar=4096，真窗口解码）；且 10/10 自检在 nent=4096 的消费者上通过，事件按序落连续条目——环真为多条目。同屏的旧解析行 "fw reports log_eq_size=1 (2 entries)" 恰是翻转窗口读 0x0c>>3=1 的实况展示。
   - **B ✓（激活率）**：ifc 组 10/10 加载**全部首次激活**（retries=0、零静默、零重建）；对照 ctrl0（旧编码裸激活）0/2、ctrl（默认参数）一口需一次重建才过。~10% 激活怪癖翻案为编码伪影。
   - **D ✓（中断）**：ifc 组自检 "(10-11 events total, 10-11 interrupts)"——**MSI-X 真实点火且计数≈事件数**；ctrl 组恒 0。脚本 irq delta 全 0 系采集步骤缺陷（after 快照取在 rmmod 之后，中断行已随释放消失），以 stub 计数为权威证据。
-  - **E ✓（对照）**：ctrl 读回仍 0、行为与金样时代一致（排除环境漂移）。
+  - **E ✓（对照）**：ctrl 读回仍 0、行为与基线时代一致（排除环境漂移）。
   - **C ?（长尾）未决**：自检每命令固定消耗 ~2000ms 耐心窗（等待结构掩盖提交时延），本次数据不可判；T11 用 tracepoint latency_ns 复测。
   - 每加载 11 events（10 命令 + 1 条 CREATE_EQ/QUERY_EQ 自身积压事件），interrupts 10-11（轻度聚合）。
-  - **后续动作（判决当日已执行）**：ifc 编码转正（fmt.h 旧编码删除、eq.c 去 eq_ifc 参数、读回解析改真窗口 eqc[12]&0x1f）、DESIGN §7 翻案改写、**金样失效待重采**（QUERY_EQ 行为有意变更，非漂移——重采流程见 scripts/golden/README.md）。
-  - **金样重采完成（2026-09-17，rebaseline_golden.sh 二跑）**：ALL GREEN 8/8（G1 金样/G2 生产/G3 tracepoint 84+84+22/G4 40 循环）。新金样 47 行/口，差异全部落在预期族内；11 条事件的机制由 `eqe[1]: vector=0x00000002` 精确锁定——第 1 条事件是 QUERY_EQ 自身的积压完成事件（占 slot 0），自检首条命令因此拿 slot 1，时序结构固定、跨周期确定。首跑事故（protected_regular + 熔断路径 + 采集口径三重工具 bug）复盘见归档⑦。
+  - **后续动作（判决当日已执行）**：ifc 编码转正（fmt.h 旧编码删除、eq.c 去 eq_ifc 参数、读回解析改真窗口 eqc[12]&0x1f）、DESIGN §7 翻案改写、**基线失效待重采**（QUERY_EQ 行为有意变更，非漂移——重采流程见 scripts/baseline/README.md）。
+  - **基线重采完成（2026-09-17，rebaseline.sh 二跑）**：ALL GREEN 8/8（G1 基线/G2 生产/G3 tracepoint 84+84+22/G4 40 循环）。新基线 47 行/口，差异全部落在预期族内；11 条事件的机制由 `eqe[1]: vector=0x00000002` 精确锁定——第 1 条事件是 QUERY_EQ 自身的积压完成事件（占 slot 0），自检首条命令因此拿 slot 1，时序结构固定、跨周期确定。首跑事故（protected_regular + 熔断路径 + 采集口径三重工具 bug）复盘见归档⑦。
 
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
-- **v2.1 内容修订——T10-prep 翻案（2026-09-17）**：§7 全章改写（1 条目环/~10% 激活/中断不点火三结论翻案为驱动侧 eqc 编码产物，判决证据见 progress.md T10-prep 节）；§5.5 eqc 示例改编码/解码助手制 + LSB/MSB 双窗口翻转警告；§6.1 EQ 字段降级为防御参数；§12 EQ 常数更新（log12/4096 条目、中断 ≈1 次/事件）。ifc 编码同日转正进代码，金样失效待重采。
+- **v2.1 内容修订——T10-prep 翻案（2026-09-17）**：§7 全章改写（1 条目环/~10% 激活/中断不点火三结论翻案为驱动侧 eqc 编码产物，判决证据见 progress.md T10-prep 节）；§5.5 eqc 示例改编码/解码助手制 + LSB/MSB 双窗口翻转警告；§6.1 EQ 字段降级为防御参数；§12 EQ 常数更新（log12/4096 条目、中断 ≈1 次/事件）。ifc 编码同日转正进代码，基线失效待重采。
 - **价值观修订 v2.1（2026-09-15）**：作废 v2 §1.2 末公理"任何抽象不允许为优雅而加层——每个抽象必须是数据或查表"。动因：需求描述修正——目标从来是"简单而又优雅"，优雅是形式目标而非嫌疑犯；旧公理是修辞级过度矫正（全仓 grep 证实代码/注释/progress 零引用，R0 的抽象决策实际全部以阅读收益为准，产物已是"简单而优雅"的形状）。v2.1 新增 §1.7 设计价值观：简单=内容（概念少而承重，读路径无记忆术）、优雅=形式（代码形状映射问题形状）+ **抽象准入三问**（真实调用者 / 删除测试 / 单实现零旋钮）；§5.5 补结构体覆盖层立场（未采用=重构字节等价纪律，非禁令，引入须 static_assert 与偏移表互锁）；附录登记 v2→v2.1 三处。**零代码改动、无需门禁；架构不重写**（公理未真正约束过架构）。
-- **架构重设计（2026-09-15）**：DESIGN.md 全量重写为 **v2**（git 历史保留 v1）。动因：九个任务纯追加导致结构缠结（cmdq↔eq 双向耦合、teardown 三处重复、自检嵌在生产 probe）、v1 约 1/3 内容被硬件实证推翻（writeq doorbell、7 步缺 ISSI/字节序/SET_HCA_CAP、页数、P1/P2 延迟目标）、EQ/事件设计整章缺失。v2 新增：四层架构（§2）、类型化命令层（§5.5）、完成后端接口（§5.3）、固件状态机门禁表（§4.1）、**怪癖档案 fw_profile（§6，mlx5_core 没有的层）**、EQ 与事件设计（§7，T09 十四轮实验全部编码）。配套：task.json 新增 R0.1-R0.6 重构冲刺（行为保持不变，金样对比验收）、T10 按 T09 实证重定义（"中断计数≈命令数"改为"中断>0 且与事件数同数量级"）、T11 拆分（核心提前进 R0.6，剩余为延迟基线采集）并前移到 T10 之前（可观测性优先）。执行顺序：R0 → T11 → T10 → T12-T17。
+- **架构重设计（2026-09-15）**：DESIGN.md 全量重写为 **v2**（git 历史保留 v1）。动因：九个任务纯追加导致结构缠结（cmdq↔eq 双向耦合、teardown 三处重复、自检嵌在生产 probe）、v1 约 1/3 内容被硬件实证推翻（writeq doorbell、7 步缺 ISSI/字节序/SET_HCA_CAP、页数、P1/P2 延迟目标）、EQ/事件设计整章缺失。v2 新增：四层架构（§2）、类型化命令层（§5.5）、完成后端接口（§5.3）、固件状态机门禁表（§4.1）、**怪癖档案 fw_profile（§6，mlx5_core 没有的层）**、EQ 与事件设计（§7，T09 十四轮实验全部编码）。配套：task.json 新增 R0.1-R0.6 重构冲刺（行为保持不变，基线对比验收）、T10 按 T09 实证重定义（"中断计数≈命令数"改为"中断>0 且与事件数同数量级"）、T11 拆分（核心提前进 R0.6，剩余为延迟基线采集）并前移到 T10 之前（可观测性优先）。执行顺序：R0 → T11 → T10 → T12-T17。
 - **T05（2026-08-09）**：C2 校验项"固件版本"由 `QUERY_FW (opcode 0x103)` 改为"init segment `fw_rev` 寄存器"。原因：CX-4 Lx 固件（FW 14.32.1908）**无 QUERY_FW 命令**——7.0.0 内核 `mlx5_ifc.h` 中 0x103=TEARDOWN_HCA，opcode 表无 QUERY_FW 枚举；mlx5_core 引导序列（main.c:1182-1193）也是 wait_fw_init → ENABLE_HCA，不发 QUERY_FW。fw 版本从 init segment 的 `fw_rev` 寄存器直接读（T02 已实现 `mlx5_prism_fw_rev_major/minor/sub`）。task.json T05/T06 step 中的"QUERY_FW"需相应改为 ENABLE_HCA 或其他真实存在的命令。

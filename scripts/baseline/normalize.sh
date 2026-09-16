@@ -1,8 +1,8 @@
 #!/bin/bash
-# normalize.sh — shared dmesg normalizer for golden-baseline comparison.
+# normalize.sh — shared dmesg normalizer for baseline comparison.
 #
-# Sourced/executed by diff_golden.sh and by the golden-regeneration
-# procedure (see scripts/golden/README). Reads raw dmesg lines on stdin,
+# Sourced/executed by diff_baseline.sh and by the baseline-regeneration
+# procedure (see scripts/baseline/README). Reads raw dmesg lines on stdin,
 # writes normalized mlx5_prism lines to stdout. Volatile values
 # (timestamps, DMA addresses, timings) collapse to placeholders; the
 # ~10% event-engine engagement quirk block (silent -> destroy/recreate)

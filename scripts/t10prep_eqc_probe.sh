@@ -21,7 +21,7 @@
 #   D 中断      eq_ifc=1 时 "10/10 commands ok" 行的 interrupts > 0，
 #               且 /proc/interrupts 的 prism 向量 before/after 差 > 0
 #               （旧路径恒全零）
-#   E 对照      ctrl（默认参数）行为与金样一致：QUERY_EQ 仍报
+#   E 对照      ctrl（默认参数）行为与基线一致：QUERY_EQ 仍报
 #               log_eq_size=0，10/10 自检通过（排除环境漂移混杂）
 #
 # 结论空间：
@@ -68,7 +68,7 @@ run() { # run <tag> [module params...]
 	dmesg > /var/tmp/t10prep_dmesg_${tag}.txt
 }
 
-say "E: legacy control (defaults — should match golden behavior)"
+say "E: legacy control (defaults — should match baseline behavior)"
 run ctrl
 
 say "B baseline: legacy encoding, raw engagement (retries=0, ~10% expected)"

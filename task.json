@@ -726,8 +726,8 @@
       }
     },
     {
-      "id": "R0.1-golden-baseline",
-      "title": "R0.1 金样采集：当前行为快照存档",
+      "id": "R0.1-baseline",
+      "title": "R0.1 基线采集：当前行为快照存档",
       "phase": "S4.5",
       "milestone": null,
       "status": "completed",
@@ -736,14 +736,14 @@
       ],
       "estimated_loc": 0,
       "learning": {
-        "objective": "建立'行为保持不变'的机械化判据——重构的每一步都有金样可比",
+        "objective": "建立'行为保持不变'的机械化判据——重构的每一步都有基线可比",
         "concepts": [
-          "金样 dmesg：每口 cmdq ready/ISSI/页数/EQ/teardown 关键行集合",
+          "基线 dmesg：每口 cmdq ready/ISSI/页数/EQ/teardown 关键行集合",
           "hexdump 对比：命令缓冲区字节级一致性验证方法（R0.2 用）",
           "diff 白名单：时延数字与地址允许差异，计数与状态不允许"
         ],
         "keywords": [
-          "金样",
+          "基线",
           "回归基线",
           "行为保持"
         ],
@@ -755,23 +755,23 @@
         ],
         "reflection_questions": [
           "为什么重构前必须先有自动化基线？没有基线的重构怎么验证'行为不变'？",
-          "金样里哪些字段天然不稳定（时延/地址）？如何设计 diff 白名单？"
+          "基线里哪些字段天然不稳定（时延/地址）？如何设计 diff 白名单？"
         ]
       },
-      "goal": "scripts/golden/ 存档当前 HEAD 的金样日志，作为 R0.2-R0.6 全部重构步骤的回归基线",
+      "goal": "scripts/baseline/ 存档当前 HEAD 的基线日志，作为 R0.2-R0.6 全部重构步骤的回归基线",
       "context": "DESIGN.md v2 §10.3。t09_verify.sh 头部注释仍描述 T08 状态，一并修正。无代码改动。",
       "steps": [
         "1. 修正 scripts/t09_verify.sh 头部过时注释（描述 T08 状态 → T09 实际行为）",
         "2. 运行 t09_verify.sh 压测 ≥20 循环，全程黑匣子在案",
-        "3. 从 live.log 提取每口金样关键行（cmdq ready / ISSI / boot pages / INIT_HCA / teardown / EQ 自检行）存 scripts/golden/golden_dmesg.txt",
-        "4. 编写 scripts/golden/diff_golden.sh：dmesg 与金样 diff，白名单过滤时延（ms/µs 数字）与地址，其余差异即 FAIL"
+        "3. 从 live.log 提取每口基线关键行（cmdq ready / ISSI / boot pages / INIT_HCA / teardown / EQ 自检行）存 scripts/baseline/baseline_dmesg.txt",
+        "4. 编写 scripts/baseline/diff_baseline.sh：dmesg 与基线 diff，白名单过滤时延（ms/µs 数字）与地址，其余差异即 FAIL"
       ],
       "exit_criteria": {
         "compile": "N/A（无代码改动）",
         "load": "N/A",
         "functional": [
-          "scripts/golden/ 含金样文件与 diff 脚本",
-          "对同一份日志跑 diff_golden.sh 两次结果稳定（PASS）"
+          "scripts/baseline/ 含基线文件与 diff 脚本",
+          "对同一份日志跑 diff_baseline.sh 两次结果稳定（PASS）"
         ],
         "manual_checks": [
           "20 循环压测零 WARNING/Oops（黑匣子在案）"
@@ -785,7 +785,7 @@
       "milestone": null,
       "status": "completed",
       "prerequisites": [
-        "R0.1-golden-baseline"
+        "R0.1-baseline"
       ],
       "estimated_loc": 300,
       "learning": {
@@ -820,14 +820,14 @@
         "2. fw.c 迁移，编译 + 自定义 hexdump 验证（自检模式下 dump 迁移前后命令缓冲对比）",
         "3. eq.c 迁移，同上验证",
         "4. cmdq.c 自检迁移",
-        "5. make + checkpatch 0/0/0；跑 diff_golden.sh 必须零差异"
+        "5. make + checkpatch 0/0/0；跑 diff_baseline.sh 必须零差异"
       ],
       "exit_criteria": {
         "compile": "make 通过；checkpatch 全部文件 0 errors/0 warnings",
         "load": "双口 probe 成功，dmesg 引导序列完整",
         "functional": [
           "grep 确认 fw.c/eq.c/cmdq.c 无裸 put_be 偏移算式（accessor 调用除外）",
-          "diff_golden.sh 零差异（时延/地址白名单除外）"
+          "diff_baseline.sh 零差异（时延/地址白名单除外）"
         ],
         "manual_checks": [
           "20 次 insmod/rmmod 零告警"
@@ -876,14 +876,14 @@
         "2. eq.c 的 release_slots/forget_slots 调用点改为新接口",
         "3. cmd_exec 的 eq.created 判断改为 cmdq->mode 判断",
         "4. eq 创建/销毁路径设置/复位 mode",
-        "5. make + checkpatch；diff_golden.sh 零差异；100 次装卸压测"
+        "5. make + checkpatch；diff_baseline.sh 零差异；100 次装卸压测"
       ],
       "exit_criteria": {
         "compile": "make 通过；checkpatch 0/0/0",
         "load": "双口 probe 成功，EQ 自检 10/10 事件不变",
         "functional": [
           "grep 确认 eq.c 无 cmdq slot 位图/token 直接操作",
-          "diff_golden.sh 零差异",
+          "diff_baseline.sh 零差异",
           "100 次 insmod/rmmod 零告警，/proc/interrupts 仍全零"
         ],
         "manual_checks": [
@@ -933,14 +933,14 @@
         "2. cmd_exec（或 invoke 包装层）接入门禁检查：状态不符 → -EINVAL + 明确日志",
         "3. 定义 struct mlx5_prism_fw_profile，known-good 补丁/EQ 阶梯/重试/耐心窗迁入；fw.c/eq.c 改读 profile",
         "4. 耐心窗/重试次数暴露为模块参数（默认=现值）",
-        "5. make + checkpatch；diff_golden.sh 零差异"
+        "5. make + checkpatch；diff_baseline.sh 零差异"
       ],
       "exit_criteria": {
         "compile": "make 通过；checkpatch 0/0/0",
         "load": "双口 probe 成功，引导序列完整",
         "functional": [
           "grep 确认 fw.c/eq.c 无未命名魔法数字（偏移表内除外）",
-          "diff_golden.sh 零差异（含 teardown 2305/2305 计数行）",
+          "diff_baseline.sh 零差异（含 teardown 2305/2305 计数行）",
           "门禁自检：构造一次状态不符的调用（如自检路径提前查 caps 的防护检查）确认 -EINVAL"
         ],
         "manual_checks": [
@@ -985,13 +985,13 @@
         ]
       },
       "goal": "默认 probe 零自检、teardown 单点、pages 动态分配、caps 缓存就位",
-      "context": "DESIGN.md v2 §3.1/§4.4/§2.3。verify 脚本此后传 selftest=1 驱动自检；金样对比也在 selftest=1 模式下做。",
+      "context": "DESIGN.md v2 §3.1/§4.4/§2.3。verify 脚本此后传 selftest=1 驱动自检；基线对比也在 selftest=1 模式下做。",
       "steps": [
         "1. pages 动态分配改造（含失败路径释放）",
         "2. caps 缓存字段 + 引导时填充",
         "3. 实现 mlx5_prism_teardown(stage)，pci.c 三处重复改调它",
         "4. selftest 模块参数：cmdq/mailbox/EQ 自检移入；默认 probe 只剩生产序列",
-        "5. t09_verify.sh 与 diff_golden.sh 适配 selftest=1；make + checkpatch",
+        "5. t09_verify.sh 与 diff_baseline.sh 适配 selftest=1；make + checkpatch",
         "6. 100 次装卸压测：默认模式 + selftest=1 模式各一遍"
       ],
       "exit_criteria": {
@@ -999,7 +999,7 @@
         "load": "默认模式 probe dmesg 干净（无自检输出）；selftest=1 模式含完整自检序列",
         "functional": [
           "teardown 逻辑在代码中只出现一次",
-          "diff_golden.sh（selftest=1 模式）零差异",
+          "diff_baseline.sh（selftest=1 模式）零差异",
           "两种模式各 100 次装卸零告警"
         ],
         "manual_checks": [
@@ -1054,7 +1054,7 @@
         "2. 实现 prism_opcode_name() switch 表（只覆盖 prism 用到的 opcode）",
         "3. cmd_exec/eq_poll 插桩",
         "4. Makefile 追加 trace.o",
-        "5. make + checkpatch；perf list/perf record 验证；diff_golden.sh 零差异"
+        "5. make + checkpatch；perf list/perf record 验证；diff_baseline.sh 零差异"
       ],
       "exit_criteria": {
         "compile": "make 通过；checkpatch 无 ERROR/WARNING（TRACE_EVENT 宏布局的 9 处 CHECK 豁免——与内核树内 trace 头布局一致）",
@@ -1062,7 +1062,7 @@
         "functional": [
           "selftest=1 + perf record：cmdq_issue/cmdq_complete 成对、数量与命令数一致",
           "eq_event 数量与 EQE 数量一致",
-          "diff_golden.sh 零差异"
+          "diff_baseline.sh 零差异"
         ],
         "manual_checks": [
           "20 次装卸（含 perf 采集中）零告警"
@@ -1119,9 +1119,9 @@
         ]
       },
       "goal": "事件模式往返成功（invoke 睡完成量、硬中断消费 EQE 唤醒），中断计数 >0 且与事件数可对账，零死机",
-      "context": "T06 两次 panic 的最终考验，但目标按 T09 实证重定义：原'中断计数≈命令数'在长尾+聚合+~10% 激活率下不可达，改为'中断 >0 且与事件数量级一致'。known-good first：先严格复刻 mlx5_core 官方事件路径拿到绿色基线，再考虑 prism 优化。全部前置语义已在 T09 无中断验证，tracepoint（T11/R0.6）已就位，本任务只引入中断这一变量；黑匣子记录器全程在案。T10-prep 更新（2026-09-17）：MSI-X 已在轮询+计数 stub 形态下点火（≈1 次/事件），'中断>0'前置风险提前消解，风险面收窄为硬中断上下文工程（消费循环/完成唤醒/防风暴）；eqc ifc 编码已转正，金样随编码变更重采。",
+      "context": "T06 两次 panic 的最终考验，但目标按 T09 实证重定义：原'中断计数≈命令数'在长尾+聚合+~10% 激活率下不可达，改为'中断 >0 且与事件数量级一致'。known-good first：先严格复刻 mlx5_core 官方事件路径拿到绿色基线，再考虑 prism 优化。全部前置语义已在 T09 无中断验证，tracepoint（T11/R0.6）已就位，本任务只引入中断这一变量；黑匣子记录器全程在案。T10-prep 更新（2026-09-17）：MSI-X 已在轮询+计数 stub 形态下点火（≈1 次/事件），'中断>0'前置风险提前消解，风险面收窄为硬中断上下文工程（消费循环/完成唤醒/防风暴）；eqc ifc 编码已转正，基线随编码变更重采。",
       "steps": [
-        "0. [完成 2026-09-17] 前置实验判决：全面翻案（判据 A/B/D/E 成立，C 长尾未决 T11 复测）——eqc 旧编码系根因，ifc 编码已转正、DESIGN §7 已改写、金样待重采（见 progress.md T10-prep）",
+        "0. [完成 2026-09-17] 前置实验判决：全面翻案（判据 A/B/D/E 成立，C 长尾未决 T11 复测）——eqc 旧编码系根因，ifc 编码已转正、DESIGN §7 已改写、基线待重采（见 progress.md T10-prep）",
         "1. EQE 消费循环移入硬中断 handler（budget 上限 + dma_rmb + 消费后重 arm），handler 保持最小化",
         "2. invoke 增加事件模式完成路径：睡完成量；complete_slots() 内 complete() 唤醒 + PENDING 位 claim/revoke",
         "3. printk 限流 + 风暴护栏（连续空中断超限 disable_irq_nosync）",

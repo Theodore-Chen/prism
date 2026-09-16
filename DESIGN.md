@@ -357,7 +357,7 @@ static inline u32  prism_get_bits(const u8 *buf, u16 first_bit, u8 nbits);
 /* manage_pages_in：func_id @10 / num_entries @12 / pas @16+8i；GIVE=1/TAKE=2 */
 ```
 
-迁移纪律（R0.2）：fw.c → eq.c → cmdq 自检逐文件替换；**产出的命令缓冲区必须字节级不变**（金样 hexdump 对比验证）。禁止顺手"修正"任何偏移——发现疑似错误先上机实验再改。
+迁移纪律（R0.2）：fw.c → eq.c → cmdq 自检逐文件替换；**产出的命令缓冲区必须字节级不变**（基线 hexdump 对比验证）。禁止顺手"修正"任何偏移——发现疑似错误先上机实验再改。
 
 结构体覆盖层（mlx5_ifc `_bits` 风格，字段名即文档）未被采用是重构期字节等价纪律所致，**非价值观禁令**（§1.7）；未来若引入，须以 static_assert 与偏移表互锁——偏移表仍是单一事实源，结构体只是它的编译期镜像。
 
@@ -395,7 +395,7 @@ struct mlx5_prism_fw_profile {
 };
 ```
 
-**R0.4 落地纪律：只搬家，不改字节。** known-good 四处补丁、EQ 阶梯、双 doorbell 序列、耐心窗全部原样搬运并命名化；上机金样对比证明行为不变。
+**R0.4 落地纪律：只搬家，不改字节。** known-good 四处补丁、EQ 阶梯、双 doorbell 序列、耐心窗全部原样搬运并命名化；上机基线对比证明行为不变。
 
 ### 6.2 known-good caps 补丁（FW 14.32.1908）
 
@@ -541,10 +541,10 @@ v1 勘误：v1 草案里 TP_printk 引用了不存在的 `mlx5_prism_cmdq_opcode
 
 v1 表沿用，修订三处：项 6/7 换成 P1'/P2' 口径；项 3 引导流程改为 9 步含 ISSI/SET_HCA_CAP；项 13 tracepoint 事件按 §9.1 目录核对。冒烟测试与 netdev 项（9/9a/9b/9c）不变。
 
-### 10.3 verify.sh 与金样
+### 10.3 verify.sh 与基线
 
 - `verify.sh`（T16）：18 项一键验收，`selftest=1` 传参驱动。
-- **金样机制（R0.1 起）**：`scripts/golden/` 存档金样 dmesg（每口 cmdq/ISSI/页数/EQ/teardown 关键行）。重构每步与金样 diff 为空（时延/地址除外）才算通过——行为保持不变的机械化判据。
+- **基线机制（R0.1 起）**：`scripts/baseline/` 存档基线 dmesg（每口 cmdq/ISSI/页数/EQ/teardown 关键行）。重构每步与基线 diff 为空（时延/地址除外）才算通过——行为保持不变的机械化判据。
 
 ---
 
@@ -555,7 +555,7 @@ v1 表沿用，修订三处：项 6/7 换成 P1'/P2' 口径；项 3 引导流程
 | 阶段 | 内容 | 产出 |
 |------|------|------|
 | S0-S4（已完成，T01-T09） | 模块骨架→PCI probe→DMA/中断→CMDQ→引导→EQ 轮询 | v0.26，M0/M1 达成 |
-| **S4.5 R0 重构冲刺**（本次） | 金样→类型化命令层→完成后端解耦→状态机+怪癖档案→设备结构/teardown/自检分离→tracepoint | v0.27-v0.3x，**行为不变** |
+| **S4.5 R0 重构冲刺**（本次） | 基线→类型化命令层→完成后端解耦→状态机+怪癖档案→设备结构/teardown/自检分离→tracepoint | v0.27-v0.3x，**行为不变** |
 | S5 事件与服务 | T11'(trace 完善) → T10'(事件模式) → T12/T13(PHY) → T14(冒烟) → T15(netdev) | M2 前置全部就绪 |
 | S6 收尾 | T16(verify.sh+报告) → T17(架构总结) | **M2** |
 
@@ -565,14 +565,14 @@ v1 表沿用，修订三处：项 6/7 换成 P1'/P2' 口径；项 3 引导流程
 
 | 任务 | 内容 | 验收 |
 |------|------|------|
-| R0.1 | 金样采集（≥20 循环）+ 修 t09_verify.sh 头注释 | scripts/golden/ 存档 |
+| R0.1 | 基线采集（≥20 循环）+ 修 t09_verify.sh 头注释 | scripts/baseline/ 存档 |
 | R0.2 | `mlx5_prism_fmt.h` + fw.c/eq.c/cmdq 自检迁移 | 命令缓冲字节不变（hexdump 对比）；偏移只存在于偏移表 |
-| R0.3 | `cmdq->mode` + `complete_slots()` 接口，eq↔cmdq 解耦 | eq.c 无 cmdq 内部触碰；金样不变；100× 装卸 |
-| R0.4 | fw_state 门禁表 + fw_profile 命名化 | 魔法字节全部命名；金样不变 |
+| R0.3 | `cmdq->mode` + `complete_slots()` 接口，eq↔cmdq 解耦 | eq.c 无 cmdq 内部触碰；基线不变；100× 装卸 |
+| R0.4 | fw_state 门禁表 + fw_profile 命名化 | 魔法字节全部命名；基线不变 |
 | R0.5 | pages 动态分配 + caps 缓存 + 统一 teardown + `selftest=1` | probe 默认路径无自检；teardown 单点；100× 装卸（带/不带 selftest） |
 | R0.6 | tracepoint 脚手架 + 插桩 | perf list 可见；issue/complete 配对；零行为变化 |
 
-R0 安全规则：金样 diff 必须为空；绝不原地改写协议字节（known-good 补丁/阶梯/双 doorbell/邮箱字段序原样搬+注释随迁）；任何行为偏差 → 停止、二分、上机重测。
+R0 安全规则：基线 diff 必须为空；绝不原地改写协议字节（known-good 补丁/阶梯/双 doorbell/邮箱字段序原样搬+注释随迁）；任何行为偏差 → 停止、二分、上机重测。
 
 ---
 

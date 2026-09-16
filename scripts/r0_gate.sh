@@ -3,12 +3,12 @@
 #
 # R0.1-R0.6 were committed with: build clean + checkpatch + static
 # byte-equivalence proof. The runtime legs need root and are batched here
-# (DESIGN.md v2 §11.2 safety rules apply: any golden diff = stop+bisect).
+# (DESIGN.md v2 §11.2 safety rules apply: any baseline diff = stop+bisect).
 #
 #   sudo bash scripts/r0_gate.sh
 #
 # Gates:
-#   G1  selftest=1 single cycle  → golden diff, both ports zero-diff
+#   G1  selftest=1 single cycle  → baseline diff, both ports zero-diff
 #   G2  selftest=0 single cycle  → production path assertions (bootstrap
 #       ENABLE_HCA line, no selftest lines, clean teardown)
 #   G3  tracepoints              → tracefs: events registered + teardown
@@ -33,11 +33,11 @@ LIVE_PID=$!
 
 modprobe -r mlx5_ib 2>/dev/null; modprobe -r mlx5_core
 
-say "G1 golden (selftest=1)"
+say "G1 baseline (selftest=1)"
 dmesg -c >/dev/null
 insmod mlx5_prism.ko selftest=1 && rmmod mlx5_prism; sleep 1
-bash scripts/golden/diff_golden.sh "$LIVE"
-res $? "golden diff both ports"
+bash scripts/baseline/diff_baseline.sh "$LIVE"
+res $? "baseline diff both ports"
 
 say "G2 production path (selftest=0)"
 dmesg -c >/dev/null

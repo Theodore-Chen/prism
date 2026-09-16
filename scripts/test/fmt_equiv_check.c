@@ -6,7 +6,7 @@
  * (raw offsets, exactly as they were in v0.26) and compared byte for byte
  * against the NEW form (prism_*_bits / named offsets / fmt.h helpers).
  * This is the no-hardware leg of the R0.2 gate; the hardware leg is the
- * golden-dmesg diff (scripts/golden/diff_golden.sh).
+ * baseline diff (scripts/baseline/diff_baseline.sh).
  *
  * Build & run (host gcc, no kernel headers):
  *   gcc -Wall -Wextra -O2 -I include fmt_equiv_check.c -o /tmp/fmt_equiv && /tmp/fmt_equiv

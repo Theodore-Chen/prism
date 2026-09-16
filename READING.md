@@ -39,14 +39,14 @@ dmesg | grep mlx5_prism                  # 一步一行的引导剧本
 sudo rmmod mlx5_prism
 
 # 行为保持门禁（重构/修改后必跑）
-sudo bash scripts/t09_verify.sh 1 && sudo bash scripts/golden/diff_golden.sh
+sudo bash scripts/t09_verify.sh 1 && sudo bash scripts/baseline/diff_baseline.sh
 
 # 观测（R0.6 起内置）
 sudo perf list | grep mlx5_prism
 sudo perf record -a -e mlx5_prism:prism_cmdq_issue -e mlx5_prism:prism_cmdq_complete \
      -e mlx5_prism:prism_eq_event -- insmod mlx5_prism.ko selftest=1
 
-# R0 硬件门禁一键跑（G1 金样/G2 生产路径/G3 tracepoint/G4 40 循环压测）
+# R0 硬件门禁一键跑（G1 基线/G2 生产路径/G3 tracepoint/G4 40 循环压测）
 sudo bash scripts/r0_gate.sh
 ```
 

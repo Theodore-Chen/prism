@@ -1,8 +1,8 @@
 #!/bin/bash
-# diff_golden.sh — behavior-preservation gate for the R0 refactor sprint.
+# diff_baseline.sh — behavior-preservation gate for the R0 refactor sprint.
 #
 # Compares the LAST complete load/unload cycle in a dmesg capture against
-# the per-port golden baselines. The two functions are NOT interchangeable:
+# the per-port baselines. The two functions are NOT interchangeable:
 # caps hexdumps differ by a per-function identifier byte (port 0 vs port 1),
 # each stable across cycles — hence two templates. Any difference outside
 # the normalize.sh whitelist is a behavior change: STOP, bisect, re-test on
@@ -10,12 +10,12 @@
 #
 # Usage:
 #   sudo bash scripts/t09_verify.sh 1          # fresh single cycle
-#   sudo bash scripts/golden/diff_golden.sh    # reads /var/tmp/t09_live.log
-#   sudo bash scripts/golden/diff_golden.sh <dmesg-file>
+#   sudo bash scripts/baseline/diff_baseline.sh    # reads /var/tmp/t09_live.log
+#   sudo bash scripts/baseline/diff_baseline.sh <dmesg-file>
 #
 # Exit 0 = zero diff (PASS). Exit 1 = behavior drift (FAIL) — diffs printed.
 
-GOLDEN_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIVE="${1:-/var/tmp/t09_live.log}"
 
 # Scratch files go to a PRIVATE mktemp dir, never shared /tmp paths: with
@@ -23,13 +23,13 @@ LIVE="${1:-/var/tmp/t09_live.log}"
 # over a pre-existing /tmp file owned by another user — fixed filenames
 # across users are a trap (2026-09-17 rebaseline incident, progress.md
 # 归档⑦). Callers that need the per-port diff files afterwards (e.g.
-# rebaseline_golden.sh's expected-drift filter) set PRISM_GOLDEN_WORK and
+# rebaseline.sh's expected-drift filter) set PRISM_BASELINE_WORK and
 # own the directory's lifetime.
-if [ -n "${PRISM_GOLDEN_WORK:-}" ]; then
-    WORK="$PRISM_GOLDEN_WORK"
+if [ -n "${PRISM_BASELINE_WORK:-}" ]; then
+    WORK="$PRISM_BASELINE_WORK"
     mkdir -p "$WORK"
 else
-    WORK=$(mktemp -d /tmp/prism_golden.XXXXXX)
+    WORK=$(mktemp -d /tmp/prism_baseline.XXXXXX)
     trap 'rm -rf "$WORK"' EXIT
 fi
 
@@ -40,25 +40,25 @@ fi
 # the cycle start marker.
 LAST_START=$(grep -n '0000:08:00.0: BAR0 mapped' "$LIVE" | tail -1 | cut -d: -f1)
 [ -n "$LAST_START" ] || { echo "no load cycle found in $LIVE"; exit 2; }
-tail -n +"$LAST_START" "$LIVE" | bash "$GOLDEN_DIR/normalize.sh" > "$WORK/prism_norm_lastcycle.txt"
+tail -n +"$LAST_START" "$LIVE" | bash "$BASELINE_DIR/normalize.sh" > "$WORK/prism_norm_lastcycle.txt"
 
 RC=0
 for PORT in 0000:08:00.0 0000:08:00.1; do
-    GOLDEN="$GOLDEN_DIR/golden_dmesg_${PORT##*.}.txt"
-    [ -r "$GOLDEN" ] || { echo "[FAIL] $PORT: golden baseline missing: $GOLDEN"; RC=1; continue; }
+    BASELINE="$BASELINE_DIR/baseline_dmesg_${PORT##*.}.txt"
+    [ -r "$BASELINE" ] || { echo "[FAIL] $PORT: baseline missing: $BASELINE"; RC=1; continue; }
     grep " $PORT: " "$WORK/prism_norm_lastcycle.txt" > "$WORK/prism_norm_$PORT.txt"
     # Strip the BDF so the port streams are directly comparable to the
-    # per-port golden template.
+    # per-port baseline template.
     sed -i "s/mlx5_prism $PORT: //" "$WORK/prism_norm_$PORT.txt"
     if [ ! -s "$WORK/prism_norm_$PORT.txt" ]; then
         echo "[FAIL] $PORT: no normalized lines extracted"
         RC=1
         continue
     fi
-    if diff -u "$GOLDEN" "$WORK/prism_norm_$PORT.txt" > "$WORK/prism_diff_$PORT.txt"; then
-        echo "[PASS] $PORT: zero diff vs golden"
+    if diff -u "$BASELINE" "$WORK/prism_norm_$PORT.txt" > "$WORK/prism_diff_$PORT.txt"; then
+        echo "[PASS] $PORT: zero diff vs baseline"
     else
-        echo "[FAIL] $PORT: behavior drift vs golden — see $WORK/prism_diff_$PORT.txt"
+        echo "[FAIL] $PORT: behavior drift vs baseline — see $WORK/prism_diff_$PORT.txt"
         cat "$WORK/prism_diff_$PORT.txt"
         RC=1
     fi
