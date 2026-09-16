@@ -51,33 +51,41 @@ res $? "no selftest output in default probe"
 echo "$D" | grep -qE "WARNING|Oops|BUG"
 [ $? -ne 0 ]; res $? "no kernel complaints"
 
-say "G3 tracepoints (tracefs — no perf dependency)"
+say "G3 tracepoints (tracefs, captured during load)"
 TR=/sys/kernel/tracing
 [ -d "$TR/events" ] || TR=/sys/kernel/debug/tracing
 [ -d "$TR/events" ] || { mount -t tracefs tracefs /sys/kernel/tracing; TR=/sys/kernel/tracing; }
-# Events enable AND the master recording switch must both be on — tracefs
-# has two layers, like the EQ's arm/commit doorbells.
 echo 1 > "$TR/tracing_on"
+: > "$TR/trace"
+# Arm the events the instant the module registers them — before init runs
+# any command. Arming after load captures nothing: tracepoint probes
+# detach at MODULE_STATE_GOING, earlier than the exit-time teardown
+# commands (learned the hard way; see progress.md 历史问题归档).
+( while [ ! -d "$TR/events/mlx5_prism/prism_cmdq_issue" ]; do :; done
+  for e in prism_cmdq_issue prism_cmdq_complete prism_eq_event; do
+	echo 1 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+  done ) &
+ARM=$!
 dmesg -c >/dev/null
 insmod mlx5_prism.ko selftest=1
-EV=$TR/events/mlx5_prism
-[ -d "$EV" ]
-res $? "tracepoint events registered (probe complete)"
-# Events register during module load, i.e. after the probe ran; the rmmod
-# teardown still issues 40+ commands per port with the events enabled —
-# enough for the pairing assertion. eq_event needs eq_poll (self-test
-# only) and is reported informationally.
-echo 1 > "$EV/prism_cmdq_issue/enable"
-echo 1 > "$EV/prism_cmdq_complete/enable"
-echo 1 > "$EV/prism_eq_event/enable"
-: > "$TR/trace"
-rmmod mlx5_prism
+res $? "insmod selftest=1"
+wait $ARM
+for i in $(seq 20); do
+	N_I=$(grep -c "prism_cmdq_issue:" "$TR/trace")
+	[ "$N_I" -gt 30 ] && break
+	sleep 1
+done
 N_I=$(grep -c "prism_cmdq_issue:" "$TR/trace")
 N_C=$(grep -c "prism_cmdq_complete:" "$TR/trace")
 N_E=$(grep -c "prism_eq_event:" "$TR/trace")
 echo "   issue=$N_I complete=$N_C eq_event=$N_E"
-[ "$N_I" -gt 10 ] && [ "$N_I" -eq "$N_C" ]
-res $? "teardown commands traced, issue/complete paired (>10)"
+[ "$N_I" -gt 30 ] && [ "$N_I" -eq "$N_C" ] && [ "$N_E" -gt 0 ]
+res $? "full-load capture, issue/complete paired, eq_event seen"
+# Disarm before unload — enabled module events may pin the module.
+for e in prism_cmdq_issue prism_cmdq_complete prism_eq_event; do
+	echo 0 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+done
+rmmod mlx5_prism
 
 say "G4 stress (20x selftest=1 + 20x default)"
 for n in $(seq 20); do
