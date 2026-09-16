@@ -13,14 +13,20 @@
 #   - caps[max]/caps[cur]/caps[post] hexdumps (bit-exact across 100
 #     cycles on FW 14.32.1908 — any mailbox/bit-layout drift shows here)
 #   - counts: boot pages=6, init pages=2299, teardown 2305/2305,
-#     log_sz=5/log_stride=6, eqn=4, 10/10 self-test
+#     log_sz=5/log_stride=6, eqn=4, 10/10 self-test, DESTROY events
 #   - eqe[N] vector bitmaps (slot allocation order drift would show)
+#
+# (T10-prep) "(E events total, I interrupts)": one MSI-X can cover
+# several EQEs and the arm-time extra fires variably, so the two counts
+# are aggregation-random per load — normalized; the 10/10 and the
+# DESTROY counter stay anchored.
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
     -e 's/doorbell=[0-9a-fx]*/doorbell=X/g' \
     -e 's/\[mem 0x[0-9a-f]*-0x[0-9a-f]* [^]]*\]/[mem X]/g' \
     -e 's/ *[0-9]\+ ms/ T ms/g' \
+    -e 's/([0-9]\+ events total, [0-9]\+ interrupts)/(E events total, I interrupts)/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
           -e 'eqe\[0\.\.3\] head:' \
