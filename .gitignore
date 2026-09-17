@@ -8,3 +8,4 @@ modules.order
 .*.cmd
 .tmp_versions/
 compile_commands.json
+__pycache__/
