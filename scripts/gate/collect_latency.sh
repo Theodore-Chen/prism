@@ -16,7 +16,9 @@
 #
 # 输出（全量日志单文件）：/var/tmp/latency_report.txt
 #                       /var/tmp/latency_samples.csv（逐样本）
-# 临时快照：mktemp 私有目录（PRISM_LAT_WORK 可注入），成功后删除。
+# 原始快照：mktemp 私有目录（PRISM_LAT_WORK 可注入）。快照是判据的原始
+# 证据（run-1 教训：成功后删除快照让位置→opcode 归属只能靠推理），保留
+# 不删，路径见报告首行。
 #
 # Usage: sudo bash scripts/gate/collect_latency.sh [loads]
 set -u
@@ -37,8 +39,7 @@ TR=/sys/kernel/tracing
 if [ -n "${PRISM_LAT_WORK:-}" ]; then
 	WORK=$PRISM_LAT_WORK
 else
-	WORK=$(mktemp -d /tmp/prism_lat.XXXXXX)
-	OWN_WORK=1
+	WORK=$(mktemp -d /var/tmp/prism_lat_snap.XXXXXX)
 fi
 echo "work dir: $WORK"
 
@@ -49,7 +50,9 @@ ARM=""
 EVTS="prism_cmdq_issue prism_cmdq_complete prism_eq_event"
 disarm() {
 	for e in $EVTS; do
-		echo 0 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+		# 存在性先验：模块卸载后事件目录消失，直接重定向报错且
+		# `2>/dev/null` 接不住（重定向失败信息走原 stderr）。
+		[ -e "$TR/events/mlx5_prism/$e/enable" ] && echo 0 > "$TR/events/mlx5_prism/$e/enable"
 	done
 }
 cleanup() {
@@ -84,7 +87,7 @@ for n in $(seq 1 "$LOADS"); do
 	dmesg -c > /dev/null
 	( while [ ! -d "$TR/events/mlx5_prism/prism_cmdq_issue" ]; do :; done
 	  for e in $EVTS; do
-		echo 1 > "$TR/events/mlx5_prism/$e/enable" 2>/dev/null
+		[ -e "$TR/events/mlx5_prism/$e/enable" ] && echo 1 > "$TR/events/mlx5_prism/$e/enable"
 	  done ) &
 	ARM=$!
 	: > "$TR/trace"
@@ -186,7 +189,6 @@ echo "### 阶段C：聚合 + 判据C裁决"
 python3 scripts/gate/latency_aggregate.py --work "$WORK" --csv "$CSV"
 AGG=$?
 
-[ "${OWN_WORK:-0}" = 1 ] && rm -rf "$WORK"
-[ -n "${SUDO_UID:-}" ] && chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$REPORT" "$CSV" 2>/dev/null
-echo "### 完成（聚合退出码 $AGG）— $REPORT / $CSV"
+[ -n "${SUDO_UID:-}" ] && chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$REPORT" "$CSV" "$WORK" 2>/dev/null
+echo "### 完成（聚合退出码 $AGG）— $REPORT / $CSV / 快照 $WORK"
 exit "$AGG"

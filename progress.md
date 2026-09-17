@@ -747,6 +747,15 @@
 - **验证（无 sudo）**: 单测 26 断言 ALL PASS；`bash -n` 全脚本；聚合器 main() 端到端冒烟（2 合成加载+kprobe 快照→报告数值逐位吻合+CSV 生成）。
 - **待上机**: `sudo bash scripts/gate/collect_latency.sh`（约 10-15 分钟）→ `/var/tmp/latency_report.txt` + `latency_samples.csv`；数据回来后回写 DESIGN §10 P1'/P2' 行 + 判据 C 结论、task.json T11 → completed。
 
+#### run-1 裁定（2026-09-17 上机，P1' 采信 / P2' 作废重采）
+
+- **P1' 采信**（n=1008 = 84×12，内核实测 lat）：p50=76.5µs（与历史 72-173µs 同量级 ✓）、p90=1.74ms、p99=238ms、max=239.7ms。长尾**完全确定性**：每加载恰好 12 个 >1ms 样本、位置跨 12 次加载逐位一致，两簇互为镜像（探测期 pos 25-30 ↔ 拆除期 pos 67-72，Δ42，值对 11.2↔12.3 / 8.8↔8.8 / 10.6↔10.6 / 228.7↔239.7ms）。轮询量子仅 10-20µs（cmdq.c usleep_range），不可能造出 230ms——**P1' 长尾是固件真实处理时间**，落在页传输阶段（代码证据：take 回收是 63 页/批循环，`MLX5_PRISM_PAGES_PER_CMD=63`，2305 页 ≈ 37+ 条 MP(take)，正是 84 条命令的主要构成；确切 opcode 归属待重跑快照，聚合器已加慢样本→opcode 表）。**这不是** 1 条目环时代的 commit 长尾（判据 C 主语是 P2'）。
+- **P2' 作废**：24 个样本全为大负值（-38s/-20s）。根因=聚合器配对 bug：静态预载全量 completes（last-write-wins）而真实时序是流式（complete→EQE 逐条交替、槽位跨命令复用）——早 EQE 被配给晚 complete。基线 dmesg 证实 EQE vector 为单热位图（bit0/bit1 交替），预载模型与之不兼容。**报告输出的"判据C：长尾消失"系无效样本产物，不采信、不回写 DESIGN**——判据 C 维持未决，等流式配对重采。
+- **mlx5_core 基准采信（口径注记）**：kretprobe `mlx5_cmd_invoke` 驻留时间 n=20809：p50=5µs、p90=1.33ms、p99=7.45ms、max=22.5ms（avg=609µs 被链路重建重命令抬高，看 p50）。min=0.0µs 为异步调用（立即返回）+µs 级时间戳分辨率的混合口径。vs prism P1' p50=76.5µs：轮询路径约为事件路径 15 倍，符合口径预期（DESIGN §10"仅数量级对比"）。
+- **快照取证缺口**：脚本原设计成功后 `rm -rf` workdir，run-1 原始 trace 丢失（本次 opcode 归属只能靠代码推理）——已改：快照目录落 `/var/tmp/prism_lat_snap.XXXX` 永久保留，chown 回调用者。
+- **工具修复（3 处）**：①pair_p2 改流式配对（时间线合并，complete 置 pending、EQE 认领当时 pending，同戳 complete 优先）；②disarm/arm 的 enable 重定向改存在性守卫（bash 冷知识：重定向目标不存在时 `2>/dev/null` 接不住该错误——重定向失败信息走原 stderr，run-1 尾部三行噪音即此）；③聚合器加慢样本 opcode 归属表（complete 序==issue 序假设：bootstrap/selftest 单线程串行）与 EQE type 分布（悬案：trace 每加载 22 个 eq_event vs dmesg 11 个 eqe 行——待重跑快照裁决）。
+- **回归防线**：单测新增 run-1 事故用例（槽位复用×3 交替 EQE→三样本各 500ms 而非负值；EQE 先行→孤儿；同戳 complete 优先），33 断言 ALL PASS。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

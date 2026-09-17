@@ -30,16 +30,16 @@ COMPLETE = re.compile(r'^prism_cmdq_complete: opcode=0x[0-9a-f]+\[[^\]]+\]'
                       r' slot=(?P<slot>\d+) delivery=0x[0-9a-f]+'
                       r' status=0x[0-9a-f]+ syndrome=0x[0-9a-f]+'
                       r' lat=(?P<lat>\d+) ns err=-?\d+')
-EQEV = re.compile(r'^prism_eq_event: eqn=\d+ type=0x[0-9a-f]+'
+EQEV = re.compile(r'^prism_eq_event: eqn=(?P<eqn>\d+) type=0x(?P<type>[0-9a-f]+)'
                   r' vector=0x(?P<vector>[0-9a-f]+) cons=\d+')
-ISSUE = re.compile(r'^prism_cmdq_issue:')
+ISSUE = re.compile(r'^prism_cmdq_issue: opcode=0x[0-9a-f]+\[(?P<opcode>[^\]]+)\]')
 KPROBE = re.compile(r'^(?P<ev>ml5i|ml5r): ')
 
 
 def parse_prism_file(path):
-    """返回 (n_issue, completes, eqs)；completes=[(ts_ns,slot,lat_ns)],
-    eqs=[(ts_ns,vector)]，均按文件顺序（= 时间顺序）。"""
-    n_issue, completes, eqs = 0, [], []
+    """返回 (issues, completes, eqs)；issues=[opcode 名]，completes=
+    [(ts_ns,slot,lat_ns)]，eqs=[(ts_ns,vector,eqn,type)]，均按文件顺序。"""
+    issues, completes, eqs = [], [], []
     with open(path) as f:
         for line in f:
             m = LINE.match(line)
@@ -47,27 +47,35 @@ def parse_prism_file(path):
                 continue
             ts_ns = int(round(float(m.group('ts')) * 1e9))
             rest = m.group('rest')
-            if ISSUE.match(rest):
-                n_issue += 1
+            if (i := ISSUE.match(rest)):
+                issues.append(i.group('opcode'))
             elif (c := COMPLETE.match(rest)):
                 completes.append((ts_ns, int(c.group('slot')),
                                   int(c.group('lat'))))
             elif (e := EQEV.match(rest)):
-                eqs.append((ts_ns, int(e.group('vector'), 16)))
-    return n_issue, completes, eqs
+                eqs.append((ts_ns, int(e.group('vector'), 16),
+                            int(e.group('eqn')), int(e.group('type'), 16)))
+    return issues, completes, eqs
 
 
 def pair_p2(completes, eqs, max_slots=64):
-    """EQE vector 位图逐位认领 pending 槽位 → ns 样本。
+    """流式配对：completes 与 eqs 按时间线合并，complete 置 pending[slot]，
+    EQE 的 vector 位逐位认领**当时**的 pending 槽位 → ns 样本。
+    （run-1 教训：预载全量 completes 的静态配对在槽位复用下把早 EQE 配给
+    晚 complete，产出大负值样本——EQ_DEFERRED 语义下槽位在被 EQE 确认前
+    不释放，同一时刻每槽至多一个未决 complete，流式认领无歧义。）
     返回 (samples, unpaired_completes, orphan_bits)。"""
+    timeline = sorted([(ts, 0, slot) for ts, slot, _ in completes] +
+                      [(ts, 1, vector) for ts, vector, _, _ in eqs])
     pending, samples, orphan = {}, [], 0
-    for ts, slot, _ in completes:
-        pending[slot] = ts
-    for ts, vector in eqs:
-        if not vector:
+    for ts, kind, val in timeline:
+        if kind == 0:
+            pending[val] = ts
             continue
-        for b in range(min(max_slots, vector.bit_length())):
-            if vector & (1 << b):
+        if not val:
+            continue
+        for b in range(min(max_slots, val.bit_length())):
+            if val & (1 << b):
                 if b in pending:
                     samples.append(ts - pending.pop(b))
                 else:
@@ -160,14 +168,24 @@ def main():
     print("=== T11 延迟基线聚合 ===")
     print(f"loads: {len(loads)}  work: {args.work}")
     p1_all, p2_all, unp_all, orph_all = [], [], 0, 0
-    per_load = []  # (文件名, [(slot, lat)], p2 样本)
+    slow_rows = []  # (lat_us, load, pos, opcode)
+    type_counts = defaultdict(int)
+    per_load = []   # (文件名, completes, p2 样本) — CSV 段复用
     for path in loads:
-        n_issue, completes, eqs = parse_prism_file(path)
+        issues, completes, eqs = parse_prism_file(path)
         p2, unp, orph = pair_p2(completes, eqs)
-        n_cmd_eq = sum(1 for _, v in eqs if v)
-        print(f"{os.path.basename(path)}: issue={n_issue} "
+        n_cmd_eq = sum(1 for _, v, _, _ in eqs if v)
+        for _, _, t in eqs:
+            type_counts[t] += 1
+        print(f"{os.path.basename(path)}: issue={len(issues)} "
               f"complete={len(completes)} eq_event={len(eqs)} "
               f"eqe(cmd)={n_cmd_eq} p2={len(p2)} unpaired={unp}")
+        # 慢样本 opcode 归属：bootstrap/selftest 单线程串行（issue→轮询
+        # own slot→complete→下一条），complete 序 == issue 序，可按位取 opcode。
+        for pos, (_, _, lat) in enumerate(completes):
+            if lat > 1_000_000:
+                op = issues[pos] if pos < len(issues) else "?"
+                slow_rows.append((lat / 1000, os.path.basename(path), pos, op))
         p1_all += [lat for _, _, lat in completes]
         p2_all += p2
         unp_all += unp
@@ -178,10 +196,14 @@ def main():
     print("P1' 命令往返（doorbell→owner 翻转观察，轮询口径，"
           "DESIGN §10.1 参考值 8-15us 为事件模式口径，仅数量级对比）")
     print(dist_line("  P1'", dist(p1_all)))
+    if slow_rows:
+        print("  慢样本归属（>1ms；complete 序==issue 序假设，逐加载确定性核对）:")
+        for lat_us, src, pos, op in sorted(slow_rows, reverse=True)[:10]:
+            print(f"    {lat_us:12,.1f} us  {src} pos={pos} {op}")
     print()
-    print("P2' 事件提交（eq_event − 配对 cmdq_complete；"
-          f"未配对 complete {unp_all} 条为 teardown 尾部正常丢弃，"
-          f"孤儿位 {orph_all} 个）")
+    print("P2' 事件提交（eq_event − 配对 cmdq_complete；流式配对，"
+          f"未配对 complete {unp_all} 条为尾部正常丢弃，孤儿位 {orph_all} 个；"
+          f"EQE type 分布 {dict(type_counts)}）")
     print(dist_line("  P2'", dist(p2_all)))
     print()
     print(verdict_c(p2_all))

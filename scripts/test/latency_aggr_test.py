@@ -50,28 +50,50 @@ def test_parse(tmp):
         f.write(complete(1.003, 1, 2500, op=0x999, name="?"))
         f.write(eqev(1.5, 0x3))
         f.write(line(1.6, "prism_eq_event: eqn=4 type=0x0e vector=0x00000000 cons=8"))
-    n_issue, completes, eqs = la.parse_prism_file(path)
-    check("issue 计数", n_issue, 2)
+    issues, completes, eqs = la.parse_prism_file(path)
+    check("issue opcode 序列", issues, ["QUERY_PAGES", "ALLOC_UAR"])
     check("complete 数", len(completes), 2)
     check("complete[0]", completes[0], (1_001_000_000, 0, 1500))
     check("eq 数（含非 CMD）", len(eqs), 2)
-    check("eq vector 解析", eqs[0], (1_500_000_000, 0x3))
+    check("eq 解析(含 eqn/type)", eqs[0], (1_500_000_000, 0x3, 4, 0x0a))
     return path
 
 
 def test_pair_p2():
     completes = [(1_000_000_000, 0, 1000), (2_000_000_000, 1, 2000),
                  (2_500_000_000, 2, 3000)]
-    eqs = [(1_500_000_000, 0x1), (3_500_000_000, 0x6)]
+    eqs = [(1_500_000_000, 0x1, 4, 0x0a), (3_500_000_000, 0x6, 4, 0x0a)]
     samples, unpaired, orphan = la.pair_p2(completes, eqs)
     # bit0@1.5s−1.0s=0.5s；bit1@3.5−2.0=1.5s；bit2@3.5−2.5=1.0s
     check("P2' 样本(ms)", sorted(s // 1_000_000 for s in samples), [500, 1000, 1500])
     check("未配对 complete", unpaired, 0)
     check("孤儿位", orphan, 0)
     # 位图引用无 pending 槽位 → 孤儿，不产出样本
-    _, unpaired, orphan = la.pair_p2(completes, [(4_000_000_000, 0x8)])
+    _, unpaired, orphan = la.pair_p2(completes, [(4_000_000_000, 0x8, 4, 0x0a)])
     check("孤儿位计数", orphan, 1)
     check("未配对=3", unpaired, 3)
+
+
+def test_pair_p2_streaming():
+    """run-1 事故回归：槽位复用 + 交替 EQE，静态预载配对把早 EQE 配给
+    晚 complete 产出大负值；流式配对必须按当时 pending 归属。"""
+    completes = [(1_000_000_000, 0, 100), (2_000_000_000, 0, 100),
+                 (3_000_000_000, 0, 100)]
+    eqs = [(1_500_000_000, 0x1, 4, 0x0a), (2_500_000_000, 0x1, 4, 0x0a),
+           (3_500_000_000, 0x1, 4, 0x0a)]
+    samples, unpaired, orphan = la.pair_p2(completes, eqs)
+    check("槽位复用流式配对(ms)", sorted(s // 1_000_000 for s in samples),
+          [500, 500, 500])
+    check("复用后无未配对", unpaired, 0)
+    check("复用后无孤儿", orphan, 0)
+    # EQE 先于任何 complete（异常序）：孤儿而非负样本
+    samples, _, orphan = la.pair_p2([], [(1_000_000_000, 0x2, 4, 0x0a)])
+    check("EQE 先行→零样本", samples, [])
+    check("EQE 先行→孤儿", orphan, 1)
+    # 同 µs 时间戳：complete 排在 EQE 前（sort 键 kind），产出 0 而非负
+    samples, _, _ = la.pair_p2([(1_000_000_000, 0, 1)],
+                               [(1_000_000_000, 0x1, 4, 0x0a)])
+    check("同戳 complete 优先", samples, [0])
 
 
 def test_pair_kprobes(tmp):
@@ -120,6 +142,8 @@ def main():
         test_parse(tmp)
         print("== pair_p2")
         test_pair_p2()
+        print("== pair_p2_streaming（run-1 回归）")
+        test_pair_p2_streaming()
         print("== pair_kprobes")
         test_pair_kprobes(tmp)
         print("== dist")
