@@ -736,6 +736,17 @@
 - **验证**: 根 `make CC=/usr/bin/gcc-11` → `src/mlx5_prism.ko` ✓；宿主机测试 ALL EQUIVALENT ✓；bash -n 全脚本 ✓；live 文档/脚本残留扫描（无 src/ 前缀的 insmod、M=$(pwd)）清零 ✓；git 识别纯重命名 ✓。
 - **收尾（同日）**: ①r0_gate G0 构建后 `chown -R $SUDO_UID src`（sudo 构建产物交还调用者，消除 root 属主 .o/.cmd 卡后续增量构建）；②新增根 README.md 门面（定位/快速开始/目录地图/深读指针）——此前门面内容藏在 READING.md §三且无 README，属缺口；③根 Makefile 钉死默认 `CC=/usr/bin/gcc-11`（命令行 `make CC=` 可覆盖）——gcc-15 遮蔽的仓库侧对策，用户工具链（~/.local/env-toolchain.sh，刻意配置的 DPDK 现代链）不动；裸 `make` 在任何身份/PATH 下都拿内核同款编译器，也顺带消除了".cmd 增量不感知裸 gcc 背后换编译器"的混编隐患。
 
+### T11 延迟基线采集——脚本落地（2026-09-17，待上机）
+
+- **定位**: 零内核改动的纯采集任务——插桩 R0.6 早已就位（cmdq.c `t0=ktime_get_ns()`→complete tracepoint 带 latency_ns；eq.c eq_event 带 vector），T10-prep 判据 C（commit 长尾）由它裁决，T16 对比报告引用其数据。
+- **产物**: `scripts/gate/collect_latency.sh`（三阶段采集）+ `scripts/gate/latency_aggregate.py`（聚合/裁决，独立可跑）+ `scripts/test/latency_aggr_test.py`（合成 trace 单测 26 断言）。
+- **三阶段**: A) 12 次 `insmod selftest=1` 纯加载，加载前武装探针（G3 教训），**逐加载快照**——P2' 配对依据"槽位在被 EQE 确认前不释放"，跨加载混采必错配；B) mlx5_core 基准：kprobe `mlx5_cmd_invoke` 入口/返回，`ip link down/up` 触发命令——**安全闸：只碰无 IP 的 Mellanox 网口**（绝不碰承载 SSH 的口），kprobe/安全网口不可用则回退文档参考值并标注口径；C) 聚合 + 判据 C 预登记裁决（p99<10ms∧max<100ms→长尾消失；>500ms 样本→长尾仍在；否则中间形态）。
+- **口径**: P1'=内核实测 lat（doorbell→owner 翻转观察，轮询）；P2'=eq_event−配对 complete 时间戳（EQE vector 位图 bit i↔slot i）；mlx5_core=kretprobe 函数驻留时间（同步调用者含固件往返，与 P1' 相近不严格等价，报告分开呈现）；分位 nearest-rank。trace_clock 切 global（P2' 跨 CPU 比时间戳，local 有跨核偏差），结束恢复。
+- **无 perf/bpftrace**: 全程 tracefs 直采零外部依赖（task.json 步骤原文"perf 采集/bpftrace 基准"按机器实际工具链改为 tracefs 直采+kprobe）。
+- **单测抓到的真 bug**: `pair_p2` 初版写了 EQE 消费循环却忘了把 completes 填进 pending 表——complete 参数整个被无视，配对全空。合成数据先行（答案手工算好）的价值再一次自证；另修采集脚本一处管道 bug（`tr` 只接住三个 grep 中最后一个，计数串带换行会让 `-ge` 语法错误）。
+- **验证（无 sudo）**: 单测 26 断言 ALL PASS；`bash -n` 全脚本；聚合器 main() 端到端冒烟（2 合成加载+kprobe 快照→报告数值逐位吻合+CSV 生成）。
+- **待上机**: `sudo bash scripts/gate/collect_latency.sh`（约 10-15 分钟）→ `/var/tmp/latency_report.txt` + `latency_samples.csv`；数据回来后回写 DESIGN §10 P1'/P2' 行 + 判据 C 结论、task.json T11 → completed。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

@@ -23,7 +23,7 @@ sudo bash scripts/gate/r0_gate.sh       # 硬件门禁一键跑（G0-G4）
 |------|------|
 | `src/` | 模块源码（7 .c + 4 .h）与 obj-m 清单；构建产物也只落在这里 |
 | `docs/` | `DESIGN.md`（设计 v2.1：四层架构/状态机/怪癖档案/EQ 设计）、`READING.md`（~600 行协议脊柱深读指南） |
-| `scripts/gate/` | 活跃硬件门禁（r0_gate / rebaseline / t09_verify / r0_trace_check） |
+| `scripts/gate/` | 活跃硬件门禁（r0_gate / rebaseline / collect_latency / t09_verify / r0_trace_check） |
 | `scripts/baseline/` | 行为基线：dmesg 模板 + 归一化 + 对比门禁 |
 | `scripts/test/`、`scripts/archive/` | 宿主机测试；已完成任务的一次性脚本（见 `scripts/README.md`） |
 | `progress.md`、`task.json` | 每任务实证记录 + 历史问题归档；任务库 |
