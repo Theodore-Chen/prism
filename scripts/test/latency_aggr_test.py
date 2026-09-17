@@ -136,6 +136,30 @@ def test_verdict():
     check("无样本不裁决", "不裁决" in la.verdict_c([]), True)
 
 
+def test_main_smoke(tmp):
+    """main() 全路径冒烟（run-2 教训：函数级全绿但 main 里 eqs 四元组
+    解包漏改，只有跑过 main 才能抓到）。"""
+    import subprocess
+    import glob
+    work = os.path.join(tmp, "work")
+    os.makedirs(work)
+    with open(os.path.join(work, "prism_load_01.txt"), "w") as f:
+        f.write(complete(1.0, 0, 72000))
+        f.write(eqev(1.5, 0x1))
+    csvout = os.path.join(tmp, "out.csv")
+    agg = os.path.join(os.path.dirname(__file__), "..", "gate",
+                       "latency_aggregate.py")
+    r = subprocess.run([sys.executable, agg, "--work", work,
+                        "--csv", csvout],
+                       capture_output=True, text=True)
+    check("main() 退出码", r.returncode, 0)
+    check("main() 无异常", "Traceback" in r.stderr, False)
+    check("main() 报告含 P1'", "P1'" in r.stdout, True)
+    check("main() 报告含判据C", "判据C" in r.stdout, True)
+    rows = open(csvout).read().strip().splitlines()
+    check("CSV 行数(头+P1+P2)", len(rows), 3)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="prism_lat_test.") as tmp:
         print("== parse")
@@ -144,6 +168,8 @@ def main():
         test_pair_p2()
         print("== pair_p2_streaming（run-1 回归）")
         test_pair_p2_streaming()
+        print("== main 冒烟（run-2 回归）")
+        test_main_smoke(tmp)
         print("== pair_kprobes")
         test_pair_kprobes(tmp)
         print("== dist")

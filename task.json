@@ -1152,7 +1152,7 @@
       "title": "tracepoint 完善与延迟基线采集（P1'/P2'）",
       "phase": "S5",
       "milestone": null,
-      "status": "in_progress",
+      "status": "completed",
       "prerequisites": [
         "R0.6-trace-scaffold"
       ],
@@ -1184,7 +1184,7 @@
         ]
       },
       "goal": "scripts/collect_latency.sh 产出 P1'（命令往返分布）与 P2'（事件提交分布）基线数据，供 T16 对比报告引用",
-      "context": "原 T11（tracepoint 定义+插桩）已由 R0.6 提前完成（DESIGN.md v2 §11.1 顺序决策：可观测性先于事件模式）。本任务瘦身为核心剩余：延迟基线采集 SOP。顺序上仍在 T10 之前——T10 调试要用这些观测手段。 执行更新（2026-09-17）：脚本已落地——scripts/gate/collect_latency.sh（三阶段：12 次纯加载 tracefs 逐加载快照 → mlx5_core kprobe 基准[安全闸：只碰无 IP 网口，不可用回退文档参考值] → latency_aggregate.py 聚合+判据C 预登记裁决[阈值 p99<10ms∧max<100ms 消失 / >500ms 样本仍在 / 否则中间]）；机器无 perf/bpftrace，步骤原文的 perf/bpftrace 口径按实际工具链改为 tracefs 直采+kprobe；P2' 配对依据 EQE vector 位图 bit i↔slot i、槽位被确认前不释放（逐加载配对）。合成 trace 单测 26 断言 ALL PASS。待上机采集后回写 DESIGN §10 与本任务出口判定。",
+      "context": "原 T11（tracepoint 定义+插桩）已由 R0.6 提前完成（DESIGN.md v2 §11.1 顺序决策：可观测性先于事件模式）。本任务瘦身为核心剩余：延迟基线采集 SOP。顺序上仍在 T10 之前——T10 调试要用这些观测手段。 执行更新（2026-09-17）：脚本已落地——scripts/gate/collect_latency.sh（三阶段：12 次纯加载 tracefs 逐加载快照 → mlx5_core kprobe 基准[安全闸：只碰无 IP 网口，不可用回退文档参考值] → latency_aggregate.py 聚合+判据C 预登记裁决[阈值 p99<10ms∧max<100ms 消失 / >500ms 样本仍在 / 否则中间]）；机器无 perf/bpftrace，步骤原文的 perf/bpftrace 口径按实际工具链改为 tracefs 直采+kprobe；P2' 配对依据 EQE vector 位图 bit i↔slot i、槽位被确认前不释放（逐加载配对）。合成 trace 单测 26 断言 ALL PASS。待上机采集后回写 DESIGN §10 与本任务出口判定。 完成更新（2026-09-17 run-2）：判据C 预登记裁决=长尾消失（P2' n=264 流式配对零孤儿：p50=1.0µs p99=159µs max=162µs，>500ms 样本为零）；P1' n=1008：p50=76.5µs，长尾确定性归属 INIT_HCA ~230-240ms（固件真实处理时间）；结构真相=84 命令=42×双口、快照窗口仅 probe 期；mlx5_core 基准 n=20764 p50=5µs。聚合段曾因 main() 四元组解包漏改崩溃，快照保留策略使其离线补算（数据同源）。出口判定：P1' n≥1000 ✓、P2' 分布+长尾形态 ✓（消失）、mlx5_core 基线 ✓、口径注释 ✓。数据/证据：/var/tmp/latency_report.txt + /var/tmp/prism_lat_snap.M9cQOm/。",
       "steps": [
         "1. 编写 scripts/collect_latency.sh：perf 采集 + 聚合（avg/p50/p99/max）",
         "2. selftest=1 模式跑一轮，产出 P1' 分布（n≥1000 命令）",

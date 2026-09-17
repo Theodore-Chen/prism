@@ -756,6 +756,16 @@
 - **工具修复（3 处）**：①pair_p2 改流式配对（时间线合并，complete 置 pending、EQE 认领当时 pending，同戳 complete 优先）；②disarm/arm 的 enable 重定向改存在性守卫（bash 冷知识：重定向目标不存在时 `2>/dev/null` 接不住该错误——重定向失败信息走原 stderr，run-1 尾部三行噪音即此）；③聚合器加慢样本 opcode 归属表（complete 序==issue 序假设：bootstrap/selftest 单线程串行）与 EQE type 分布（悬案：trace 每加载 22 个 eq_event vs dmesg 11 个 eqe 行——待重跑快照裁决）。
 - **回归防线**：单测新增 run-1 事故用例（槽位复用×3 交替 EQE→三样本各 500ms 而非负值；EQE 先行→孤儿；同戳 complete 优先），33 断言 ALL PASS。
 
+#### run-2 判决（2026-09-17，判据C 裁决：长尾消失，T11 完成）
+
+- **执行波折**：上机时聚合段崩溃（main() 里 eqs 四元组解包漏改一处——单测只测函数没测 main，漏洞实锤）+ root tee 打不开上一轮 chown 回用户的旧报告（**fs.protected_regular 第三次踩中**，脚本已加 `rm -f` 前置）。但**快照永久保留策略立功**：12 份原始 trace + mlx5_core 基准完整在手，聚合修复后离线补算，数据同源，无需三跑。
+- **结构真相（改写此前两处误判）**：84 条命令 = **42 × 2 口**——卡是双 PCI 功能，probe 对两口各跑一遍完整引导；快照窗口 = probe 期（rmmod 的 take/拆除命令不进窗口），run-1 所谓"探测↔拆除镜像"实为**口 0 ↔ 口 1** 的同序列重复；trace 22 events vs dmesg 11 行之谜同解（基线 dmesg 本就是每口一份）。每口 42 条命令序列首次完整落表：ENABLE_HCA→QUERY_PAGES×10→0xdead→ISSI×4→boot 页×3→ACCESS_REG→QUERY_HCA_CAP×3→SET_HCA_CAP2→QUERY_HCA_CAP→init 页×3→**INIT_HCA**→ALLOC_UAR→CREATE_EQ→QUERY_EQ→自检 QUERY_PAGES×10。slot 几何：常规命令串行全走 slot 0、首条自检命令 slot 1（基线指纹 `vector=0x2` 来源）、MANAGE_PAGES 走 page-queue slot 31——unpaired=1/加载 = 最后一条页命令的 slot 31 永等不到 EQE，完全闭环。
+- **P1' 终值**（n=1008）：p50=76.5µs、p90=1.76ms、p99=238ms、max=239.2ms。慢样本 opcode 归属（每口 6 个，跨 12 加载逐位确定）：QUERY_HCA_CAP(cur) ~1.7ms、QUERY_PAGES(init) ~11-12ms、MANAGE_PAGES(give 2299) ~8.8ms、QUERY_PAGES(verify) ~10.6ms、**INIT_HCA ~228-240ms**、CREATE_EQ ~1.8ms——轮询量子 10-20µs 造不出，全系固件真实处理时间。
+- **P2' 终值（有效）**（n=264=22×12，流式配对全成功零孤儿）：p50=1.0µs、p90=105µs、p99=159µs、max=162µs。结构：典型 ~1µs（EQE 在 owner 翻转时已 staged，eq_poll 顺手取走）；~105-160µs 为突发首条（QUERY_EQ 积压事件 + 每口首条自检命令）。**判据C 预登记裁决：长尾消失**——>500ms 样本为零，p99/max 远低于 10ms/100ms 阈值；1 条目环时代长尾确证为环尺寸产物，随 4096 深环消失。**T10 直接上事件模式**。
+- **mlx5_core 基准终值**（n=20764）：p50=5µs、p90=1.46ms、p99=7.5ms、max=23ms（kretprobe 口径注记不变）。
+- **回写**：DESIGN §10.1 P1'/P2'/P3 行更新为实测终值 + 判据C 结论 + INIT_HCA 长尾注记；单测补 main() 全路径冒烟（run-2 崩溃回归，37 断言 ALL PASS）；task.json T11 → completed。
+- **遗留观察（不阻塞）**：eq_poll 的耐心窗结构使每条自检命令固定烧满 2s（T10-prep 已知，P1'/P2' 不受影响）；take/拆除阶段命令延迟未入窗口（快照设计使然，T10 事件模式时代如需再测）。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

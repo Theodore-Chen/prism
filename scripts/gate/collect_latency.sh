@@ -30,6 +30,10 @@ LOADS=${1:-12}
 
 REPORT=/var/tmp/latency_report.txt
 CSV=/var/tmp/latency_samples.csv
+# fs.protected_regular=2：root 的 tee(O_CREAT) 打不开 sticky 目录里他人
+# 属主的旧报告（本项目第三次踩中）。先删——root unlink 不受限，末尾
+# chown 交还调用者。
+rm -f "$REPORT" "$CSV"
 exec > >(tee "$REPORT") 2>&1
 
 TR=/sys/kernel/tracing
