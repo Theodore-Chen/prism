@@ -766,6 +766,13 @@
 - **回写**：DESIGN §10.1 P1'/P2'/P3 行更新为实测终值 + 判据C 结论 + INIT_HCA 长尾注记；单测补 main() 全路径冒烟（run-2 崩溃回归，37 断言 ALL PASS）；task.json T11 → completed。
 - **遗留观察（不阻塞）**：eq_poll 的耐心窗结构使每条自检命令固定烧满 2s（T10-prep 已知，P1'/P2' 不受影响）；take/拆除阶段命令延迟未入窗口（快照设计使然，T10 事件模式时代如需再测）。
 
+### T10 事件模式——代码落地（2026-09-17，待 stage1 上机）
+
+- **实现**（镜像 mlx5_core `eq_async_int`/`comp_handler(PENDING_COMP)`/`wait_func`，~160 行四处）：①cmdq 完成/唤醒后端（per-slot `completion` + `pending` 位图，invoke 事件分支睡完成量，超时 claim/revoke 泄漏策略与轮询路径一致）；②eq 硬中断消费循环（owner 谓词 + dma_rmb + budget 128 + 退出一次 arm doorbell，热路径零 printk）；③irq handler 真化 + 风暴护栏（连续 1000 空中断 → disable_irq_nosync 自保，T06 教训工程化）；④`eq_mode` 模块参数（默认 event；`poll` = T09 行为逐字保留的回退，含计数 stub 语义）。
+- **关键设计决策**：**中断侧只 claim+complete，不收尾**——被唤醒的 invoke 重读 slot 输出并释放 slot（同步-only 驱动的简化：irq 永不触碰 issuer 的邮箱/栈生命周期；与 DESIGN §5.3 阶段 B"抢占者收尾"字面不同、claim/revoke 语义相同，验证后回写设计文档注明）。**force_poll 清单**：页命令（fw 投页完成到 pages 向量，无 pages EQ，内联生命周期）+ CREATE/DESTROY/QUERY_EQ（自身 EQE 时序未定义，mlx5_core force_polling 同款）。**bind 后置于 enable_irq**：积压 EQE（QUERY_EQ 自身完成）落在 POLL_INLINE 模式的 complete_slots 上，对已内联释放的槽位自然 no-op。
+- **验证（无 sudo）**：make 0 错误；checkpatch 4 文件 0 错误 0 警告；t10_verify.sh bash -n + S2/S3 判据合成行干跑通过。
+- **待上机**：`sudo bash scripts/gate/t10_verify.sh stage1` → stage2 → stress → rebaseline.sh（事件模式转正=有意行为变更）。文档回写（DESIGN §5.3/§7、§10 P1' 事件口径注记）随验证数据。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

@@ -51,6 +51,17 @@ MODULE_PARM_DESC(eq_engagement_retries,
 		 "EQ destroy/recreate attempts when the event engine stays silent (default 3)");
 
 /*
+ * T10: completion mode. Default "event" = MSI-X hardirq consumption with
+ * invoke sleeping on the completion (mlx5_core shape); "poll" = the T09
+ * behaviour verbatim (process-context eq_poll, irq handler counts only) —
+ * the recovery fallback.
+ */
+static char *eq_mode = "event";
+module_param(eq_mode, charp, 0444);
+MODULE_PARM_DESC(eq_mode,
+		 "EQ completion mode: event (default, MSI-X hardirq) or poll (T09 fallback)");
+
+/*
  * CREATE_EQ size ladder — record the first rung the firmware accepts.
  * Rung 0 (mlx5_core-shaped log12/64pas) has been accepted on every load
  * since the eqc encoding fix (T10-prep: 10/10); the lower rungs are a
@@ -86,6 +97,10 @@ int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev)
 
 	eq->cons_index = 0;
 	eq->events = 0;
+	atomic_set(&eq->irq_events, 0);
+	eq->empty_irqs = 0;
+	eq->storm_latched = false;
+	eq->event_mode = strcmp(eq_mode, "poll") != 0;
 	eq->created = false;
 	eq->uar = 0;
 	eq->doorbell = NULL;
@@ -125,6 +140,49 @@ static void mlx5_prism_eq_update_ci(struct mlx5_prism_dev *dev, bool arm)
 		     eq->doorbell + (arm ? 0 : 8));
 	/* Order the doorbell write before any subsequent descriptor reads. */
 	wmb();
+}
+
+/*
+ * T10 hardirq consumption (mlx5_eq_async_int shape): walk fresh EQEs up
+ * to a budget, dispatch CMD vectors to the cmdq completion backend, and
+ * re-arm once on the way out. Deliberately no printk on the hot path —
+ * silence is normal; diagnostics come from the tracepoints, the eq
+ * counters, and the storm guard.
+ */
+int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_eq *eq = &dev->eq;
+	u32 nent = 1 << eq->log_sz;
+	struct mlx5_prism_eqe *e;
+	int walked = 0;
+
+	for (;;) {
+		e = eq->buf + ((eq->cons_index & (nent - 1)) *
+			       MLX5_PRISM_EQE_SIZE);
+		if ((e->owner & 1) ^ !!(eq->cons_index & nent))
+			break;		/* stale — walk done */
+		/* Fresh: read it only after observing the owner flip. */
+		dma_rmb();
+
+		if (e->type == MLX5_PRISM_EVENT_TYPE_CMD) {
+			u32 v = be32_to_cpu(e->data.cmd_vector);
+
+			trace_prism_eq_event(eq->eqn, e->type, v,
+					     eq->cons_index);
+			mlx5_prism_cmdq_complete_slots(dev, v);
+		} else {
+			trace_prism_eq_event(eq->eqn, e->type, 0,
+					     eq->cons_index);
+		}
+		eq->cons_index++;
+		eq->events++;
+		atomic_inc(&eq->irq_events);
+		if (++walked >= MLX5_PRISM_EQ_IRQ_BUDGET)
+			break;		/* remainder arrives with the next IRQ */
+	}
+
+	mlx5_prism_eq_update_ci(dev, true);
+	return walked;
 }
 
 /*
@@ -267,8 +325,6 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		eq->eqn = cout[PRISM_OFF_EQN];
 		eq->log_sz = log_sz;
 		eq->created = true;
-		/* Slot release now defers to completion EQEs (cmdq->mode). */
-		mlx5_prism_cmdq_eq_bound(dev);
 
 		/*
 		 * QUERY_EQ is the authoritative ring size; adopt it for the
@@ -357,25 +413,95 @@ int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
 	enable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
 	/* Second arm after the line is live — absorbs the create/arm race. */
 	mlx5_prism_eq_update_ci(dev, true);
-	pci_info(dev->pdev,
-		 "EQ ready: eqn=%u entries=%u (armed, irq enabled: counting stub)\n",
-		 eq->eqn, 1 << eq->log_sz);
+	/*
+	 * T10: bind the cmdq completion mode only after the line is live.
+	 * Backlog EQEs (QUERY_EQ's own completion, consumed by the irq in
+	 * the window above) hit POLL_INLINE-mode complete_slots, which
+	 * no-ops on slots the polled issuers already freed.
+	 */
+	mlx5_prism_cmdq_eq_bound(dev, eq->event_mode);
+	if (eq->event_mode)
+		pci_info(dev->pdev,
+			 "EQ up (event mode): eqn=%u entries=%u budget=%d\n",
+			 eq->eqn, 1 << eq->log_sz, MLX5_PRISM_EQ_IRQ_BUDGET);
+	else
+		pci_info(dev->pdev,
+			 "EQ ready: eqn=%u entries=%u (armed, poll fallback: irq counts only)\n",
+			 eq->eqn, 1 << eq->log_sz);
 	return 0;
 }
 
 /*
- * Fire commands and consume one EQE each, from process context. The
- * recreate-retry ladder is defensive only: since the eqc encoding fix
- * the engine has engaged first-attempt on every observed load
- * (T10-prep: 10/10).
+ * Event-mode recreate (defensive recovery for a silent engine — none
+ * observed since the eqc encoding fix, T10-prep: 10/10 first-attempt).
+ * Keeps the irq-core disable depth balanced whether or not the storm
+ * guard already self-disabled the line.
+ */
+static int mlx5_prism_eq_recreate(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_eq *eq = &dev->eq;
+	int err;
+
+	if (!eq->storm_latched)
+		disable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
+	eq->storm_latched = false;
+	eq->empty_irqs = 0;
+
+	mlx5_prism_eq_destroy(dev);
+	err = mlx5_prism_eq_create(dev);
+	if (err)
+		return err;
+
+	enable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
+	mlx5_prism_eq_update_ci(dev, true);
+	mlx5_prism_cmdq_eq_bound(dev, eq->event_mode);
+	return 0;
+}
+
+/*
+ * Fire commands and consume one EQE each. Event mode: each invoke sleeps
+ * until its own EQE wakes it, so this is round trips plus accounting; the
+ * recreate ladder stays as defensive recovery. Poll mode keeps the T09
+ * patience-window shape verbatim.
  */
 int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 {
+	struct mlx5_prism_eq *eq = &dev->eq;
 	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
 	u32 patience = dev->profile.eq_poll_patience_ms;
 	u32 max_retries = dev->profile.eq_engagement_retries;
 	int i, err, eqes, retries, total = 0;
+
+	if (eq->event_mode) {
+		for (i = 0; i < 10; i++) {
+			for (retries = 0; ; retries++) {
+				err = mlx5_prism_cmdq_invoke(dev,
+						MLX5_PRISM_CMD_OP_QUERY_PAGES,
+						MLX5_PRISM_QUERY_PAGES_BOOT,
+						in, sizeof(in), out, sizeof(out));
+				if (!err)
+					break;
+				if (retries >= max_retries) {
+					pci_err(dev->pdev,
+						"eq self-test: command %d/10 failed after %d recreations: %d\n",
+						i + 1, retries, err);
+					return err;
+				}
+				pci_info(dev->pdev,
+					 "eq self-test: command %d/10 failed (%d) — recreating EQ (attempt %d)\n",
+					 i + 1, err, retries + 1);
+				err = mlx5_prism_eq_recreate(dev);
+				if (err)
+					return err;
+			}
+		}
+		pci_info(dev->pdev,
+			 "eq self-test: 10/10 commands ok in event mode (%u events, %u consumed in hardirq, %u interrupts)\n",
+			 eq->events, atomic_read(&eq->irq_events),
+			 atomic_read(&dev->irq.count));
+		return 0;
+	}
 
 	for (i = 0; i < 10; i++) {
 		err = mlx5_prism_cmdq_invoke(dev,
@@ -424,8 +550,14 @@ void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev)
 	int err;
 
 	if (eq->created) {
-		/* Stop event generation before tearing the EQ down. */
-		disable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
+		/*
+		 * Stop event generation before tearing the EQ down. Skip the
+		 * disable when the storm guard already did it (depth balance;
+		 * the latch means no handler can be running).
+		 */
+		if (!eq->storm_latched)
+			disable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
+		eq->storm_latched = false;
 		mlx5_prism_eq_destroy(dev);
 	}
 

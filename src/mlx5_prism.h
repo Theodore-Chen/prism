@@ -10,6 +10,7 @@
 #define __MLX5_PRISM_H
 
 #include <linux/atomic.h>
+#include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/pci.h>
@@ -28,6 +29,14 @@
 #define MLX5_PRISM_MAX_COMMANDS		32
 #define MLX5_PRISM_EQE_SIZE		64
 #define MLX5_PRISM_EQ_ENTRIES		(MLX5_PRISM_PAGE_SIZE / MLX5_PRISM_EQE_SIZE)
+
+/*
+ * T10 hardirq consumption: walk cap per interrupt (mlx5_core's
+ * MLX5_EQ_POLLING_BUDGET) and the storm-guard threshold — consecutive
+ * EQE-less handler runs before the line self-disables (T06 lesson).
+ */
+#define MLX5_PRISM_EQ_IRQ_BUDGET		128
+#define MLX5_PRISM_EQ_STORM_LIMIT	1000
 
 /* CMDQ protocol (PRM §4 / mlx5 cmd.c). */
 #define MLX5_PRISM_PCI_CMD_XPORT	7
@@ -136,6 +145,7 @@ static_assert(sizeof(struct mlx5_prism_cmd_block) == 576);
 enum mlx5_prism_cmdq_mode {
 	MLX5_PRISM_CMDQ_POLL_INLINE,	/* no EQ: release slot inline */
 	MLX5_PRISM_CMDQ_EQ_DEFERRED,	/* EQ alive: release via EQE vector */
+	MLX5_PRISM_CMDQ_EVENT,		/* EQ alive + MSI-X: invoke sleeps (T10) */
 };
 
 struct mlx5_prism_cmdq {
@@ -148,6 +158,8 @@ struct mlx5_prism_cmdq {
 	u16		token_next;	/* rolling token; 0 is reserved */
 	u8		mode;		/* enum mlx5_prism_cmdq_mode */
 	DECLARE_BITMAP(slots, MLX5_PRISM_MAX_COMMANDS);
+	DECLARE_BITMAP(pending, MLX5_PRISM_MAX_COMMANDS); /* event-mode claim bits */
+	struct completion done[MLX5_PRISM_MAX_COMMANDS];  /* event-mode waiters */
 	spinlock_t	lock;		/* serialise producers (used from T05) */
 };
 
@@ -185,6 +197,10 @@ struct mlx5_prism_eq {
 	u32		uar;		/* assigned by ALLOC_UAR */
 	void __iomem	*doorbell;	/* bar0 + uar * 4 KiB + 0x40 */
 	u32		events;		/* EQEs consumed (T09: process ctx) */
+	atomic_t	irq_events;	/* EQEs consumed in hardirq (T10) */
+	u32		empty_irqs;	/* consecutive handler runs w/o EQEs */
+	bool		storm_latched;	/* storm guard tripped (irq disabled) */
+	bool		event_mode;	/* eq_mode param resolved at alloc */
 	bool		created;
 };
 
@@ -354,12 +370,13 @@ int mlx5_prism_cmdq_invoke_pages(struct mlx5_prism_dev *dev,
  * EQ→CMDQ completion interface — the only way the EQ side touches slots
  * (DESIGN.md v2 §2.1 rule 2). complete_slots() releases the slots named
  * by a command-completion EQE's vector bitmap and returns how many it
- * freed; eq_bound()/eq_gone() bracket the EQ lifetime and switch the
- * slot-release mode. eq_gone() also forgets every held regular slot —
- * pending EQEs will never arrive.
+ * freed (EQ_DEFERRED mode) or woke (EVENT mode); eq_bound()/eq_gone()
+ * bracket the EQ lifetime and switch the slot-release mode. eq_gone()
+ * also forgets every held regular slot — pending EQEs will never arrive —
+ * and force-wakes any event-mode sleepers.
  */
 int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector);
-void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev);
+void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev, bool event);
 void mlx5_prism_cmdq_eq_gone(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev);
 int mlx5_prism_cmdq_mailbox_selftest(struct mlx5_prism_dev *dev);
@@ -374,6 +391,7 @@ void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev);
+int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev);
 
 /* EQ quirk knobs (module params, defaults = measured values, see profile). */
 extern u32 mlx5_prism_eq_patience_ms;

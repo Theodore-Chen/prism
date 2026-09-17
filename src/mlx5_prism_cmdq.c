@@ -38,6 +38,7 @@
 int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
+	int i;
 
 	cmdq->size = MLX5_PRISM_PAGE_SIZE;
 	cmdq->buf = dma_alloc_coherent(&dev->pdev->dev, cmdq->size,
@@ -49,6 +50,9 @@ int mlx5_prism_cmdq_alloc(struct mlx5_prism_dev *dev)
 	cmdq->token_next = 0;
 	cmdq->mode = MLX5_PRISM_CMDQ_POLL_INLINE;
 	bitmap_zero(cmdq->slots, MLX5_PRISM_MAX_COMMANDS);
+	bitmap_zero(cmdq->pending, MLX5_PRISM_MAX_COMMANDS);
+	for (i = 0; i < MLX5_PRISM_MAX_COMMANDS; i++)
+		init_completion(&cmdq->done[i]);
 
 	pci_info(dev->pdev,
 		 "cmdq ring: cpu=%pK dma=%pad size=%zu\n",
@@ -223,6 +227,18 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 	u32 syndrome;
 	u64 t0;
 	int err, idx, n_in, n_out;
+	/*
+	 * These commands complete by slot polling even in event mode:
+	 * page-queue commands because the fw posts their completions to the
+	 * pages vector (we run no pages EQ — inline lifecycle, DESIGN §7.3),
+	 * and EQ-lifecycle opcodes because their own completion EQE has
+	 * undefined timing — the EQ is being born or torn down when they
+	 * run (mlx5_core forces polling for these too).
+	 */
+	bool force_poll = page_queue ||
+			  opcode == MLX5_PRISM_CMD_OP_CREATE_EQ ||
+			  opcode == MLX5_PRISM_CMD_OP_DESTROY_EQ ||
+			  opcode == MLX5_PRISM_CMD_OP_QUERY_EQ;
 
 	if (!mlx5_prism_fw_cmd_allowed(dev, opcode))
 		return -EINVAL;
@@ -281,6 +297,16 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 	if (!cmdq->token_next)
 		cmdq->token_next = 1;
 
+	/*
+	 * Event mode: arm the claim before the doorbell — under the lock, so
+	 * the hardirq claimer in complete_slots() can never see the slot
+	 * half-marked. reinit is safe: no completion can predate the doorbell.
+	 */
+	if (cmdq->mode == MLX5_PRISM_CMDQ_EVENT && !force_poll) {
+		reinit_completion(&cmdq->done[idx]);
+		__set_bit(idx, cmdq->pending);
+	}
+
 	lay = cmdq->buf + (idx << cmdq->log_stride);
 	memset(lay, 0, sizeof(*lay));
 	lay->type = MLX5_PRISM_PCI_CMD_XPORT;
@@ -314,12 +340,52 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 
 	spin_unlock_irqrestore(&cmdq->lock, flags);
 
-	deadline = jiffies + msecs_to_jiffies(MLX5_PRISM_CMD_TIMEOUT_MSECS);
-	while (time_before(jiffies, deadline)) {
+	if (cmdq->mode == MLX5_PRISM_CMDQ_EVENT && !force_poll) {
+		/*
+		 * T10: sleep until the hardirq EQE consumer claims the pending
+		 * bit (mlx5_core wait_func shape). The timeout races the irq's
+		 * claim: whoever test_and_clear()s the pending bit first owns
+		 * the finish; the loser reaps what the winner already staged.
+		 */
+		if (!wait_for_completion_timeout(&cmdq->done[idx],
+				msecs_to_jiffies(MLX5_PRISM_CMD_TIMEOUT_MSECS))) {
+			bool we_claimed;
+
+			spin_lock_irqsave(&cmdq->lock, flags);
+			we_claimed = test_and_clear_bit(idx, cmdq->pending);
+			spin_unlock_irqrestore(&cmdq->lock, flags);
+			if (we_claimed) {
+				/*
+				 * Slot + mailbox leak policy is identical to
+				 * the poll path: a late completion must not
+				 * hand a stale slot or reused DMA memory to
+				 * an unrelated command.
+				 */
+				pci_err(dev->pdev,
+					"opcode 0x%x: no EQE completion in %d ms, slot %d + %d mailbox blocks leaked\n",
+					opcode, MLX5_PRISM_CMD_TIMEOUT_MSECS, idx,
+					n_in + n_out);
+				return -ETIMEDOUT;
+			}
+			/*
+			 * The irq claimed it inside the race window; the
+			 * completion it queued is ours — reap it.
+			 */
+			wait_for_completion(&cmdq->done[idx]);
+		}
+		/*
+		 * The fw flips the slot owner before posting the EQE; this
+		 * readback is defensive and reuses the poll-path checks.
+		 */
 		own = READ_ONCE(lay->status_own);
-		if (!(own & MLX5_PRISM_CMD_OWNER_HW))
-			break;
-		usleep_range(10, 20);
+	} else {
+		deadline = jiffies + msecs_to_jiffies(MLX5_PRISM_CMD_TIMEOUT_MSECS);
+		while (time_before(jiffies, deadline)) {
+			own = READ_ONCE(lay->status_own);
+			if (!(own & MLX5_PRISM_CMD_OWNER_HW))
+				break;
+			usleep_range(10, 20);
+		}
 	}
 
 	if (own & MLX5_PRISM_CMD_OWNER_HW) {
@@ -351,12 +417,12 @@ static int mlx5_prism_cmd_exec(struct mlx5_prism_dev *dev,
 
 	spin_lock_irqsave(&cmdq->lock, flags);
 	/*
-	 * Slot lifecycle follows cmdq->mode: with an EQ alive the slot stays
-	 * BUSY until the command's completion EQE (vector bit) is consumed —
-	 * see enum mlx5_prism_cmdq_mode. Without an EQ there is nobody to
-	 * release it — clear here.
+	 * Slot lifecycle follows cmdq->mode: in EQ_DEFERRED the EQE's vector
+	 * bit released it above (nothing to do here). In POLL_INLINE — and in
+	 * EVENT mode, where the irq only woke us — the issuer is the reaper:
+	 * it copied the descriptor output first, so the slot frees here.
 	 */
-	if (cmdq->mode == MLX5_PRISM_CMDQ_POLL_INLINE)
+	if (cmdq->mode != MLX5_PRISM_CMDQ_EQ_DEFERRED)
 		__clear_bit(idx, cmdq->slots);
 	spin_unlock_irqrestore(&cmdq->lock, flags);
 
@@ -425,9 +491,30 @@ int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
 	unsigned long v = vector, flags;
+	DECLARE_BITMAP(wake, MLX5_PRISM_MAX_COMMANDS);
 	int i, n = 0;
 
+	bitmap_zero(wake, MLX5_PRISM_MAX_COMMANDS);
 	spin_lock_irqsave(&cmdq->lock, flags);
+	if (cmdq->mode == MLX5_PRISM_CMDQ_EVENT) {
+		/*
+		 * Event mode (T10): claim the pending bit — an issuer that
+		 * timed out and revoked it leaves 0 here and loses the race
+		 * by design (mlx5_core PENDING_COMP). The slot bit stays set:
+		 * the woken issuer reaps the descriptor and frees the slot,
+		 * so the irq side never touches issuer-owned mailboxes.
+		 */
+		for_each_set_bit(i, &v, cmdq->max_cmds) {
+			if (test_and_clear_bit(i, cmdq->pending)) {
+				__set_bit(i, wake);
+				n++;
+			}
+		}
+		spin_unlock_irqrestore(&cmdq->lock, flags);
+		for_each_set_bit(i, wake, cmdq->max_cmds)
+			complete(&cmdq->done[i]);
+		return n;
+	}
 	for_each_set_bit(i, &v, cmdq->max_cmds) {
 		if (test_and_clear_bit(i, cmdq->slots))
 			n++;
@@ -438,12 +525,13 @@ int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector)
 }
 
 /* EQ created: hold each regular slot until its completion EQE arrives. */
-void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev)
+void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev, bool event)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->cmdq.lock, flags);
-	dev->cmdq.mode = MLX5_PRISM_CMDQ_EQ_DEFERRED;
+	dev->cmdq.mode = event ? MLX5_PRISM_CMDQ_EVENT :
+				 MLX5_PRISM_CMDQ_EQ_DEFERRED;
 	spin_unlock_irqrestore(&dev->cmdq.lock, flags);
 }
 
@@ -451,14 +539,28 @@ void mlx5_prism_cmdq_eq_bound(struct mlx5_prism_dev *dev)
 void mlx5_prism_cmdq_eq_gone(struct mlx5_prism_dev *dev)
 {
 	struct mlx5_prism_cmdq *cmdq = &dev->cmdq;
+	DECLARE_BITMAP(wake, MLX5_PRISM_MAX_COMMANDS);
 	unsigned long flags;
 	int i;
 
+	bitmap_zero(wake, MLX5_PRISM_MAX_COMMANDS);
 	spin_lock_irqsave(&cmdq->lock, flags);
 	cmdq->mode = MLX5_PRISM_CMDQ_POLL_INLINE;
-	for (i = 0; i < cmdq->max_cmds - 1; i++)
+	for (i = 0; i < cmdq->max_cmds - 1; i++) {
 		__clear_bit(i, cmdq->slots);
+		/*
+		 * Force-wake event-mode sleepers (their EQE died with the
+		 * EQ): the woken invoke re-checks the slot owner — flipped
+		 * by the fw → normal completion path; still HW → the
+		 * timeout-leak path. Safe here because command flow is
+		 * single-threaded through probe/remove.
+		 */
+		if (test_and_clear_bit(i, cmdq->pending))
+			__set_bit(i, wake);
+	}
 	spin_unlock_irqrestore(&cmdq->lock, flags);
+	for_each_set_bit(i, wake, MLX5_PRISM_MAX_COMMANDS)
+		complete(&cmdq->done[i]);
 }
 
 int mlx5_prism_cmdq_selftest(struct mlx5_prism_dev *dev)

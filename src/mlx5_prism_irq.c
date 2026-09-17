@@ -2,10 +2,12 @@
 /*
  * mlx5_prism: MSI-X interrupt wiring.
  *
- * T04: allocate MSI-X vector(s) and register minimal counting-stub handlers
- * (kept masked with IRQF_NO_AUTOEN because no EQ is bound yet). T09 binds
- * the EQ to vector index 1, mirroring v4.19 mlx5_core (MLX5_EQ_VEC_CMD=1 —
- * vector 0 belongs to the pages EQ), so two vectors are allocated.
+ * T04: allocate MSI-X vector(s) with IRQF_NO_AUTOEN (no EQ bound yet).
+ * T09 bound the EQ to vector index 1 (v4.19 MLX5_EQ_VEC_CMD), keeping the
+ * handler a counter stub while consumption stayed in eq_poll. T10 makes
+ * the handler real (mlx5_eq_async_int shape): consume EQEs in hardirq,
+ * wake event-mode sleepers, self-disable on an empty-IRQ storm. The
+ * poll fallback (eq_mode=poll) keeps the T09 counting-stub behaviour.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -21,8 +23,38 @@
 static irqreturn_t mlx5_prism_irq_handler(int irq, void *dev_id)
 {
 	struct mlx5_prism_dev *dev = dev_id;
+	int eqes;
 
 	atomic_inc(&dev->irq.count);
+
+	/*
+	 * Poll fallback (T09 semantics): count only. Also covers spurious
+	 * or late IRQs around the EQ lifecycle.
+	 */
+	if (!dev->eq.event_mode || !READ_ONCE(dev->eq.created) ||
+	    READ_ONCE(dev->eq.storm_latched))
+		return IRQ_HANDLED;
+
+	eqes = mlx5_prism_eq_irq_consume(dev);
+	if (eqes) {
+		WRITE_ONCE(dev->eq.empty_irqs, 0);
+		return IRQ_HANDLED;
+	}
+
+	/*
+	 * Storm guard (T06's hard lesson): one empty IRQ is normal (event
+	 * aggregation races the arm doorbell), a solid stream means the
+	 * line is live but the ring never looks fresh — self-disable
+	 * before it starves the machine; the selftest's recreate ladder
+	 * re-enables with a fresh EQ.
+	 */
+	if (++dev->eq.empty_irqs > MLX5_PRISM_EQ_STORM_LIMIT) {
+		WRITE_ONCE(dev->eq.storm_latched, true);
+		disable_irq_nosync(irq);
+		dev_warn_ratelimited(&dev->pdev->dev,
+				     "EQ irq storm: %u+ empty interrupts, line self-disabled\n",
+				     MLX5_PRISM_EQ_STORM_LIMIT);
+	}
 	return IRQ_HANDLED;
 }
 
