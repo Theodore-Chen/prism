@@ -175,7 +175,7 @@ def main():
         issues, completes, eqs = parse_prism_file(path)
         p2, unp, orph = pair_p2(completes, eqs)
         n_cmd_eq = sum(1 for _, v, _, _ in eqs if v)
-        for _, _, t in eqs:
+        for _, _, _, t in eqs:
             type_counts[t] += 1
         print(f"{os.path.basename(path)}: issue={len(issues)} "
               f"complete={len(completes)} eq_event={len(eqs)} "
