@@ -88,9 +88,12 @@ stage1|full)
 	dmesg -c > /dev/null
 	insmod src/mlx5_prism.ko selftest=1
 	res $? "insmod"
-	check_event_load 1
 	rmmod mlx5_prism
 	res $? "rmmod"
+	# 判据在 rmmod 后全量核对：S4 的拆除证据（DESTROY_EQ/页回收）在
+	# rmmod 时才进 dmesg（stage1 首跑把检查放在 rmmod 前，白报 4 个
+	# FAIL——硬件侧拆除本就干净，黑匣子可证）。
+	check_event_load 1
 	;;
 esac
 
