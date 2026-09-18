@@ -793,6 +793,12 @@
 - **熔断防线的价值实证**：两次都在基线被污染前拦下（对照归档⑦——这条防线在 T11 修复后实测过，这次连拦两个版本的错误修复思路）。没有它，第一轮误诊会被写进基线成为"合法行为"。
 - **验证**：make 0 错误 + checkpatch 0 警告；DESIGN §7.3 协议改以门卫为不变量。待 rebaseline 三跑。
 
+#### T10 收官（2026-09-18，rebaseline 三跑 ALL GREEN）
+
+- **三跑全绿**：step2 双口差异全部落在预期族内（零 -110/泄漏/重建行——门卫生效的直接证据）；step4 同周期自洽零 diff；step5 G0-G4 全门禁通过。**事件模式基线落地：36 行/口**（旧 47 行——11 条 per-EQE dmesg 行退役，观测移交 tracepoint；新增 `EQ up (event mode)`/事件模式自检行，计数归一化 `(E events, H consumed in hardirq, I interrupts)`）。
+- **收尾**：task.json T10 → completed（出口判定逐项满足：往返 ≥99% 实测 106/106+、中断对账、无风暴无死机、轮询回退、100 压测、黑匣子、§7.2 清单回写）；t10_verify.sh 归档（scripts/archive/，加归档横幅）。
+- **任务总结**：MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core）转正为默认路径，轮询降级为 `eq_mode=poll` 回退；副产物三条——①自检耗时 ~3000×改善（2s/命令耐心窗 → ~6ms/口）；②backlog 位图别名竞态的发现与语义修复（owner 门卫），熔断防线两连拦实证价值；③事件模式 P1' 口径（doorbell→唤醒）由现有 tracepoint 自动承载，留 T16 复测。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

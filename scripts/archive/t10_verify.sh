@@ -1,4 +1,8 @@
 #!/bin/bash
+# [已归档 2026-09-18] T10 已完成（三档全绿 + 基线重采 ALL GREEN）。
+# 本脚本按当时仓库布局书写，事件模式验证流程已沉淀为基线 + r0_gate，
+# 不可直接重跑（判据针对 T10 转正窗口，勿跑后改）。
+#
 # t10_verify.sh — T10 事件模式分级放量验证（判据预登记，勿跑后改）。
 #
 # Usage: sudo bash scripts/gate/t10_verify.sh [stage1|stage2|stress|full]
