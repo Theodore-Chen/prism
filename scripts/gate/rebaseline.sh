@@ -1,5 +1,6 @@
 #!/bin/bash
-# rebaseline.sh — 基线重采一条龙（T10-prep 编码转正后的有意行为变更）。
+# rebaseline.sh — 基线重采一条龙（有意行为变更后的标准流程；先例：
+# T10-prep 编码转正、T10 事件模式转正）。
 #
 # 全部输出（含子脚本与门禁）落 /var/tmp/rebaseline_run.log，跑完把这一个
 # 文件交给分析即可，无需拷贝终端。
@@ -8,8 +9,8 @@
 #   1. t09_verify.sh 3     — 3 个新鲜 selftest=1 周期（口径与基线/门禁一致；
 #                            黑匣子 /var/tmp/t09_live.log）
 #   2. diff_baseline.sh      — 对比旧基线【预期 FAIL，差异应仅为已知变更】
-#      差异行逐条过预期族白名单：QUERY_EQ / EQ ready / eqe[N] /
-#      eq self-test 10/10 / DESTROY_EQ ok——任何族外行 = 行为漂移，
+#      差异行逐条过预期族白名单：QUERY_EQ / EQ ready / EQ up (event mode) /
+#      eqe[N] / eq self-test 10/10 / DESTROY_EQ ok——任何族外行 = 行为漂移，
 #      熔断退出，基线不动
 #   3. 族内差异确认后按 README 流程重采双口基线 + chown 回调用用户
 #   4. 重采后同周期自洽复验（必须 zero diff）
@@ -53,6 +54,7 @@ for PORT in 0 1; do
     BAD=$(grep '^[+-]' "$D" | grep -v -e '^+++' -e '^---' \
         | grep -v -e 'QUERY_EQ: fw reports' \
                   -e 'EQ ready:' \
+                  -e 'EQ up (event mode):' \
                   -e 'eqe\[[0-9]*\]:' \
                   -e 'eq self-test: 10/10' \
                   -e 'DESTROY_EQ ok:')

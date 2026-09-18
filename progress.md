@@ -773,6 +773,17 @@
 - **验证（无 sudo）**：make 0 错误；checkpatch 4 文件 0 错误 0 警告；t10_verify.sh bash -n + S2/S3 判据合成行干跑通过。
 - **待上机**：`sudo bash scripts/gate/t10_verify.sh stage1` → stage2 → stress → rebaseline.sh（事件模式转正=有意行为变更）。文档回写（DESIGN §5.3/§7、§10 P1' 事件口径注记）随验证数据。
 
+#### T10 硬件验证全绿 + 收官（2026-09-17）
+
+- **stage1（双口单载）**：S1/S2/S3/S5 首跑即绿——双口 `EQ up (event mode)` + 10/10 自检、**events==hardirq（11/加载）**、中断 10-11 ~ 事件 11、零风暴零投诉。4 个 S4 FAIL 系脚本时序 bug（检查在 rmmod 前而拆除证据 post-rmmod），黑匣子证实双口拆除干净（DESTROY_EQ ok + 2305/2305）；检查移到 rmmod 后（`7acb906`），stage1 无需重跑。
+- **stage2**：5/5 事件模式循环 + `eq_mode=poll` 回退对照通过（"(armed, poll fallback" + 轮询 10/10——T09 语义作为恢复手段保留，出口判据落定）。
+- **stress**：**100/100** insmod/rmmod 零失败零投诉（黑匣子 `/var/tmp/t10_live.log` 全程在案）。
+- **时序红利（顺带消解 T11 遗留观察）**：事件模式自检 ~6ms/口（黑匣子时间戳 298538.8146→.8201），对比轮询时代每命令烧满 2s 耐心窗（~18-20s/口）——约 3000 倍；"耐心窗掩盖提交时延"的问题域直接消失。
+- **事件数形态**：11/加载为主、聚合时 13（压测黑匣子实见）；S2 不变式 events==hardirq 恒成立；归一化已覆盖（`(E events, H consumed in hardirq, I interrupts)` + `DESTROY_EQ ... E events consumed`）。
+- **工具链就绪**：normalize.sh 新增事件模式行规则（干跑四形态验证）；rebaseline.sh 白名单扩 `EQ up (event mode):` 族；t09_verify.sh 头注释更新。
+- **文档回写**：DESIGN §5.3 阶段 B 落地注记（含"中断侧只 claim+complete、收尾在唤醒方"的有意偏差 + force_poll 两例外）、§7.2 复验条目、§7.3 事件模式转正/轮询降级为回退、§7.4 验证记录（106/106 往返）、§10.1 P1' 事件口径注记（T16 复测）。
+- **待收尾**：基线重采 `sudo bash scripts/gate/rebaseline.sh`（事件模式转正=有意行为变更；预期族已扩）→ 全绿后 T10 → completed、t10_verify.sh 移入 archive。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

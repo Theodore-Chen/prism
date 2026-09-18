@@ -13,13 +13,17 @@
 #   - caps[max]/caps[cur]/caps[post] hexdumps (bit-exact across 100
 #     cycles on FW 14.32.1908 — any mailbox/bit-layout drift shows here)
 #   - counts: boot pages=6, init pages=2299, teardown 2305/2305,
-#     log_sz=5/log_stride=6, eqn=4, 10/10 self-test, DESTROY events
-#   - eqe[N] vector bitmaps (slot allocation order drift would show)
+#     log_sz=5/log_stride=6, eqn=4, 10/10 self-test
+#   - "EQ up (event mode)" 的 eqn/entries/budget（T10 起事件模式为默认）
 #
 # (T10-prep) "(E events total, I interrupts)": one MSI-X can cover
 # several EQEs and the arm-time extra fires variably, so the two counts
-# are aggregation-random per load — normalized; the 10/10 and the
-# DESTROY counter stay anchored.
+# are aggregation-random per load — normalized.
+# (T10) event-mode counts likewise: self-test "(E events, H consumed in
+# hardirq, I interrupts)" and "DESTROY_EQ ok: ... E events consumed" —
+# backlog aggregation makes the per-load event count 11 or 13, hardirq
+# consumption always equals it; the per-EQE eqe[N] dmesg lines are gone
+# (hardirq hot path stays silent; tracepoints are the observability).
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -27,6 +31,8 @@ sed -e 's/^\[[^]]*\] //' \
     -e 's/\[mem 0x[0-9a-f]*-0x[0-9a-f]* [^]]*\]/[mem X]/g' \
     -e 's/ *[0-9]\+ ms/ T ms/g' \
     -e 's/([0-9]\+ events total, [0-9]\+ interrupts)/(E events total, I interrupts)/' \
+    -e 's/([0-9]\+ events, [0-9]\+ consumed in hardirq, [0-9]\+ interrupts)/(E events, H consumed in hardirq, I interrupts)/' \
+    -e 's/DESTROY_EQ ok: eq_number=\([0-9]*\), [0-9]* events consumed/DESTROY_EQ ok: eq_number=\1, E events consumed/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
           -e 'eqe\[0\.\.3\] head:' \

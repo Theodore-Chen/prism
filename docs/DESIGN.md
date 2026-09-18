@@ -314,11 +314,19 @@ rmb() → 读 out[] → 两层状态解析
   由 EQE 的 cmd_vector 位图经 mlx5_prism_cmdq_complete_slots() 释放；
   EQ 死亡 → forget_slots 一次清空（合并进 complete_slots 的全置位语义）。
 
-阶段 B（T10，镜像 mlx5_core 事件模式）：
+阶段 B（T10，2026-09-17 落地，镜像 mlx5_core 事件模式）：
   invoke 睡在完成量上；硬中断消费 EQE → vector → complete_slots()
-  → test_and_clear(PENDING) 抢占者负责收尾并 complete() 唤醒。
+  → test_and_clear(PENDING) 抢占者 complete() 唤醒。
   超时路径与真实完成的竞态由 PENDING 位 claim/revoke 裁决
   （对齐 mlx5_core cmd.c 的 MLX5_CMD_ENT_STATE_PENDING_COMP）。
+
+  落地偏差（有意）：抢占者（硬中断）只 claim + complete，**不收尾**——
+  读描述符输出、释放槽位、回收邮箱都由被唤醒的 invoke 执行。同步-only
+  驱动的简化：硬中断永不触碰 issuer 的邮箱与栈生命周期；claim/revoke
+  语义不变。另两条强制轮询例外（对齐 mlx5_core force_polling）：页命令
+  （fw 投页完成到 pages 向量，本驱动无 pages EQ）与 CREATE/DESTROY/
+  QUERY_EQ（自身 EQE 时序未定义）。`eq_mode=poll` 模块参数可整体退回
+  阶段 A 行为（T09 语义逐字保留）。
 ```
 
 `cmdq->mode` 由 eq 模块在创建/销毁时设置，cmdq 不再反向读取 `eq.created`（R0.3 解耦）。
@@ -424,40 +432,49 @@ SET_HCA_CAP 的语义在此固件上是**门闩而非字段写入**〔实证：S
 - 创建阶梯（log12/64pas → …）保留为防御性回退：rung0 自编码修正后 10/10 加载直接接受。
 - owner 谓词 `(owner&1) ^ !!(ci&nent)` 是 nent-通用式（与 mlx5_core eq.c 同构）——T09 在 nent=1 上"碰巧成立"，T10-prep 已在 nent=4096 上验证。
 
-### 7.2 事件投递模型（T10-prep 修订）
+### 7.2 事件投递模型（T10-prep 修订；T10 事件模式下复验成立）
 
 - 每条命令（含 NOP 0x80D / GEN_EQE 0x304 探针）生成 type 0x0a（命令完成）事件，**按序投递到连续条目**——T09 的"全部投递到 entry 0"是 1 条目环的当然结果，不是独立怪癖。
 - **数据先行、owner 后提交**（双 doorbell 序列）仍实证有效（T09）。提交时延分布待 T11 tracepoint 复测——T09 的 >500ms 长尾是在 1 条目环上测得的，是否随编码修正消失未决。
 - **~10% 激活率：翻案为编码伪影**。正确编码下 10/10 加载首次激活（对照：旧编码裸激活当次抽样 0/2，历史 ~10%）；destroy/recreate 恢复机制降级为防御性保留。
 - **中断真实点火**：正确 intr 绑定 + arm 后，MSI-X 计数 ≈ 事件数（10-11 : 10-11，stub handler 实测）；T09 的"中断不点火"系 intr 编码错位所致。
+- **T10 事件模式复验（2026-09-17，真硬件）**：以上各项在硬中断消费下全部保持——双口 10/10 自检、events==hardirq 消费数（11/加载，聚合时 13）、中断 10-12 ≈ 事件数、stage1+stage2+100 压测零风暴零投诉、拆除全量回收。每 EQE 的 dmesg 行被移除（硬中断热路径零 printk，tracepoint 承担观测）；积压聚合（11↔13）为正常形态，归一化覆盖。
 
-### 7.3 消费协议（轮询，现状）
+### 7.3 消费协议（事件模式为默认；轮询为 eq_mode=poll 回退）
 
 ```
-eq_poll():
-  循环直至 idle 或超时（patience=2000ms）：
-    walk ring 至 owner 失效：
-      dma_rmb()（先见 owner 翻转，再读事件内容）
-      type 0x0a → vector 位图 → cmdq_complete_slots(vector)
-    写 +0x48（commit ci）→ 写 +0x40（arm），每轮都要，wmb 前置
-  静默 → dump 环头 4 项 + owner 行（超时取证）
+事件模式（T10 起，默认）：
+  invoke: doorbell → 置 pending → wait_for_completion_timeout
+  硬中断 handler: 计数 → EQE 循环（owner 谓词 + dma_rmb + budget 128）
+    → type 0x0a → complete_slots(vector): claim pending → complete()
+    → 退出前一次 arm doorbell（+0x40）
+  被唤醒的 invoke: 重读描述符输出 → 释放槽位（收尾在进程侧）
+  防护：风暴护栏（连续 1000 空中断 → disable_irq_nosync 自保）
+        超时竞态：pending 位 claim/revoke（抢到=超时泄漏，输=补收）
+
+轮询回退（T09 语义保留）：
+  eq_poll():
+    循环直至 idle 或超时（patience=2000ms）：
+      walk ring 至 owner 失效：
+        dma_rmb()（先见 owner 翻转，再读事件内容）
+        type 0x0a → vector 位图 → cmdq_complete_slots(vector)
+      写 +0x48（commit ci）→ 写 +0x40（arm），每轮都要，wmb 前置
+    静默 → dump 环头 4 项 + owner 行（超时取证）
 ```
 
 slot 协议不变量：EQ 存活期间，非页命令 slot 从 doorbell 起保持 busy，直到对应 EQE 的 vector 位到来；EQ 死亡 → 全部清除（页命令 slot 走内联生命周期，页命令固定占最高槽，防饿死——对齐 mlx5_core page_queue 语义）。owner 谓词与双 doorbell 序列在 nent=4096 环上验证不变（T10-prep）。
 
-### 7.4 T10 事件模式（下一阶段，严格镜像 mlx5_core）
+### 7.4 T10 事件模式（已落地，2026-09-17 硬件验证通过）
 
-按"known-good first"纪律，T10 不发明路径，复刻 mlx5_core 官方形态：
+按"known-good first"纪律复刻 mlx5_core 官方形态（7.3 事件模式块为现行协议），验证记录：
 
-```
-MSI-X handler（最小化：ack + 唤醒/分发）
-  → EQE 消费循环（budget 上限 + dma_rmb + 消费后重 arm）
-  → type 0x0a → cmdq_complete_slots(vector) → complete() 唤醒 invoke
-防护：printk 限流（dev_warn_ratelimited）、风暴护栏（连续空中断超限
-→ disable_irq_nosync 自保）、claim/revoke 竞态裁决（§5.3 阶段 B）
-```
+- **stage1**（双口单载）：S1 事件模式 10/10 自检 ✓、S2 events==hardirq（11/加载，聚合 13）✓、S3 中断 10-12 ~ 事件 11-13 ✓、S5 零风暴零投诉 ✓（S4 拆除证据在黑匣子：DESTROY_EQ ok + 2305/2305 双口全量）。
+- **stage2**：5/5 事件模式循环 + `eq_mode=poll` 回退对照通过（T09 轮询语义作为恢复手段保留）。
+- **stress**：100/100 insmod/rmmod，零失败零投诉。
+- **时序红利**：自检从轮询时代每命令烧满 2s 耐心窗（~18-20s/口）降至 **~6ms/口**——T11 遗留的"耐心窗掩盖提交时延"观察就此消解；P1' 事件口径（doorbell→唤醒）由现有 tracepoint 自动承载，T16 复测。
+- **行为变更**：每 EQE 的 dmesg 行移除（热路径零 printk）；基线随转正重采（预期族白名单已扩）。
 
-**验收重定义**：中断计数 >0 且与事件数可对账（不再要求 ≈ 命令数——聚合下二者本可不等）；事件模式往返成功率 ≥ 99%；轮询路径降级为模块参数控制的恢复手段。**"中断 >0"的前置风险已提前消解**：T10-prep 在轮询 + 计数 stub 形态下已见 MSI-X ≈1 次/事件，T10 剩余风险面收窄为硬中断上下文工程（消费循环/唤醒/防护）。若事件模式行为与本档 §7.2 清单不一致，逐项重验后更新本档。
+**验收（对照重定义）**：中断计数 >0 且与事件数可对账 ✓；事件模式往返成功率 ≥99%（实测 106/106）✓；轮询回退参数可用 ✓。
 
 ---
 
@@ -532,7 +549,7 @@ v1 勘误：v1 草案里 TP_printk 引用了不存在的 `mlx5_prism_cmdq_opcode
 
 | # | 指标 | mlx5_core 基准 | prism 实测（T11，n=1008/264） | 说明 |
 |---|------|---------------|-----------|------|
-| P1' | 命令描述符往返（doorbell→status_own） | p50 ~5µs（kretprobe 实测，n=20764） | p50=76.5µs，p90=1.76ms，p99=238ms，max=239ms | 轮询 vs 事件口径，仅同数量级对比。长尾确定性：每口 6 个慢样本（QUERY_HCA_CAP ~1.7ms、init 页三连 ~9-12ms、**INIT_HCA ~230-240ms**、CREATE_EQ ~1.8ms），系固件真实处理时间（轮询量子仅 10-20µs） |
+| P1' | 命令描述符往返（doorbell→status_own） | p50 ~5µs（kretprobe 实测，n=20764） | 轮询口径：p50=76.5µs，p90=1.76ms，p99=238ms，max=239ms | 轮询 vs 事件口径，仅同数量级对比。轮询口径长尾确定性：每口 6 个慢样本（QUERY_HCA_CAP ~1.7ms、init 页三连 ~9-12ms、**INIT_HCA ~230-240ms**、CREATE_EQ ~1.8ms），系固件真实处理时间（轮询量子仅 10-20µs）。**T10 起事件模式为默认**：latency_ns 自动变为 doorbell→唤醒 口径，T16 复测 |
 | P2' | 事件提交延迟（owner 翻转→EQE 消费） | — | p50=1.0µs，p90=105µs，p99=159µs，max=162µs | **判据C 裁决（预登记）：长尾消失**——1 条目环时代的 >500ms 长尾随 4096 深环消失，n=264 全配对零孤儿。典型 1µs=EQE 在 owner 翻转时已 staged；~105-160µs 为突发首条（QUERY_EQ 积压事件） |
 | P3 | 固件引导时间 | ~265ms | ≤ 300ms（实测 258-277ms） | 不变（注：INIT_HCA 的 ~240ms 占大头，与 P1' 长尾同源） |
 | P4 | 中断响应 | ~5µs | T10 后测 | 轮询阶段无意义 |
