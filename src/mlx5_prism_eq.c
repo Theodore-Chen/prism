@@ -355,6 +355,22 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 
 		/* Initial arm (mlx5_eq_enable's eq_update_ci(eq,1)). */
 		mlx5_prism_eq_update_ci(dev, true);
+		/*
+		 * Drain-before-enable (event mode): the force-polled
+		 * EQ-lifecycle commands release their slot inline, but their
+		 * completion EQE is still in flight. If it gets consumed after
+		 * the caller binds EVENT mode, its vector bit aliases the
+		 * pending bit of whatever command next takes that slot — the
+		 * woken issuer reads an unflipped owner and leaks the slot
+		 * (rebaseline 2026-09-18: command 1/10 -110 right after every
+		 * fresh CREATE_EQ/QUERY_EQ pair; recreate does not help, it
+		 * mints a new backlog EQE). Consuming the backlog here, with
+		 * the line still masked, closes the window deterministically
+		 * and makes the backlog consumption a visible, ordered dmesg
+		 * line instead of a race.
+		 */
+		if (eq->event_mode)
+			mlx5_prism_eq_poll(dev, 0);
 		return 0;
 	}
 

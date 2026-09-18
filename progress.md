@@ -784,6 +784,13 @@
 - **文档回写**：DESIGN §5.3 阶段 B 落地注记（含"中断侧只 claim+complete、收尾在唤醒方"的有意偏差 + force_poll 两例外）、§7.2 复验条目、§7.3 事件模式转正/轮询降级为回退、§7.4 验证记录（106/106 往返）、§10.1 P1' 事件口径注记（T16 复测）。
 - **待收尾**：基线重采 `sudo bash scripts/gate/rebaseline.sh`（事件模式转正=有意行为变更；预期族已扩）→ 全绿后 T10 → completed、t10_verify.sh 移入 archive。
 
+#### T10 遗留竞态：rebaseline 熔断拦下的真回归（2026-09-18，已修）
+
+- **现象**：rebaseline 首跑 step2 熔断——口 0 自检 cmd 1/10 与 2/10、口 1 的 1/10 各一次 `-110`（`opcode 0x107 ... no ownership handover ... slot 0 leaked` → recreate 恢复 → 终局 10/10）。族外行熔断正确触发，基线未被污染（对照归档⑦"没被测试过的熔断防线等于没有"——这条防线在 T11 修复后经过实测，这次真的拦下了一个 106 次验证全绿都没暴露的时序洞）。
+- **根因（backlog EQE 位图别名）**：force_poll 的 QUERY_EQ 内联释放 slot 0，但其完成 EQE（vector bit 0）在途；若它落在 bind EVENT 之后才被硬中断消费，bit 0 认领"下一个坐上 slot 0 的命令"的 pending 位——提前唤醒、owner 未翻转、泄漏。106 次 T10 验证全绿是时序运气（积压 EQE 的中断通常在 bind 与首条命令间的微秒窗先到）；recreate 治不了——每次 recreate 铸出新的积压 EQE，故口 0 连中两次。失败全部紧跟新鲜 CREATE_EQ/QUERY_EQ 对，即此指纹。
+- **修复（确定性排空）**：eq_create 末尾、中断仍掩蔽时（无人竞争消费），event 模式下用 `eq_poll(dev, 0)` 进程上下文排空积压，再由 caller enable+bind——窗口关闭与调度时序无关；积压消费从"竞态里的一次隐形 irq"变为固定位置的可见 dmesg `eqe[0]` 行（恰好回归 `eqe[N]` 预期族）。poll 模式不受影响（event 门控，T09 形状逐字保留）。
+- **验证**：make 0 错误 + checkpatch 0 警告；DESIGN §7.3 协议块补排空步骤。待 rebaseline 重跑全绿收尾。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
