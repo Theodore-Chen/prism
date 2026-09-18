@@ -784,12 +784,14 @@
 - **文档回写**：DESIGN §5.3 阶段 B 落地注记（含"中断侧只 claim+complete、收尾在唤醒方"的有意偏差 + force_poll 两例外）、§7.2 复验条目、§7.3 事件模式转正/轮询降级为回退、§7.4 验证记录（106/106 往返）、§10.1 P1' 事件口径注记（T16 复测）。
 - **待收尾**：基线重采 `sudo bash scripts/gate/rebaseline.sh`（事件模式转正=有意行为变更；预期族已扩）→ 全绿后 T10 → completed、t10_verify.sh 移入 archive。
 
-#### T10 遗留竞态：rebaseline 熔断拦下的真回归（2026-09-18，已修）
+#### T10 遗留竞态：rebaseline 熔断两连拦（2026-09-18，语义门卫修复）
 
-- **现象**：rebaseline 首跑 step2 熔断——口 0 自检 cmd 1/10 与 2/10、口 1 的 1/10 各一次 `-110`（`opcode 0x107 ... no ownership handover ... slot 0 leaked` → recreate 恢复 → 终局 10/10）。族外行熔断正确触发，基线未被污染（对照归档⑦"没被测试过的熔断防线等于没有"——这条防线在 T11 修复后经过实测，这次真的拦下了一个 106 次验证全绿都没暴露的时序洞）。
-- **根因（backlog EQE 位图别名）**：force_poll 的 QUERY_EQ 内联释放 slot 0，但其完成 EQE（vector bit 0）在途；若它落在 bind EVENT 之后才被硬中断消费，bit 0 认领"下一个坐上 slot 0 的命令"的 pending 位——提前唤醒、owner 未翻转、泄漏。106 次 T10 验证全绿是时序运气（积压 EQE 的中断通常在 bind 与首条命令间的微秒窗先到）；recreate 治不了——每次 recreate 铸出新的积压 EQE，故口 0 连中两次。失败全部紧跟新鲜 CREATE_EQ/QUERY_EQ 对，即此指纹。
-- **修复（确定性排空）**：eq_create 末尾、中断仍掩蔽时（无人竞争消费），event 模式下用 `eq_poll(dev, 0)` 进程上下文排空积压，再由 caller enable+bind——窗口关闭与调度时序无关；积压消费从"竞态里的一次隐形 irq"变为固定位置的可见 dmesg `eqe[0]` 行（恰好回归 `eqe[N]` 预期族）。poll 模式不受影响（event 门控，T09 形状逐字保留）。
-- **验证**：make 0 错误 + checkpatch 0 警告；DESIGN §7.3 协议块补排空步骤。待 rebaseline 重跑全绿收尾。
+- **现象（两轮同指纹）**：rebaseline 首跑（08:03）口 0 自检 cmd 1/10 与 2/10、口 1 的 1/10 各一次 `-110`（`opcode 0x107 ... no ownership handover ... slot 0 leaked` → recreate 恢复 → 终局 10/10）；族外行熔断正确触发，基线未污染。失败全部紧跟新鲜 CREATE_EQ/QUERY_EQ 对。
+- **第一轮误诊**：判为"backlog EQE 在 bind 后被消费时别名 slot 0 的 pending"，修以"create 末尾排空"（eq_poll(dev,0)）。**二次熔断证伪**（09:55）——同指纹复发。事后看漏了两点：①eq_poll(dev,0) 是单次迭代（walk→doorbell→break），QUERY_EQ 的 EQE owner 在 walk 时还没翻转，排空空转，其 +8 发布反而可能推迟了积压的 MSI-X 交付，把竞态从偶发变成必发；②时序类修复对这种调度竞态本来就不成立——积压 EQE 在 bind 时的存活与否、中断与首命令谁先到，都不受我们控制。
+- **真根因（backlog 位图别名，判断对了一半）**：force_polled QUERY_EQ 内联释放 slot 0，但其完成 EQE（bit 0）在途；落在 bind EVENT 之后被消费时，bit 0 认领"下一个坐上 slot 0 的命令"的 pending 位——提前唤醒、owner 未翻转、泄漏。106 次 T10 验证全绿是时序运气（昨日的 green/fail 分布随脚本负载形态漂移即为证）。
+- **语义修复（owner 门卫，与调度时序无关）**：固件先写输出并翻转 slot owner、后投递 EQE（posted-write 有序 + walk 的 dma_rmb 保证此可见序）——故"EQE 已到而 slot owner 仍为 HW"在构造上不可能属于当前占用者，必为前任的迟到 EQE。complete_slots 的 claim 前加门卫：owner 未翻转即跳过（真完成的 EQE 还在路上）。门卫同时覆盖未来任何 force_polled/复用组合的别名形态；对"命令真完成但先被别名 EQE 唤醒"的残余情形也安全（owner 已翻转=输出有效，收割正确，只是完成归因到了别的 EQE）。drain 保留为 best-effort 观测（偶尔提前消费积压），不再承重。
+- **熔断防线的价值实证**：两次都在基线被污染前拦下（对照归档⑦——这条防线在 T11 修复后实测过，这次连拦两个版本的错误修复思路）。没有它，第一轮误诊会被写进基线成为"合法行为"。
+- **验证**：make 0 错误 + checkpatch 0 警告；DESIGN §7.3 协议改以门卫为不变量。待 rebaseline 三跑。
 
 ## 修改 DESIGN.md 的记录
 

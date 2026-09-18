@@ -503,15 +503,29 @@ int mlx5_prism_cmdq_complete_slots(struct mlx5_prism_dev *dev, u32 vector)
 		 * by design (mlx5_core PENDING_COMP). The slot bit stays set:
 		 * the woken issuer reaps the descriptor and frees the slot,
 		 * so the irq side never touches issuer-owned mailboxes.
+		 *
+		 * Alias guard: the fw flips the slot owner before posting
+		 * the EQE, and posted-write ordering (plus the walk's
+		 * dma_rmb) makes that flip visible here before the EQE is.
+		 * An EQE whose slot still reads HW-own is therefore a late
+		 * completion of a PREVIOUS occupant — e.g. a force-polled
+		 * EQ-lifecycle command whose inline-released slot has been
+		 * reused — and must not wake the current sleeper. Skip it;
+		 * the real EQE for this command is still in flight.
 		 */
 		for_each_set_bit(i, &v, cmdq->max_cmds) {
+			struct mlx5_prism_cmd_layout *lay =
+				cmdq->buf + (i << cmdq->log_stride);
+
+			if (READ_ONCE(lay->status_own) & MLX5_PRISM_CMD_OWNER_HW)
+				continue;
 			if (test_and_clear_bit(i, cmdq->pending)) {
 				__set_bit(i, wake);
 				n++;
 			}
 		}
 		spin_unlock_irqrestore(&cmdq->lock, flags);
-		for_each_set_bit(i, wake, cmdq->max_cmds)
+		for_each_set_bit(i, wake, MLX5_PRISM_MAX_COMMANDS)
 			complete(&cmdq->done[i]);
 		return n;
 	}

@@ -444,18 +444,21 @@ SET_HCA_CAP 的语义在此固件上是**门闩而非字段写入**〔实证：S
 
 ```
 事件模式（T10 起为默认）：
-  create 末尾（中断仍掩蔽）：排空积压 EQE（进程上下文 walk 一次）——
-    force_polled 命令（QUERY_EQ 等）内联释放槽位但 EQE 在途，若在
-    bind 之后才被消费，其 vector 位会别名"下一个坐上该槽的命令"的
-    pending 位（提前唤醒 + owner 未翻转 + 泄漏；2026-09-18 实证）。
-    bind 前排空使窗口确定关闭，积压消费成为固定位置的可见 dmesg 行。
+  create 末尾（中断仍掩蔽）：best-effort 排空积压 EQE（eq_poll(dev,0)
+    单次 walk——观测用，不承重；EQE owner 何时翻转不受驱动控制）。
   invoke: doorbell → 置 pending → wait_for_completion_timeout
   硬中断 handler: 计数 → EQE 循环（owner 谓词 + dma_rmb + budget 128）
-    → type 0x0a → complete_slots(vector): claim pending → complete()
+    → type 0x0a → complete_slots(vector): **owner 门卫**（固件先翻转
+    slot owner 后投递 EQE，posted-write 有序 + dma_rmb 保证此可见序；
+    EQE 到而 owner 仍 HW = 前任占用者的迟到 EQE 在冒名——跳过不唤醒，
+    真完成的 EQE 还在路上。2026-09-18 两轮熔断实证的别名竞态，
+    门卫与调度时序无关地关闭它）→ claim pending → complete()
     → 退出前一次 arm doorbell（+0x40）
   被唤醒的 invoke: 重读描述符输出 → 释放槽位（收尾在进程侧）
   防护：风暴护栏（连续 1000 空中断 → disable_irq_nosync 自保）
         超时竞态：pending 位 claim/revoke（抢到=超时泄漏，输=补收）
+        位图别名：owner 门卫（force_polled 命令内联释放槽位但 EQE
+        在途，迟到 EQE 的 vector 位会指向复用后的槽——门卫拦之）
 
 轮询回退（T09 语义保留）：
   eq_poll():
