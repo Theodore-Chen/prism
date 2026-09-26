@@ -66,6 +66,7 @@
 
 /* ACCESS_REG register ids (PRM §21, mlx5 register enum). */
 #define MLX5_PRISM_REG_HOST_ENDIANNESS	0x7004
+#define MLX5_PRISM_REG_PPCNT		0x5008
 
 /* EQ / UAR (PRM §8 / mlx5 eq.c). */
 #define MLX5_PRISM_CMD_OP_CREATE_EQ	0x301
@@ -385,6 +386,14 @@ int mlx5_prism_fw_bootstrap(struct mlx5_prism_dev *dev);
 void mlx5_prism_fw_teardown(struct mlx5_prism_dev *dev);
 void mlx5_prism_fw_profile_defaults(struct mlx5_prism_dev *dev);
 bool mlx5_prism_fw_cmd_allowed(struct mlx5_prism_dev *dev, u16 opcode);
+/*
+ * Generic ACCESS_REG window (mlx5_core's mlx5_core_access_reg): one
+ * register image in, one image back; op_mod is derived from `write`.
+ * The register image header (e.g. PPCNT local_port/grp) is built by the
+ * caller from the fmt.h offset table.
+ */
+int mlx5_prism_access_reg(struct mlx5_prism_dev *dev, u16 reg_id, bool write,
+			  u32 arg, const u8 *in_reg, u8 *out_reg, u16 reg_len);
 
 int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
@@ -399,5 +408,8 @@ extern u32 mlx5_prism_eq_engagement_retries;
 
 int mlx5_prism_irq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);
+
+/* T12: PPCNT read + parse (selftest one-shot; T13 adds the monitor). */
+int mlx5_prism_phy_selftest(struct mlx5_prism_dev *dev);
 
 #endif /* __MLX5_PRISM_H */

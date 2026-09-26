@@ -1219,53 +1219,58 @@
       "learning": {
         "objective": "理解 ACCESS_REG 协议和 PHY 寄存器间接访问",
         "concepts": [
-          "ACCESS_REG (opcode 0x805)：通用寄存器间接访问命令",
-          "PPCNT (register ID 0x5008)：Port Physical Counter register",
+          "ACCESS_REG (opcode 0x805)：通用寄存器间接访问命令——op_mod 0=写/1=读，argument @bytes[12:16]，register_id @bytes[10:12]，寄存器镜像 @byte16 起（mlx5_core port.c mlx5_core_access_reg）",
+          "PPCNT (register ID 0x5008)：256B 寄存器——local_port@b1、grp@b3[5:0]、clr@b4[7]（prism 恒 0）、计数器集 @b8（h/l be64 对）；双 PF 形态下每 dev 查 local_port=1",
           "为什么 PHY 计数器不能 MMIO（在 NIC 内部寄存器空间，不暴露给 BAR）",
-          "ACCESS_REG 的 in/out mailbox layout（reg_id + reg_data）",
-          "pre-FEC BER / FEC corrected/uncorrected 字段的语义"
+          "判据勘误（2026-09-26 功课）：pre_fec_ber 非硬件字段——BER 由 grp 0x16 (phy_symbol_errors/phy_received_bits) 推导，而 grp 0x16 需 PCAM 能力位（CX5+）；CX4 Lx pre-PCAM 可用组 0x0/0x1/0x2/0x5/0x10/0x12，BER 推导移交 T13",
+          "grp 0x12 字段语义：symbol_errors / sync_headers_errors / fc_fec_corrected(uncorrectable)_blocks_lane0-3 / rs_fec_corrected(uncorrectable)_blocks / link_down_events；grp 0x0 的 a_symbol_error_during_carrier 即 ethtool rx_symbol_err_phy"
         ],
         "keywords": [
           "ACCESS_REG",
           "PPCNT",
           "PHY 计数器",
-          "pre-FEC BER",
-          "FEC"
+          "FEC",
+          "ethtool 交叉验证"
         ],
         "mlx5_reference": [
           {
-            "file": "cmd.c",
-            "focus": "mlx5_access_reg 调用方式（如 port_ptys / port_ppcnt）"
+            "file": "port.c",
+            "focus": "mlx5_core_access_reg：16B 头 + 寄存器镜像、op_mod=!write、argument 透传"
           },
           {
-            "file": "port.c（如有）或 en/port.c",
-            "focus": "Mellanox 怎么读 PHY 计数器并暴露给 ethtool"
+            "file": "en_stats.c",
+            "focus": "PPCNT 组读取（802_3/phy 组 update）与 PCAM 门卫（MLX5_BASIC_PPCNT_SUPPORTED）、ethtool -S 名字表、fec_set_rs/fc_stats 的 grp 0x12 用法"
           }
         ],
         "reflection_questions": [
           "为什么 PHY 计数器不能 MMIO？硬件设计上的考量？",
-          "pre-FEC BER vs post-FEC BER 的意义？哪个更能反映链路质量？",
-          "ACCESS_REG 怎么区分读 vs 写（op_mod）？"
+          "pre-FEC BER vs post-FEC BER 的意义？哪个更能反映链路质量？（结合勘误：BER 是推导量不是寄存器字段）",
+          "ACCESS_REG 怎么区分读 vs 写（op_mod）？为什么 clr 必须恒 0？"
         ]
       },
-      "goal": "通过 ACCESS_REG 读到 PPCNT 数据，dmesg 打印 pre_fec_ber 等数值",
-      "context": "本 task 是验证 #1 第二层（CMDQ 读寄存器）。注意 PPCNT 是 0x5008，不是任意寄存器号。读出的数值要和 ethtool -S 交叉验证。",
+      "goal": "通过 ACCESS_REG 读到 PPCNT 数据，dmesg 打印 symbol_errors/fec_corrected 等原始计数器，并与 ethtool -S 交叉对账（判据已按 CX4 Lx 实际能力修订，见 context）",
+      "context": "本 task 是验证 #1 第二层（CMDQ 读寄存器）。判据修订（2026-09-26，用户拍板）：原 'pre_fec_ber=X 量级 1e-15~1e-5' 按原语义不可达成——pre_fec_ber 非硬件字段，BER 推导组 grp 0x16 需 PCAM（CX5+），CX4 Lx pre-PCAM。改为原始计数器判据（J1-J6，预登记于 scripts/gate/t12_verify.sh 头部）：J1 双口 grp 0x12 status=0 且 tslc 非零非全F；J2 双口 grp 0x00 解析成功；J3 ethtool 同名计数器对账（tx/rx_packets_phy、rx_symbol_err_phy、link_down_events_phy；V_prism ≥ V_mlx5 单调存活，或分支二同驱动单调）；J4 grp 0x16 探测入档案（失败不阻塞）；J5 行为保持（默认 probe 零 PHY 行 + t09 20 循环 + diff_baseline 差异仅 PHY 行族）；J6 非全0/全F 的链路感知裁决。DESIGN §8.1/8.3/10.1 已同步修订（v2.2）。one-shot 读取走 selftest=1（R0.5 纪律），T13 再上定时器。 执行更新（2026-09-26 上机）：硬件判据全过——J1 tslc=7/8（活性成立）；J2 全零（空闲端口合法）；J3 branch-1 弱形式通过（双口链路 down，锚点 0==0；tslc 新鲜说明计数器时钟随引导重启，跨驱动存活未证明，见 DESIGN §8.1 现象学）；J4 判决推翻预期——FW 14.32.1908 接受 grp 0x16 且计数器活跃（rx_bits=200e6/225e6 按标称线率累积，sym_err=0），PCAM 能力位谎报缺失、固件行为先行，T13 可用真分母推导 BER；J5a 默认 probe 零 PHY 行、J5b 20/20 循环零投诉、J5c 差异全部落在 PHY PPCNT 行族（脚本汇总行一处布尔取反 bug 已修，两口分项判定与 diff 内容为证）。黑匣子 /var/tmp/t12_live.log 全程在案。",
       "steps": [
-        "1. 实现 mlx5_prism_access_reg(reg_id, in_buf, in_len, out_buf, out_len, write)",
-        "2. 构造 PPCNT 请求（指定 port、counter group）",
-        "3. 解析响应：pre_fec_ber, symbol_error, fec_corrected, fec_uncorrectable",
-        "4. probe 末尾调用一次验证",
-        "5. 与 ethtool -S（mlx5_core 加载时）对比"
+        "1. fmt.h：PPCNT 偏移表（负载相对）+ prism_ppcnt_ctr64/set_grp + ctr 解码（L3 禁触线格式的合规通道，eqc readback 先例）",
+        "2. fw.c：通用 mlx5_prism_access_reg(reg_id, write, arg, in_reg, out_reg, reg_len)；host_endianness 重构为调它（字节级不变，基线门禁覆盖）",
+        "3. phy.c：ppcnt_read(grp)（clr 恒 0）+ 解析 + selftest（0x12/0x00 读取打印 + 0x16 探测）；pci.c selftest 块尾挂接",
+        "4. scripts/test/fmt_equiv_check.c 增补 PPCNT 断言（ifc 代数等价：头字段编码/偏移几何/ctr64 往返）",
+        "5. scripts/gate/t12_verify.sh：Phase A mlx5_core ethtool 采集 → Phase B prism selftest 读数 → Phase C J1-J6 判定 → Phase D 行为保持（20 循环 + diff_baseline）",
+        "6. 上机全绿后 rebaseline（normalize.sh 归一化 PPCNT 计数值 + rebaseline.sh 白名单加 PHY 行族）"
       ],
       "exit_criteria": {
-        "compile": "make modules 通过",
-        "load": "dmesg 含 'PHY PPCNT: pre_fec_ber=X, fec_corrected=Y'",
+        "compile": "make modules 通过，checkpatch 无 ERROR/WARNING",
+        "load": "selftest=1 下 dmesg 双口各含 'PHY PPCNT(0x12): tslc=...' 与 'PHY PPCNT(0x00): tx_ok=...' 行",
         "functional": [
-          "数值在合理范围（pre_fec_ber 量级 1e-15 到 1e-5）",
-          "与 mlx5_core ethtool -S 同数量级"
+          "J1/J2：双口 grp 0x12/0x00 读 status=0，tslc 非零非全F（J1）",
+          "J3：与 mlx5_core ethtool -S 同名计数器对账——V_prism ≥ V_mlx5（跨驱动单调存活）或分支二同驱动单调",
+          "J4：grp 0x16 探测行在案（实测：FW 接受且计数器活跃——真分母可用，'预期拒绝'被推翻）",
+          "J5：默认 probe 零 PHY 行；t09 20 循环全绿；diff_baseline 差异仅 PHY PPCNT 行族"
         ],
         "manual_checks": [
-          "数值非全 0 / 全 F（确认真的读到了数据）"
+          "J6：数值非全 0/全 F 的链路感知裁决（链路 up 全零需 ethtool --show-fec 同零佐证）",
+          "黑匣子记录器全程在案（/var/tmp/t12_live.log）",
+          "BER 推导口径（0x16 不可用时的线速×时间估算法）已写入 DESIGN §8.3"
         ]
       }
     },

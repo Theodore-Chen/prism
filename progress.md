@@ -799,9 +799,26 @@
 - **收尾**：task.json T10 → completed（出口判定逐项满足：往返 ≥99% 实测 106/106+、中断对账、无风暴无死机、轮询回退、100 压测、黑匣子、§7.2 清单回写）；t10_verify.sh 归档（scripts/archive/，加归档横幅）。
 - **任务总结**：MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core）转正为默认路径，轮询降级为 `eq_mode=poll` 回退；副产物三条——①自检耗时 ~3000×改善（2s/命令耐心窗 → ~6ms/口）；②backlog 位图别名竞态的发现与语义修复（owner 门卫），熔断防线两连拦实证价值；③事件模式 P1' 口径（doorbell→唤醒）由现有 tracepoint 自动承载，留 T16 复测。
 
+### T12-phy-access-reg——ACCESS_REG 通用化 + PPCNT 读取（2026-09-26，硬件全绿，待 rebaseline）
+
+- **判据修订（开工前拍板）**：功课发现 `pre_fec_ber` 非硬件字段——内核驱动无此名，BER 由 grp 0x16（phy_symbol_errors/phy_received_bits）推导，而 0x16 需 PCAM 能力位（CX5+），CX4 Lx pre-PCAM 预期不可用。原出口判据"pre_fec_ber 量级 1e-15~1e-5"按原语义不可达成，改为原始计数器判据 J1-J6（预登记于 t12_verify.sh 头部），BER 推导移交 T13。DESIGN 升 v2.2（§8.1 勘误、§8.3 输入源、§10.1 C4 改单调性口径）。
+- **实现**（驱动侧 ~280 行，判据预登记/黑匣子/mktemp 惯例全套）：①`mlx5_prism_access_reg()` 通用 wrapper（fw.c，镜像 mlx5_core port.c：op_mod=!write、reg_id@10:12、argument@12:16、寄存器镜像@16 起），host_endianness 重构为走它（字节级不变）；②PPCNT 偏移表进 fmt.h（256B 镜像相对约定 + `prism_ppcnt_ctr64/set_grp`，L3 禁触线格式的合规通道，eqc readback 先例）；③phy.c（新，151 行，L3）：`ppcnt_read(grp)`（clr 恒 0——读不得清零固件计数器）+ selftest（0x12/0x00 读取打印 + 0x16 探测），0x12 以 tslc 非零+非全F 做活性门卫，0x00 只拦全 F（空闲端口全零合法）；④pci.c selftest 块尾挂接，默认 probe 零变化；⑤fmt_equiv_check.c 增补 PPCNT 断言（头字段 ifc 代数等价/15 个偏移几何/ctr64 千次随机往返，ALL EQUIVALENT）。
+- **上机结果（/var/tmp/t12_run.log，黑匣子 /var/tmp/t12_live.log 全程在案）**：硬件判据全过——J1 双口 0x12 status=0 且 tslc=7/8（活性成立）；J2 双口 0x00 解析成功（全零，链路 down 合法）；J3 branch-1 弱形式通过（双口链路 down，四锚点 0==0）；J4 判决见下；J5a 默认 probe 零 PHY 行；J5b t09 二十循环 20/20 零投诉；J5c 双口 diff 差异恰好各 3 行、全部在 PHY PPCNT 行族内（脚本汇总行一处 `$((! BAD))` 布尔取反 bug 打出假 FAIL，两口分项判定与 diff 内容为证，已修）。normalize.sh 已加 PHY 行归一化规则（干跑验证：计数器→占位符、组号/eqn 锚点不动），rebaseline.sh 白名单已扩 PHY 族。
+- **硬件发现一（J4 判决，推翻预期）**：FW 14.32.1908 **接受 grp 0x16 且计数器活跃**——双口 `rx_bits=200e6/225e6`、`sym_err=0`、`corr_bits=0`。PCAM 能力位为 0（mlx5_core 因此对 CX4 Lx 从不读 0x16）但固件照常维护并放行：**能力位谎报缺失，固件行为先行**（怪癖档案级事实，已记 DESIGN §8.1）。T13 直接用真分母推导 pre-FEC BER，线速×时间估算法降为 fallback。
+- **硬件发现二（tslc/rx_bits 现象学）**：两计数器组 tslc 在读取时仅 7/8 ms，且 rx_bits/tslc 严格等于 25.78125 Gbps 标称线率（200e6/7.76ms、225e6/8.73ms 双口独立吻合）——①计数器时钟在 prism 引导期间重启过（触发点未定，候选 INIT_HCA/端口 PHY 重建），故"跨驱动单调存活"（J3 branch-1 的语义）未被证明，本次以链路 down 全零锚点的弱形式通过，如实记档；②链路 down 时 rx_bits 仍按标称线率精确累积——BER 分母在无链路时依然有效。
+- **reflection_questions 答案**：
+  - **Q: 为什么 PHY 计数器不能 MMIO？** A: PHY 寄存器在 NIC 内部总线后面（PHY 软核/独立芯片的私有寄存器簇），BAR 只暴露主机接口（iseg/CMDQ/UAR doorbell）；跨内部总线的读必须固件代劳——这同时给了固件做门禁与聚合的钩子（PCAM 能力位正是这种间接层的产物）。
+  - **Q: pre-FEC vs post-FEC BER 哪个更反映链路质量？** A: pre-FEC。它反映 FEC 纠正前的原始误码，是链路余量的领先指标——post-FEC=0 只说明 FEC 尚未被打穿，链路可能已在恶化边缘。结合本次勘误：BER 是推导量（sym_err/rx_bits），而 0x16 真分母实测可用，T13 的状态机可以直接建立在真实 pre-FEC BER 上。
+  - **Q: ACCESS_REG 怎么区分读/写？clr 为何必须恒 0？** A: op_mod（0=写/1=读，mlx5_core 记作 !write）。clr=1 会令固件在读取的同时清零该组计数器——交叉对账（ethtool 侧读的是同一组计数器）与 T13 的定时采样都建立在"读不破坏"之上。
+- **待收尾**：`sudo bash scripts/gate/rebaseline.sh`（PHY 自检行为入基线=有意行为变更；白名单已备）→ 全绿后 task.json T12 → completed。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
+
+- **v2.2（2026-09-26，T12）**：§8.1 pre_fec_ber 勘误（非硬件字段，BER 为 grp 0x16 推导量）+ 0x16 上机判决（FW 接受、计数器活跃，PCAM 能力位谎报缺失）+ tslc/rx_bits 现象学（引导期计数器时钟重启、链路 down 时 rx_bits 仍按线率累积）；§8.3 输入源改真分母优先；§10.1 C4 改计数器单调性口径。依据：mlx5_ifc.h v5.15/en_stats.c 全量核查 + T12 上机（/var/tmp/t12_run.log）。
+
+
 
 - **v2.1 内容修订——T10-prep 翻案（2026-09-17）**：§7 全章改写（1 条目环/~10% 激活/中断不点火三结论翻案为驱动侧 eqc 编码产物，判决证据见 progress.md T10-prep 节）；§5.5 eqc 示例改编码/解码助手制 + LSB/MSB 双窗口翻转警告；§6.1 EQ 字段降级为防御参数；§12 EQ 常数更新（log12/4096 条目、中断 ≈1 次/事件）。ifc 编码同日转正进代码，基线失效待重采。
 - **价值观修订 v2.1（2026-09-15）**：作废 v2 §1.2 末公理"任何抽象不允许为优雅而加层——每个抽象必须是数据或查表"。动因：需求描述修正——目标从来是"简单而又优雅"，优雅是形式目标而非嫌疑犯；旧公理是修辞级过度矫正（全仓 grep 证实代码/注释/progress 零引用，R0 的抽象决策实际全部以阅读收益为准，产物已是"简单而优雅"的形状）。v2.1 新增 §1.7 设计价值观：简单=内容（概念少而承重，读路径无记忆术）、优雅=形式（代码形状映射问题形状）+ **抽象准入三问**（真实调用者 / 删除测试 / 单实现零旋钮）；§5.5 补结构体覆盖层立场（未采用=重构字节等价纪律，非禁令，引入须 static_assert 与偏移表互锁）；附录登记 v2→v2.1 三处。**零代码改动、无需门禁；架构不重写**（公理未真正约束过架构）。

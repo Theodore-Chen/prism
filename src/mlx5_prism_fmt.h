@@ -97,6 +97,7 @@ static inline void prism_set_bits(u8 *buf, u16 bit_off, u8 nbits, u32 val)
 #define PRISM_OFF_ISSI_SUPPORTED	108
 
 #define PRISM_OFF_REG_ID		10	/* access_reg_in: register_id be16 @ [10:12] */
+#define PRISM_OFF_REG_ARG		12	/* access_reg_in: argument be32 @ [12:16] */
 
 /* query_eq_in/destroy_eq_in: eq_number byte; create_eq_out: eq_number */
 #define PRISM_OFF_EQN			11
@@ -184,6 +185,77 @@ static inline u32 prism_eqc_uar_readback(const u8 *eqc)
 static inline u32 prism_eqc_intr_readback(const u8 *eqc)
 {
 	return mlx5_prism_get_be32(eqc + 20) & 0xfff;
+}
+
+/*
+ * ---- ppcnt_reg (T12): all offsets below are relative to the 256-byte
+ * register IMAGE, i.e. the access_reg payload at command buffer + 16
+ * (same "payload-relative" convention as the caps block above). Layout
+ * per mlx5_ifc struct mlx5_ifc_ppcnt_reg_bits (v5.15 :8905, unchanged in
+ * v7.0): the counter set union starts at image byte 8; every counter is
+ * a big-endian _high/_low 32-bit pair. Counter-group offsets follow the
+ * ifc group layouts (mlx5_ifc_eth_802_3_cntrs_grp_data_layout_bits,
+ * _phys_layer_cntrs_bits, _phys_layer_statistical_cntrs_bits) —
+ * byte-equivalence with MLX5_SET/MLX5_GET algebra is proven host-side
+ * (scripts/test/fmt_equiv_check.c §ppcnt).
+ *
+ * The card is dual-PF (08:00.0/.1, one port per function), so
+ * local_port is always 1 on each dev instance — mlx5_core likewise
+ * hardcodes local_port=1 (en_stats.c).
+ */
+#define PRISM_PPCNT_REG_SIZE		256
+#define PRISM_PPCNT_LOCAL_PORT		1
+
+#define PRISM_OFF_PPCNT_LOCAL_PORT	1	/* byte: local_port */
+#define PRISM_FLD_PPCNT_GRP		(3 * 8)	/* 6 bits: counter group select */
+#define PRISM_FLD_PPCNT_CLR		(4 * 8 + 7)	/* 1 bit: clear-on-read */
+
+/* clr MUST stay 0: prism reads must never zero the fw counters the
+ * ethtool cross-check (T12 J3) and T13's monitor depend on.
+ */
+
+#define PRISM_PPCNT_GRP_IEEE_802_3	0x0	/* a_frames_* / symbol errors */
+#define PRISM_PPCNT_GRP_PHY_LAYER	0x12	/* FEC + link error counters */
+#define PRISM_PPCNT_GRP_PHY_STATISTICAL	0x16	/* CX5+ (PCAM-gated); probed once */
+
+/* grp 0x12 (physical layer counters) — image-relative be64 pairs. */
+#define PRISM_OFF_PPCNT12_TSLC		0x08	/* time_since_last_clear */
+#define PRISM_OFF_PPCNT12_SYM_ERR	0x10	/* symbol_errors */
+#define PRISM_OFF_PPCNT12_SYNC_HDR	0x18	/* sync_headers_errors */
+#define PRISM_OFF_PPCNT12_EDPL_L0	0x20	/* edpl_bip_errors_lane[i] @ +8i */
+#define PRISM_OFF_PPCNT12_FC_CORR_L0	0x40	/* fc_fec_corrected_blocks_lane[i] */
+#define PRISM_OFF_PPCNT12_FC_UNC_L0	0x60	/* fc_fec_uncorrectable_blocks_lane[i] */
+#define PRISM_OFF_PPCNT12_RS_CORR	0x80	/* rs_fec_corrected_blocks */
+#define PRISM_OFF_PPCNT12_RS_UNC	0x88	/* rs_fec_uncorrectable_blocks */
+#define PRISM_OFF_PPCNT12_LINK_DOWN	0xC8	/* be32: link_down_events */
+
+/* grp 0x0 (IEEE 802.3) — the ethtool -S anchors rx/tx_packets_phy and
+ * rx_symbol_err_phy read these (ethtool name in the comment).
+ */
+#define PRISM_OFF_PPCNT0_TX_OK		0x08	/* a_frames_transmitted_ok (tx_packets_phy) */
+#define PRISM_OFF_PPCNT0_RX_OK		0x10	/* a_frames_received_ok (rx_packets_phy) */
+/*
+ * a_symbol_error_during_carrier — the ethtool -S anchor rx_symbol_err_phy.
+ */
+#define PRISM_OFF_PPCNT0_SYM_ERR	0x70
+
+/* grp 0x16 (statistical; pre-FEC BER numerator/denominator — expected
+ * unavailable on pre-PCAM silicon, probed once for the record).
+ */
+#define PRISM_OFF_PPCNT16_RX_BITS	0x10	/* phy_received_bits */
+#define PRISM_OFF_PPCNT16_SYM_ERR	0x18	/* phy_symbol_errors */
+#define PRISM_OFF_PPCNT16_CORR_BITS	0x20	/* phy_corrected_bits */
+
+static inline u64 prism_ppcnt_ctr64(const u8 *reg, u16 off)
+{
+	return ((u64)mlx5_prism_get_be32(reg + off) << 32) |
+	       mlx5_prism_get_be32(reg + off + 4);
+}
+
+static inline void prism_ppcnt_set_grp(u8 *reg, u8 grp)
+{
+	prism_set_bits(reg, PRISM_FLD_PPCNT_GRP, 6, grp);
+	reg[PRISM_OFF_PPCNT_LOCAL_PORT] = PRISM_PPCNT_LOCAL_PORT;
 }
 
 #endif /* __MLX5_PRISM_FMT_H */

@@ -176,6 +176,10 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 		err = mlx5_prism_eq_selftest(dev);
 		if (err)
 			goto err_eq_teardown;
+		/* T12: PPCNT read/parse over ACCESS_REG (ethtool cross-check). */
+		err = mlx5_prism_phy_selftest(dev);
+		if (err)
+			goto err_eq_teardown;
 	}
 
 	return 0;

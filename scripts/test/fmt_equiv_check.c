@@ -361,6 +361,72 @@ int main(void)
 		check_val("eqn byte 11", out[11], out[PRISM_OFF_EQN]);
 	}
 
+	/* 11. ppcnt_reg (T12): header field encodings against emulated
+	 * MLX5_SET algebra (local_port 8b @0x08, grp 6b @0x1a, clr 1b @0x20),
+	 * the offset table against the ifc geometry (counter_set union at
+	 * image byte 8 + group-relative offsets from mlx5_ifc.h), and the
+	 * _high/_low be64 counter decode via random roundtrips. */
+	printf("ppcnt_reg header/offsets/counters (T12)\n");
+	{
+		uint32_t gcases[] = { 0, 0x12, 0x16, 0x3f, 1 };
+		size_t a;
+
+		for (a = 0; a < sizeof(gcases) / sizeof(gcases[0]); a++) {
+			u8 emu[8] = { }, n[PRISM_PPCNT_REG_SIZE] = { };
+			uint32_t dw0 = 0;
+			char name[64];
+
+			prism_ppcnt_set_grp(n, (u8)gcases[a]);
+			dw0 = emu_mlx5_set(dw0, 1, 0x08, 8);
+			dw0 = emu_mlx5_set(dw0, gcases[a], 0x1a, 6);
+			mlx5_prism_put_be32(emu, dw0);
+			snprintf(name, sizeof(name), "header grp=0x%02x (clr stays 0)",
+				 gcases[a]);
+			check_eq(name, emu, n, 8);
+		}
+
+		check_val("grp0x12 tslc off", PRISM_OFF_PPCNT12_TSLC, 8 + 0x00);
+		check_val("grp0x12 sym_err off", PRISM_OFF_PPCNT12_SYM_ERR, 8 + 0x08);
+		check_val("grp0x12 sync_hdr off", PRISM_OFF_PPCNT12_SYNC_HDR, 8 + 0x10);
+		check_val("grp0x12 edpl_l0 off", PRISM_OFF_PPCNT12_EDPL_L0, 8 + 0x18);
+		check_val("grp0x12 fc_corr_l0 off", PRISM_OFF_PPCNT12_FC_CORR_L0, 8 + 0x38);
+		check_val("grp0x12 fc_unc_l0 off", PRISM_OFF_PPCNT12_FC_UNC_L0, 8 + 0x58);
+		check_val("grp0x12 rs_corr off", PRISM_OFF_PPCNT12_RS_CORR, 8 + 0x78);
+		check_val("grp0x12 rs_unc off", PRISM_OFF_PPCNT12_RS_UNC, 8 + 0x80);
+		check_val("grp0x12 link_down off", PRISM_OFF_PPCNT12_LINK_DOWN, 8 + 0xC0);
+		check_val("grp0x00 tx_ok off", PRISM_OFF_PPCNT0_TX_OK, 8 + 0x00);
+		check_val("grp0x00 rx_ok off", PRISM_OFF_PPCNT0_RX_OK, 8 + 0x08);
+		check_val("grp0x00 sym_err off", PRISM_OFF_PPCNT0_SYM_ERR, 8 + 0x68);
+		check_val("grp0x16 rx_bits off", PRISM_OFF_PPCNT16_RX_BITS, 8 + 0x08);
+		check_val("grp0x16 sym_err off", PRISM_OFF_PPCNT16_SYM_ERR, 8 + 0x10);
+		check_val("grp0x16 corr_bits off", PRISM_OFF_PPCNT16_CORR_BITS, 8 + 0x18);
+
+		{
+			unsigned int rng = 4242;
+			int k, bad = 0;
+
+			for (k = 0; k < 1000; k++) {
+				u8 img[PRISM_PPCNT_REG_SIZE] = { };
+				uint64_t v = ((uint64_t)(rng >> 8) << 32) | rng;
+				uint16_t off;
+				uint64_t be;
+
+				rng = rng * 1103515245 + 12345;
+				off = (uint16_t)(rng % (PRISM_PPCNT_REG_SIZE - 8));
+				be = host_cpu_to_be64(v);
+				memcpy(img + off, &be, 8);
+				if (prism_ppcnt_ctr64(img, off) != v) {
+					printf("  [FAIL] ctr64 roundtrip %d\n", k);
+					failures++;
+					bad = 1;
+					break;
+				}
+			}
+			if (!bad)
+				printf("  [ok]   ctr64 roundtrip, 1000 random values/offsets\n");
+		}
+	}
+
 	printf(failures ? "FAILURES: %d\n" : "ALL EQUIVALENT (%d failures)\n",
 	       failures);
 	return failures ? 1 : 0;

@@ -32,6 +32,9 @@ sudo bash scripts/baseline/diff_baseline.sh           # 对比（默认读 /var/
   DESTROY_EQ 0 events）删除，重建产生的第二个 QUERY_EQ 折叠
 - 刻意不归一（回归锚点）：caps[max]/[cur]/[post] hexdump、boot=6/init=2299/
   teardown 2305/2305、log_sz=5/stride=6、eqn=4、10/10、eqe vector 位图
+- （T12 起）`PHY PPCNT` 自检行：计数器数值跨周期单调递增（且跨驱动加载
+  存活），全部归一为占位符；行结构（字段名/组号 0x12/0x00/0x16/探测结论
+  措辞）保留为锚点
 
 ## 基线再生成（仅当"有意"改变行为并重验后）
 

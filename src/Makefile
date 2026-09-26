@@ -11,4 +11,4 @@ ccflags-y += -I$(src)
 mlx5_prism-y := mlx5_prism_main.o mlx5_prism_pci.o \
 		mlx5_prism_cmdq.o mlx5_prism_fw.o \
 		mlx5_prism_eq.o mlx5_prism_irq.o \
-		mlx5_prism_trace.o
+		mlx5_prism_phy.o mlx5_prism_trace.o

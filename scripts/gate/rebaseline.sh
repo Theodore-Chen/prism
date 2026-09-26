@@ -10,8 +10,8 @@
 #                            黑匣子 /var/tmp/t09_live.log）
 #   2. diff_baseline.sh      — 对比旧基线【预期 FAIL，差异应仅为已知变更】
 #      差异行逐条过预期族白名单：QUERY_EQ / EQ ready / EQ up (event mode) /
-#      eqe[N] / eq self-test 10/10 / DESTROY_EQ ok——任何族外行 = 行为漂移，
-#      熔断退出，基线不动
+#      eqe[N] / eq self-test 10/10 / DESTROY_EQ ok / PHY PPCNT（T12 新自检
+#      行）——任何族外行 = 行为漂移，熔断退出，基线不动
 #   3. 族内差异确认后按 README 流程重采双口基线 + chown 回调用用户
 #   4. 重采后同周期自洽复验（必须 zero diff）
 #   5. r0_gate.sh          — 新基线下 G0-G4 全门禁（~10 min）
@@ -57,7 +57,8 @@ for PORT in 0 1; do
                   -e 'EQ up (event mode):' \
                   -e 'eqe\[[0-9]*\]:' \
                   -e 'eq self-test: 10/10' \
-                  -e 'DESTROY_EQ ok:')
+                  -e 'DESTROY_EQ ok:' \
+                  -e 'PHY PPCNT')
     if [ -n "$BAD" ]; then
         echo "   [FAIL] $D 出现族外漂移行（基线不动，停止）:"
         echo "$BAD"

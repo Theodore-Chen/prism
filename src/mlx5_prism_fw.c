@@ -137,24 +137,55 @@ static int mlx5_prism_fw_set_issi(struct mlx5_prism_dev *dev)
 }
 
 /*
+ * ACCESS_REG (0x805) round trip — the generic register window mlx5_core
+ * exposes as mlx5_core_access_reg (port.c): a 16-byte command header
+ * (register_id be16 @bytes[10:12], argument be32 @bytes[12:16], op_mod
+ * 0=write / 1=read) carrying one register image after it. in_reg holds
+ * the caller-built register image (its header fields select what the fw
+ * operates on); out_reg receives the image back. T12 PPCNT is the first
+ * L3 consumer; host_endianness rides the same path.
+ */
+int mlx5_prism_access_reg(struct mlx5_prism_dev *dev, u16 reg_id, bool write,
+			  u32 arg, const u8 *in_reg, u8 *out_reg, u16 reg_len)
+{
+	u32 in_len = MLX5_PRISM_CMD_HDR_SIZE + reg_len;
+	u8 *in, *out;
+	int err;
+
+	in = kzalloc(in_len, GFP_KERNEL);
+	out = kzalloc(in_len, GFP_KERNEL);
+	if (!in || !out) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	mlx5_prism_put_be16(in + PRISM_OFF_REG_ID, reg_id);
+	mlx5_prism_put_be32(in + PRISM_OFF_REG_ARG, arg);
+	memcpy(in + MLX5_PRISM_CMD_HDR_SIZE, in_reg, reg_len);
+
+	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_ACCESS_REG,
+				     write ? 0 : 1, in, in_len, out, in_len);
+	if (!err)
+		memcpy(out_reg, out + MLX5_PRISM_CMD_HDR_SIZE, reg_len);
+
+out:
+	kfree(in);
+	kfree(out);
+	return err;
+}
+
+/*
  * Tell the firmware the host endianness via ACCESS_REG(HOST_ENDIANNESS):
- * register_id at inline bytes[10:12] (be16), 16-byte register data at the
- * payload — he = 0 for a little-endian host.
+ * a 16-byte register write whose he field stays 0 for a little-endian
+ * host — the whole image is zero bytes besides the register id.
  */
 static int mlx5_prism_fw_set_host_endianness(struct mlx5_prism_dev *dev)
 {
-	u8 in[MLX5_PRISM_CMD_HDR_SIZE + 16] = { };
-	u8 out[MLX5_PRISM_CMD_HDR_SIZE + 16];
+	u8 in[16] = { };
+	u8 out[16];
 
-	/*
-	 * register_id: be16 at inline bytes[10:12]; he = 0 (LE host) in the
-	 * 16-byte register payload, which stays zeroed.
-	 */
-	mlx5_prism_put_be16(in + PRISM_OFF_REG_ID,
-			    MLX5_PRISM_REG_HOST_ENDIANNESS);
-
-	return mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_ACCESS_REG, 0,
-				      in, sizeof(in), out, sizeof(out));
+	return mlx5_prism_access_reg(dev, MLX5_PRISM_REG_HOST_ENDIANNESS,
+				     true, 0, in, out, sizeof(in));
 }
 
 static int mlx5_prism_fw_query_pages(struct mlx5_prism_dev *dev, u32 op_mod,

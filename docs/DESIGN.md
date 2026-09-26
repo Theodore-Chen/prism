@@ -1,4 +1,4 @@
-# mlx5_prism 设计文档 v2.1 —— ConnectX-4 Lx 控制面驱动
+# mlx5_prism 设计文档 v2.2 —— ConnectX-4 Lx 控制面驱动
 
 > 内核模块名：`mlx5_prism.ko`
 > 从零实现 ConnectX-4 Lx 的固件-驱动控制面协议：CMDQ 引擎 + 9 步固件引导 + EQ 事件 + PHY 诊断 + 最小 netdev 骨架 + ftrace 全链路追踪。全部指标与 mlx5_core 对照验证。
@@ -490,14 +490,23 @@ slot 协议不变量：EQ 存活期间，非页命令 slot 从 doorbell 起保�
 
 ### 8.1 技术关键：PHY 寄存器不能 MMIO 直读
 
-PHY 计数器（PPCNT, register ID 0x5008）不在 BAR 空间，必须经 `ACCESS_REG`（opcode 0x805）由固件代读——CMDQ 引擎的第一个 L3 服务场景。access_register_in：register_id @bytes[10:12]〔实证〕。
+PHY 计数器（PPCNT, register ID 0x5008）不在 BAR 空间，必须经 `ACCESS_REG`（opcode 0x805）由固件代读——CMDQ 引擎的第一个 L3 服务场景。access_register_in：register_id @bytes[10:12]、argument @bytes[12:16]、op_mod 0=写/1=读〔实证 + mlx5_core port.c〕。每 dev 实例查 local_port=1（本卡双 PF，一 PF 一口；mlx5_core 同样硬编码）。
+
+**字段语义勘误（v2.2，2026-09-26 T12 功课）**：`pre_fec_ber` 不是硬件字段——内核驱动无此名，BER 是 grp 0x16 的 `phy_symbol_errors/phy_received_bits` 之商，而 grp 0x16 需 PCAM 能力位（CX5+ 特性）。CX4 Lx 是 pre-PCAM 芯片，可用组为 0x0（IEEE 802.3，ethtool `rx/tx_packets_phy`/`rx_symbol_err_phy` 锚点）、0x1/0x2/0x5/0x10、0x12（物理层：symbol/sync_hdr/edpl_bip、fc_fec 每 lane、rs_fec 总量、link_down_events）。
+
+**0x16 上机判决（2026-09-26，T12 双口实测，推翻"预期拒绝"）**：FW 14.32.1908 **接受** grp 0x16 且计数器活跃——`rx_bits=200e6/225e6`、`sym_err=0`、`corr_bits=0`。即 PCAM 能力位为 0（mlx5_core 因此从不读它）但固件照常维护并放行该组——**能力位谎报缺失，固件行为先行**（怪癖档案级事实）。T13 可直接用真分母推导 pre-FEC BER，线速×时间估算法降为 fallback。
+
+**tslc/rx_bits 现象学（同次实测）**：两组计数器的 time_since_last_clear 在 PPCNT 读取时仅 7/8 ms，且 0x16 的 rx_bits 与 tslc 严格成 25.78125 Gbps 标称线率之比（200e6/7.76ms、225e6/8.73ms，双口独立吻合）——①计数器时钟在 prism 引导期间（触发点未定，候选 INIT_HCA/端口 PHY 重建）重启过，"跨驱动单调存活"未被证明，交叉对账以预登记弱形式（链路 down 全零锚点）通过；②即便链路 down，rx_bits 也按标称线率精确累积——BER 分母在无链路时依然有效。
 
 ```
 定时器（默认 100ms，monitor_interval_ms RW）
-  → access_reg(PPCNT, port, counter_group)
-  → 解析 pre_fec_ber / symbol_error_rate / fec_corrected / fec_uncorrectable
-  → caps 缓存辅助判断 + sysfs 导出 + 阈值状态机
+  → access_reg(PPCNT, port=1, counter_group∈{0x0, 0x12})
+  → 解析 symbol_errors / sync_headers_errors / fc_fec_corrected(4 lanes) /
+    rs_fec_corrected / rs_fec_uncorrectable / link_down_events
+  → caps 缓存辅助判断 + sysfs 导出 + 阈值状态机（T13 按 8.3 输入源推导 BER）
 ```
+
+clr 恒为 0：prism 的读不得清零固件计数器（ethtool 交叉对账与 T13 采样都建立在计数器单调存活上）。
 
 ### 8.2 sysfs 接口（/sys/class/misc/mlx5_prism0/）
 
@@ -516,7 +525,9 @@ ok ──BER≥1e-10──→ degraded ──BER≥1e-7──→ critical   （�
       dmesg WARNING              dmesg ERR
 ```
 
-交叉验证：mlx5_core 加载时 `ethtool -S` 采集基准，同数量级（差值 <5%）通过。
+输入源（v2.2 勘误 + 上机判决）：BER 为推导量——**优先 grp 0x16 真分母（本卡固件实测可用，见 §8.1 判决）**，fallback 为 25G 标称线速 × 采样间隔估算分母、grp 0x12 symbol_errors 做分子（链路 up 时 PHY 持续发送，idle 符号计入，口径成立；链路 down 时状态机冻结在 ok——但注意 rx_bits 分母在链路 down 时仍有效累积）。sysfs 同时导出原始计数器，读者可自行换算口径。
+
+交叉验证：mlx5_core 加载时 `ethtool -S` 同名计数器（`tx/rx_packets_phy`、`rx_symbol_err_phy`、`link_down_events_phy`）对账，V_prism ≥ V_mlx5（计数器单调存活）或同数量级（<5% 偏差仅适用于同时间窗双读，跨驱动切换用单调性）。链路 down 的实测注记：锚点全零时该判据为弱形式（§8.1 tslc 现象学——计数器时钟随引导重启）。
 
 ---
 
@@ -550,7 +561,7 @@ v1 勘误：v1 草案里 TP_printk 引用了不存在的 `mlx5_prism_cmdq_opcode
 | C1 | HCA 能力集 | QUERY_HCA_CAP（caps 缓存） | debugfs/mlx5_core dmesg | 关键字段 bit-exact |
 | C2 | 固件版本 | iseg fw_rev（**无 QUERY_FW 命令**〔实证〕） | ethtool -i | 一致（14.32.1908） |
 | C3 | 引导序列 | dmesg 逐步 | mlx5_core dmesg 对照 | 9 步一致（caps 差异记录） |
-| C4 | PHY BER | ACCESS_REG PPCNT | ethtool -S | 同数量级 |
+| C4 | PHY 计数器 | ACCESS_REG PPCNT（grp 0x12/0x0） | ethtool -S 同名计数器 | V_prism ≥ V_mlx5（单调存活；BER 为 T13 推导量，见 §8.1 勘误） |
 | C5 | 页回收 | teardown 计数 | — | 2305/2305 全量 |
 
 **性能（v1 的 P1/P2 按长尾发现修订）**：
@@ -648,3 +659,14 @@ R0 安全规则：基线 diff 必须为空；绝不原地改写协议字节（kn
 | §7 全章 | 1 条目环（"固件说谎"）/ ~10% 激活 / 中断不点火 | 翻案：均为旧 eqc 编码产物，固件忠实；ifc 编码转正（dw3=(log<<24)\|uar、dw5=intr），事件按序落环、10/10 首次激活、MSI-X ≈1 次/事件 | T10-prep 判别实验：判据 A/B/D 成立、E 对照通过、C（长尾）未决 T11 复测（progress.md T10-prep） |
 | §5.5 | eqc 偏移示例（含 intr@92 旧笔误） | 改为编码/解码助手描述 + LSB/MSB 双窗口翻转警告 | mlx5_ifc.h 原文核准 + 硬件实证 |
 | §6.1 / §12 | profile EQ 字段、常数速查 | 激活重试降级为防御参数；EQ 常数更新（log12/4096 条目，10/10 接受） | 同上 |
+
+---
+
+## 附：v2.1 → v2.2 修订登记（2026-09-26，T12）
+
+| 位置 | 原内容 | 处置 | 依据 |
+|------|--------|------|------|
+| §8.1 | "解析 pre_fec_ber / symbol_error_rate ..." | 勘误：pre_fec_ber 非硬件字段（内核无此名）；BER 由 grp 0x16 推导且 0x16 需 PCAM（CX5+）；CX4 Lx 可用组 0x0/0x12 等；BER 推导移交 T13（真分母或线速×时间估算）；补 clr=0 不变量与 op_mod/argument 布局 | task.json 判据冲突发现：mlx5_ifc.h v5.15 全量核查 + en_stats.c PCAM 门卫（v5.15 :754）|
+| §8.1/8.3（上机回填） | "0x16 探测预期拒绝" | 判决：FW 接受 0x16 且计数器活跃（能力位谎报缺失、固件行为先行）——T13 用真分母；另记 tslc/rx_bits 现象学（引导期计数器时钟重启 + 链路 down 时 rx_bits 仍按线率累积） | T12 上机 2026-09-26，/var/tmp/t12_run.log |
+| §8.3 | "差值 <5% 通过" | 交叉验证改单调性口径（跨驱动切换计数器存活）+ BER 输入源标注 | 同上 |
+| §10.1 C4 | "PHY BER / 同数量级" | 改 PHY 计数器 + V_prism ≥ V_mlx5 | 同上 |

@@ -24,6 +24,12 @@
 # backlog aggregation makes the per-load event count 11 or 13, hardirq
 # consumption always equals it; the per-EQE eqe[N] dmesg lines are gone
 # (hardirq hot path stays silent; tracepoints are the observability).
+# (T12) "PHY PPCNT" self-test lines: the counter values are monotonic
+# run-time readings (they grow every cycle and survive driver switches),
+# so every value collapses to a placeholder; the line STRUCTURE (field
+# names, group tag 0x12/0x00/0x16, probe outcome wording) stays as a
+# regression anchor. Scoped to PHY lines only — the eqn/log_sz anchors
+# elsewhere must not be touched.
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -33,6 +39,10 @@ sed -e 's/^\[[^]]*\] //' \
     -e 's/([0-9]\+ events total, [0-9]\+ interrupts)/(E events total, I interrupts)/' \
     -e 's/([0-9]\+ events, [0-9]\+ consumed in hardirq, [0-9]\+ interrupts)/(E events, H consumed in hardirq, I interrupts)/' \
     -e 's/DESTROY_EQ ok: eq_number=\([0-9]*\), [0-9]* events consumed/DESTROY_EQ ok: eq_number=\1, E events consumed/' \
+    -e '/PHY PPCNT/ s/=\[[0-9][0-9 ]*rs [0-9][0-9]*\]/=B[rs N]/g' \
+    -e '/PHY PPCNT/ s/=\[[0-9][0-9 ]*\]/=B[N]/g' \
+    -e '/PHY PPCNT/ s/=[0-9]\+/=N/g' \
+    -e '/PHY PPCNT/ s/rejected (-[0-9]\+)/rejected (-N)/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
           -e 'eqe\[0\.\.3\] head:' \
