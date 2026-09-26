@@ -812,6 +812,14 @@
   - **Q: ACCESS_REG 怎么区分读/写？clr 为何必须恒 0？** A: op_mod（0=写/1=读，mlx5_core 记作 !write）。clr=1 会令固件在读取的同时清零该组计数器——交叉对账（ethtool 侧读的是同一组计数器）与 T13 的定时采样都建立在"读不破坏"之上。
 - **待收尾**：`sudo bash scripts/gate/rebaseline.sh`（PHY 自检行为入基线=有意行为变更；白名单已备）→ 全绿后 task.json T12 → completed。
 
+#### T12 rebaseline 首轮 NOT GREEN：两个采集/归一化侧问题（2026-09-26）
+
+- **首轮结果**：step2 族过滤零意外（unexpected=0）、step4 同周期自洽零 diff、基线已重采（39 行/口，含归一化 PHY 行）；step5 r0_gate 6/8——G1 与 G3 FAIL，逐一溯源如下，均为门禁/归一化侧，非驱动行为漂移。
+- **G1（多一行 `eqe[0]: type=0x0a vector=0x00000001`）**：T10 的 drain-before-enable 观测线（eq.c，排空窗口恰逢积压 EQE 落地时打印）——预先存在的合法时序变体，T10 三跑未撞上、本轮 G1 撞上；T12 未触碰 eq.c。normalize 补删除规则 `eqe[N]: type=`（与其它怪癖变体同款），基线无需重采（重采周期本身无此行）。
+- **G3（issue=61 complete=62 eq_event=28，T10 时代 84/84/22）**：驱动侧排除——complete 恒 ≤ issue（超时/delivery 在 complete trace 前 return）；eq_event=28=22+6 精确（PHY 六命令全部经硬中断正常完成）；NC=NI+1 是"丢弃窗口结束在 issue 与 complete 之间"的覆盖指纹。诊断（t12_trace_diag.sh，/var/tmp/t12_trace_diag.log）：①现场抢救发现 G3 记录已被某次缓冲区清空抹掉（5 个 CPU 的 oldest-event-ts 停在 G3 时刻，drop 证据一并丢失）；②**受控复现完全干净：issue=90 complete=90 eq_event=28，逐条配对、(opcode,slot) 多重集全等、零 overrun 零丢事件**（90=84+6 分毫不差，含三条 ACCESS_REG/PPCNT 读）——驱动不变量成立，61/62 定性为采集侧瞬态瑕疵（武装竞态窗口/读取竞态一类，确切机制随现场证据被清空而不可考）。
+- **G3 加固**（r0_gate.sh）：单写系统级 `events/mlx5_prism/enable` 武装三事件（原三次 per-event 写窗口宽 3 倍）；计数取自快照拷贝而非活文件；per-CPU 丢事件计数进判据（有丢=配对决言无效而非 FAIL）；非干净捕获自动重试一次，重试后干净失配才算真 FAIL；失败快照落 /var/tmp 供验尸。
+- **教训登记**：判定行布尔取反 bug（`$((! BAD))`，t12_verify.sh）与缓冲区被清导致证据灭失——后者说明"门禁失败时当场留快照"应该内建（已随 G3 加固落地），而不是等诊断脚本再取。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

@@ -30,6 +30,12 @@
 # names, group tag 0x12/0x00/0x16, probe outcome wording) stays as a
 # regression anchor. Scoped to PHY lines only — the eqn/log_sz anchors
 # elsewhere must not be touched.
+# (T12 rebaseline 2026-09-26) "eqe[N]: type=..." lines: the event-mode
+# setup drains the backlog EQE best-effort (T10's drain-before-enable,
+# eq.c) and prints one such line WHEN the in-flight QUERY_EQ completion
+# happens to land inside the drain window — a legal timing variant that
+# appears or not per load. Deleted like the other quirk lines (in
+# eq_mode=poll loads every consumed EQE prints this format as well).
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -45,6 +51,7 @@ sed -e 's/^\[[^]]*\] //' \
     -e '/PHY PPCNT/ s/rejected (-[0-9]\+)/rejected (-N)/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
+          -e 'eqe\[[0-9]*\]: type=' \
           -e 'eqe\[0\.\.3\] head:' \
           -e 'owners\[0\.\.7\]:' \
           -e 'event engine silent at' \
