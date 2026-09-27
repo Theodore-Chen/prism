@@ -9,3 +9,4 @@ modules.order
 .tmp_versions/
 compile_commands.json
 __pycache__/
+.zcode/
