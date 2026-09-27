@@ -1279,36 +1279,40 @@
       "title": "PHY 监控 part 2：sysfs 接口 + 定时器 + 阈值告警",
       "phase": "S5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T12-phy-access-reg"
       ],
-      "estimated_loc": 250,
+      "estimated_loc": 300,
       "learning": {
-        "objective": "掌握 sysfs attribute、内核定时器、状态机告警",
+        "objective": "掌握 sysfs attribute、周期性睡眠任务的工作队列形态、状态机告警",
         "concepts": [
-          "struct misc_device / misc_register——不挂 netdev 时的设备注册",
-          "struct attribute + sysfs_ops + DEVICE_ATTR_RO/RW 宏",
-          "show 函数为什么不能用 mutex（被 sysfs 调用时持有 kernfs mutex）",
-          "timer_list + mod_timer + del_timer_sync——内核定时器 API",
-          "状态机实现：ok → degraded → critical，含滞回（hysteresis）防抖"
+          "struct misc_device / misc_register——不挂 netdev 时的设备注册；双 PF 每 dev 一实例 mlx5_prism<N>（ida 序号，MISC_DYNAMIC_MINOR，.parent=&pdev->dev，.groups 一次挂属性）",
+          "struct attribute_group + DEVICE_ATTR_RO/RW 宏；is_visible 条件隐藏属性（temperature 探测门控）",
+          "show/store 在进程上下文可睡眠（kernfs 每打开文件 of->mutex 串行化，hwmon.c 的 show 即 guard(mutex)+阻塞 access_reg）——真实约束是 remove 路径的锁序倒挂与对象生命周期；prism 的 show 取快照零睡眠（sysfs_emit）",
+          "delayed_work + queue_delayed_work 尾部自重排 + cancel_delayed_work_sync——周期性睡眠任务的标准形态；timer_list 回调在软中断上下文不能调 sleeping API（PPCNT 走 EVENT 模式阻塞 invoke），只适合纯 MMIO 非睡眠轮询（health.c 健康轮询 / fw_reset.c 100ms 轮询）",
+          "状态机实现：ok → degraded → critical，半阈值退出 + 连续 K 样本确认（hysteresis）防抖"
         ],
         "keywords": [
           "sysfs",
           "misc_device",
           "DEVICE_ATTR",
-          "timer_list",
+          "delayed_work",
           "状态机",
           "阈值告警"
         ],
         "mlx5_reference": [
           {
             "file": "内核 Documentation/filesystems/sysfs.rst",
-            "focus": "sysfs 编写规范"
+            "focus": "sysfs 编写规范（一文件一值、sysfs_emit、show/store 生命周期）"
           },
           {
-            "file": "core/health.c 或类似",
-            "focus": "Mellanox 的健康监控定时器模式（如有）"
+            "file": "core/health.c",
+            "focus": "两套定时范式对照：timer_list 纯 MMIO 健康轮询 vs delayed_work 周期睡眠任务（fw-log-ts 每小时 ACCESS_REG/MRTC，自建单线程 wq）"
+          },
+          {
+            "file": "core/hwmon.c",
+            "focus": "MTMP(0x900A) 读温度路径与 MCAM mtmp 门禁（CX4 Lx 不可达——prism 改为直接探测）；show 里睡眠的合法实例"
           }
         ],
         "reflection_questions": [
@@ -1318,28 +1322,28 @@
           "状态滞回（hysteresis）是什么？为什么阈值告警需要它？"
         ]
       },
-      "goal": "/sys/class/misc/mlx5_prism0/* 可读，定时器持续采样，阈值超限触发告警",
-      "context": "DESIGN.md 第 6 节有完整 sysfs 接口定义。监控周期 100ms（用 timer_list，不用 delayed_work，因为是简单轮询）。",
+      "goal": "/sys/class/misc/mlx5_prism0/* 与 mlx5_prism1/* 可读（双 PF 每口一实例），监控持续采样，阈值超限触发告警",
+      "context": "DESIGN.md §8.2/8.3（v2.3）是接口与状态机定义。采样执行体为 delayed_work（2026-09-27 功课翻案，原'用 timer_list 不用 delayed_work，因为是简单轮询'作废——该句写于假设 MMIO 直读时代）：PPCNT/PAOS/MTMP 读取全部走 EVENT 模式阻塞 invoke（wait_for_completion_timeout + GFP_KERNEL 分配），timer_list 软中断回调不能睡眠；mlx5_core 同型周期睡眠任务（health.c fw-log-ts 每小时 ACCESS_REG/MRTC）正是自建单线程 wq + delayed_work 尾部自重排 + cancel_delayed_work_sync + destroy_workqueue。字段集按 v2.2 勘误与 T12 实测能力重定（原始计数器 0x16 三元组 + 0x12 FEC 总量 + 推导 BER + 状态机输出；symbol_error_rate/link_quality 两个 v1 遗产删除）；temperature 以 MTMP(0x900A) 运行时探测定去留（内核门禁 MCAM mtmp 位对 CX4 Lx 基本不可达，但 MTMP 寄存器自 CX4 世代存在于 PRM，照 0x16 探测方法论：接受则 is_visible 可见，拒绝则隐藏并记怪癖档案）。 执行更新（2026-09-27 上机）：J1-J7 全绿（/var/tmp/t13_run.log 两轮，首轮 J5 系脚本事件路径笔误 prism_cmdq_issue 写错，修正后全绿；trace_pipe 消费式读取先排空积压，J5 原始比值 0.746 按校正窗口复算精确 2:1）。硬件判决三件：①PAOS 双口 accepted oper_status=1——机器自 T12 后接线、链路 up，活链路评估路径实证（零误码 status=ok）；②MTMP 双口 accepted len=8 首探即中（CX4 时代 8B 最小布局），双口同读 94000 mdegC（94°C，双 PF 同芯片传感器自洽；MCAM mtmp 位谎报第二例）；③J5 节奏精确减半实证 interval RW 生效。收官：rebaseline ALL GREEN（基线 42 行/口=39+3 monitor 族精确命中，r0_gate 8/8，G3 监控期 issue=266 complete=266 dropped=0 周期 ACCESS_REG 全配对）。",
       "steps": [
-        "1. 定义 struct mlx5_prism_phy（timer, counters, status, prev_ber）",
-        "2. 实现 misc_device 注册：mlx5_prism0",
-        "3. 创建 sysfs attributes：pre_fec_ber, symbol_error_rate, fec_corrected, fec_uncorrectable, link_quality, status, monitor_interval_ms",
-        "4. 实现 timer_list callback：每 100ms 调用 T12 的 ACCESS_REG + 更新字段",
-        "5. 实现阈值状态机：ber < 1e-10 ok, 1e-10~1e-7 degraded, > 1e-7 critical",
-        "6. 状态变化时 dmesg WARNING/ERR",
-        "7. probe 启动 timer, remove del_timer_sync"
+        "1. 定义 struct mlx5_prism_phy（spinlock、快照、anchor 首样本、delayed_work、单线程 wq、miscdevice、ida 序号、interval_ms/status/link_up）——BER 差分在同一加载生命周期内做（tslc 现象学：计数器时钟随引导重启，跨加载绝对值不可比）",
+        "2. 实现 misc_device 注册：每 PF 一个 mlx5_prism<N>（MISC_DYNAMIC_MINOR、.parent=&pdev->dev、.groups），misc_deregister 于 remove 头部",
+        "3. sysfs v2.3 字段集：RO phy_symbol_errors/phy_received_bits/phy_corrected_bits（0x16 原始绝对值）、fec_corrected/fec_uncorrectable（0x12 rs 总量）、link_down_events（0x12）、pre_fec_ber（Δsym_err/Δrx_bits 推导，锚点=监控首样本）、status（ok/degraded/critical）、link_up（PAOS oper_status）、temperature（MTMP 毫摄氏度，探测通过才 is_visible）；RW monitor_interval_ms（默认 100，钳位 20..60000，下一 tick 生效）",
+        "4. 监控 delayed_work：每 tick ACCESS_REG 0x16+0x12+PAOS（+MTMP 若可用），读失败跳过该样本、连续 10 次 rate-limited warn；尾部 queue_delayed_work 按当前 interval 自重排",
+        "5. 阈值状态机：区间 BER 输入，ok→degraded@≥1e-10、degraded→critical@≥1e-7，退出半阈值（<5e-11 回 ok、<5e-8 回 degraded）+ 连续 K=5 样本确认；链路 down（PAOS oper_status=2）冻结 ok 不评估；转移沿打 dmesg WARNING/ERR；BER 比较用 u64 乘法移位不用浮点",
+        "6. probe 成功尾：MTMP/PAOS 探测 + misc_register + 启动监控 wq；remove 头：cancel_delayed_work_sync → destroy_workqueue → misc_deregister（先于既有 EQ teardown，保证无采样在飞）",
+        "7. scripts/test/fmt_equiv_check.c 补 PAOS/MTMP 偏移断言（ifc 代数等价，惯例）"
       ],
       "exit_criteria": {
-        "compile": "make modules 通过",
-        "load": "ls /sys/class/misc/mlx5_prism0/ 显示所有 attribute 文件",
+        "compile": "make modules 通过（无警告）；checkpatch --strict 0/0/0",
+        "load": "默认加载后双 PF /sys/class/misc/mlx5_prism0/ 与 mlx5_prism1/ 属性齐全（temperature 视 MTMP 探测）",
         "functional": [
-          "cat /sys/class/misc/mlx5_prism0/pre_fec_ber 输出数值",
-          "cat status 输出 ok/degraded/critical 之一",
-          "cat monitor_interval_ms 显示 100，写入 200 后下次采样周期变化"
+          "cat pre_fec_ber 输出数值（链路 down 预期 0）；cat status 输出 ok/degraded/critical 之一（链路 down 预期 ok）",
+          "cat monitor_interval_ms 显示 100，写入 200 后读回 200 且采样节奏变化（tracefs cmdq_issue 频率减半：每 tick 3-4 次 ACCESS_REG）",
+          "间隔 1s 两次读 phy_received_bits 第二次更大（同加载差分活性，链路 down 亦成立）"
         ],
         "manual_checks": [
-          "100ms 间隔采样正常工作（数值在变化或稳定）",
-          "rmmod 时 del_timer_sync 不挂起"
+          "rmmod 时 cancel_delayed_work_sync 不挂起、无 WARNING",
+          "r0_gate G4 四十循环零投诉；有意基线变更（probe 每口 +监控行）rebaseline 后 r0_gate 8/8"
         ]
       }
     },

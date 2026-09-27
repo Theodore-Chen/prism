@@ -36,6 +36,11 @@
 # happens to land inside the drain window — a legal timing variant that
 # appears or not per load. Deleted like the other quirk lines (in
 # eq_mode=poll loads every consumed EQE prints this format as well).
+# (T13 2026-09-27) "PHY monitor" probe/bring-up lines (every default
+# probe now): oper_status is live link state (varies with cabling), the
+# mdegC reading varies with ambient, interval is normalized defensively;
+# the probe OUTCOMES (accepted/rejected, len, yes/no) are quirk-profile
+# anchors and stay literal.
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -49,6 +54,9 @@ sed -e 's/^\[[^]]*\] //' \
     -e '/PHY PPCNT/ s/=\[[0-9][0-9 ]*\]/=B[N]/g' \
     -e '/PHY PPCNT/ s/=[0-9]\+/=N/g' \
     -e '/PHY PPCNT/ s/rejected (-[0-9]\+)/rejected (-N)/' \
+    -e '/PHY monitor/ s/interval [0-9]\+ms/interval Nms/' \
+    -e '/PHY monitor/ s/oper_status=[0-9]\+/oper_status=N/' \
+    -e '/PHY monitor/ s/-\{0,1\}[0-9]\+ mdegC/N mdegC/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
           -e 'eqe\[[0-9]*\]: type=' \

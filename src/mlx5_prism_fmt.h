@@ -258,4 +258,51 @@ static inline void prism_ppcnt_set_grp(u8 *reg, u8 grp)
 	reg[PRISM_OFF_PPCNT_LOCAL_PORT] = PRISM_PPCNT_LOCAL_PORT;
 }
 
+/*
+ * ---- paos_reg (T13): 16-byte register image, image-relative like ppcnt.
+ * Layout per mlx5_ifc struct mlx5_ifc_paos_reg_bits: local_port @0x08
+ * (8 bits) = byte 1; oper_status @0x1c (4 bits) lands in the low nibble
+ * of byte 3 under the MLX5_SET dw algebra (same shift rule as ppcnt grp
+ * @0x1a → PRISM bit 24, LSB-first). Values 1=up 2=down (mlx5_core enum
+ * mlx5_port_status; port.c's admin-state query is the write-side sibling
+ * of this read). admin_status (@0x14 → byte 2 low nibble) is never
+ * touched: prism never changes port admin state.
+ */
+#define PRISM_PAOS_REG_SIZE		16
+#define PRISM_OFF_PAOS_LOCAL_PORT	1	/* byte: local_port */
+#define PRISM_FLD_PAOS_OPER		(3 * 8)	/* 4 bits: oper_status */
+
+#define PRISM_PAOS_OPER_UP		1
+#define PRISM_PAOS_OPER_DOWN		2
+
+static inline void prism_paos_set_port(u8 *reg)
+{
+	reg[PRISM_OFF_PAOS_LOCAL_PORT] = PRISM_PPCNT_LOCAL_PORT;
+}
+
+static inline u32 prism_paos_oper_readback(const u8 *reg)
+{
+	return prism_get_bits(reg, PRISM_FLD_PAOS_OPER, 4);
+}
+
+/*
+ * ---- mtmp_reg (T13): temperature. sensor_index @0x14 (12 bits)
+ * straddles bytes 1-2 under the MLX5_SET algebra, but the only sensor
+ * prism queries is the ASIC sensor 0 — an all-zero request image IS
+ * sensor_index=0, so no bit-packing helper is needed. temperature @0x30
+ * (16 bits) = be16 at image bytes 6:8, 0.125 °C per LSB (mlx5_core
+ * hwmon.c mtmp_temp_to_mdeg: LSB × 125 = millidegrees). Two lengths are
+ * probed at monitor start: 8 B (CX4-era PRM minimal layout, ends right
+ * after temperature) then 32 B (modern layout with thresholds and sensor
+ * names) — the fw's answer is a quirk-profile fact either way.
+ */
+#define PRISM_MTMP_LEN_MIN		8
+#define PRISM_MTMP_LEN_FULL		32
+#define PRISM_OFF_MTMP_TEMPERATURE	6	/* be16: 0.125 °C/LSB */
+
+static inline int prism_mtmp_to_mdeg(u16 raw)
+{
+	return (int)raw * 125;
+}
+
 #endif /* __MLX5_PRISM_FMT_H */

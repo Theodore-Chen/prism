@@ -13,9 +13,11 @@
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/miscdevice.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <linux/workqueue.h>
 
 #define MLX5_PRISM_DRV_VERSION	"0.26"
 
@@ -67,6 +69,8 @@
 /* ACCESS_REG register ids (PRM §21, mlx5 register enum). */
 #define MLX5_PRISM_REG_HOST_ENDIANNESS	0x7004
 #define MLX5_PRISM_REG_PPCNT		0x5008
+#define MLX5_PRISM_REG_PAOS		0x5006
+#define MLX5_PRISM_REG_MTMP		0x900a
 
 /* EQ / UAR (PRM §8 / mlx5 eq.c). */
 #define MLX5_PRISM_CMD_OP_CREATE_EQ	0x301
@@ -267,6 +271,67 @@ struct mlx5_prism_fw {
 	u8		*caps_cur;
 };
 
+/*
+ * PHY monitor state machine states (DESIGN.md v2.3 §8.3): transitions are
+ * confirmed by K consecutive samples agreeing on the target, so a single
+ * noisy sample cannot flap the alarm.
+ */
+enum mlx5_prism_phy_status {
+	MLX5_PRISM_PHY_OK,
+	MLX5_PRISM_PHY_DEGRADED,
+	MLX5_PRISM_PHY_CRITICAL,
+};
+
+/*
+ * PHY monitor snapshot (T13): published by the sampling work under
+ * phy->lock, copied out by sysfs show. Counter fields are raw fw
+ * absolutes (same since-last-clear口径 as ethtool -S); ber_num/ber_den
+ * are deltas against the first successful sample — the same-load-lifecycle
+ * BER window (counter clocks restart per bootstrap, DESIGN §8.1), so
+ * cross-load absolutes are never compared.
+ */
+struct mlx5_prism_phy_snap {
+	u64	rx_bits;		/* grp 0x16 phy_received_bits */
+	u64	sym_err;		/* grp 0x16 phy_symbol_errors */
+	u64	corr_bits;		/* grp 0x16 phy_corrected_bits */
+	u64	fec_corr;		/* grp 0x12 rs_fec_corrected_blocks */
+	u64	fec_unc;		/* grp 0x12 rs_fec_uncorrectable_blocks */
+	u32	link_down_events;	/* grp 0x12 */
+	u64	ber_num;
+	u64	ber_den;
+	int	temperature;		/* millidegrees, valid iff has_temp */
+	u8	link_up;		/* PAOS oper_status */
+	u8	status;			/* enum mlx5_prism_phy_status */
+	bool	has_temp;
+};
+
+/*
+ * PHY monitor (T13): per-dev periodic sampler on its own single-thread
+ * workqueue + the misc-device sysfs facade. The ACCESS_REG reads run in
+ * process context outside phy->lock (they sleep — EVENT-mode invoke);
+ * everything under the lock is snapshot publish/copy and tiny arithmetic.
+ */
+struct mlx5_prism_phy {
+	spinlock_t			lock;	/* snapshot publish vs sysfs copy */
+	struct mlx5_prism_phy_snap	snap;
+	u64				anchor_rx_bits;	/* first successful sample */
+	u64				anchor_sym_err;
+	bool				anchored;
+	u32				interval_ms;	/* sysfs RW, applied next tick */
+	u8				status;		/* enum mlx5_prism_phy_status */
+	u8				streak_tgt;	/* hysteresis: target state */
+	u8				streak_cnt;	/* …and its consecutive count */
+	u32				fail_streak;	/* consecutive failed samples */
+	bool				paos_ok;	/* probe results */
+	bool				mtmp_ok;
+	u8				mtmp_len;
+	struct delayed_work		dw;
+	struct workqueue_struct		*wq;
+	struct miscdevice		misc;
+	int				instance;
+	char				name[16];	/* "mlx5_prismN" */
+};
+
 struct mlx5_prism_dev {
 	struct pci_dev			*pdev;
 	void __iomem			*bar0;
@@ -277,6 +342,7 @@ struct mlx5_prism_dev {
 	struct mlx5_prism_irq		irq;
 	struct mlx5_prism_fw		fw;
 	struct mlx5_prism_fw_profile	profile;
+	struct mlx5_prism_phy		phy;
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -409,7 +475,15 @@ extern u32 mlx5_prism_eq_engagement_retries;
 int mlx5_prism_irq_alloc(struct mlx5_prism_dev *dev);
 void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);
 
-/* T12: PPCNT read + parse (selftest one-shot; T13 adds the monitor). */
+/* T12: PPCNT one-shot reads (selftest only, R0.5 discipline). */
 int mlx5_prism_phy_selftest(struct mlx5_prism_dev *dev);
+/*
+ * T13: production monitor + sysfs — start registers the misc device and
+ * launches the sampler (PAOS/MTMP probed first, their verdict recorded);
+ * stop cancels the work, destroys the queue and deregisters, strictly
+ * before the EQ teardown so no sample is in flight while completions die.
+ */
+int mlx5_prism_phy_monitor_start(struct mlx5_prism_dev *dev);
+void mlx5_prism_phy_monitor_stop(struct mlx5_prism_dev *dev);
 
 #endif /* __MLX5_PRISM_H */

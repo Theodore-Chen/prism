@@ -34,6 +34,9 @@ eq self-test: 10/10 commands ok in event mode (E events, H consumed in hardirq, 
 PHY PPCNT(0x12): tslc=N sym_err=N sync_hdr=N edpl=B[N] fec_corr=B[rs N] fec_unc=B[rs N] link_down=N
 PHY PPCNT(0x00): tx_ok=N rx_ok=N sym_err_carrier=N
 PHY PPCNT(0x16) probe: rx_bits=N sym_err=N corr_bits=N (pre-FEC BER derivable)
+PHY monitor: PAOS probe accepted (oper_status=N)
+PHY monitor: MTMP probe accepted (len=8, N mdegC)
+PHY monitor up: mlx5_prism0, interval Nms, paos=yes, mtmp=yes
 removing (fw_rev 14.32.1908)
 DESTROY_EQ ok: eq_number=4, E events consumed
 teardown: 2305/2305 pages reclaimed, HCA disabled

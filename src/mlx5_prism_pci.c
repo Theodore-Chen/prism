@@ -182,6 +182,11 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 			goto err_eq_teardown;
 	}
 
+	/* T13: PHY monitor + sysfs — the production service on top. */
+	err = mlx5_prism_phy_monitor_start(dev);
+	if (err)
+		goto err_eq_teardown;
+
 	return 0;
 
 err_eq_teardown:
@@ -213,6 +218,13 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_major(dev),
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
+
+	/*
+	 * T13: stop the monitor before anything else — the cancel waits out
+	 * any in-flight (sleeping) ACCESS_REG sample, so no command races
+	 * the teardown below retiring the completion path it sleeps on.
+	 */
+	mlx5_prism_phy_monitor_stop(dev);
 
 	mlx5_prism_teardown(dev, PRISM_TD_ALL);
 	pci_clear_master(pdev);

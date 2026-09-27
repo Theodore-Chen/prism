@@ -1,4 +1,4 @@
-# mlx5_prism 设计文档 v2.2 —— ConnectX-4 Lx 控制面驱动
+# mlx5_prism 设计文档 v2.3 —— ConnectX-4 Lx 控制面驱动
 
 > 内核模块名：`mlx5_prism.ko`
 > 从零实现 ConnectX-4 Lx 的固件-驱动控制面协议：CMDQ 引擎 + 9 步固件引导 + EQ 事件 + PHY 诊断 + 最小 netdev 骨架 + ftrace 全链路追踪。全部指标与 mlx5_core 对照验证。
@@ -8,6 +8,8 @@
 > **v2.1 修订说明（2026-09-15）**：§1.2 旧公理"任何抽象不允许为优雅而加层"作废，代之以 §1.7 设计价值观（简单而优雅 + 抽象准入三问）；§5.5 澄清结构体覆盖层"未采用是纪律、非禁令"。零代码影响——该公理在代码中零引用。
 >
 > **v2.1 内容修订（2026-09-17，T10-prep 判决）**：§7 全章翻案改写——T09 的"1 条目 EQ / ~10% 激活 / 中断不点火"三结论均系驱动侧 eqc 编码错位（固件忠实按 ifc 语义解读）；ifc 编码转正（读回改真窗口解析），§5.5/§6/§12 同步。
+>
+> **v2.3 修订说明（2026-09-27，T13）**：§8 全节按 v2.2 勘误与 T12 实测落地——监控执行体 timer_list→delayed_work 翻案、sysfs 字段表 v2.3、状态机滞回细化、新增 PAOS/MTMP 两寄存器与探测方法论。登记见附录。
 
 ---
 
@@ -203,7 +205,7 @@ struct mlx5_prism_dev {
 | cmdq slot 位图 + token | `cmdq->lock`（spin_lock_irqsave） | probe / 自检 / **T10 硬中断** | 唯一一扇跨中断锁；eq.c 只经 `cmdq_complete_slots()` 进入 |
 | eq.cons_index | 单写者 | 今天进程上下文轮询；T10 起硬中断 | T10 后轮询路径仅作恢复手段（模块参数），两写者不同时存在 |
 | fw.state / 页池 | probe 上下文单线程 | — | T13 定时器只读 profile + caps 缓存，不改 fw 状态 |
-| phy 状态（T13） | `phy->lock`（自增） | 定时器 vs sysfs 读 | 拷贝后释放锁再发命令 |
+| phy 状态（T13） | `phy->lock`（spinlock） | 监控 work vs sysfs 读 | 快照式：work 持锁发布/show 持锁拷贝；ACCESS_REG 在锁外睡（§8.1） |
 | NAPI vs xmit（T15） | netif_tx_lock / napi 禁调度 | — | 沿用内核惯例，不发明新锁 |
 
 ---
@@ -499,33 +501,56 @@ PHY 计数器（PPCNT, register ID 0x5008）不在 BAR 空间，必须经 `ACCES
 **tslc/rx_bits 现象学（同次实测）**：两组计数器的 time_since_last_clear 在 PPCNT 读取时仅 7/8 ms，且 0x16 的 rx_bits 与 tslc 严格成 25.78125 Gbps 标称线率之比（200e6/7.76ms、225e6/8.73ms，双口独立吻合）——①计数器时钟在 prism 引导期间（触发点未定，候选 INIT_HCA/端口 PHY 重建）重启过，"跨驱动单调存活"未被证明，交叉对账以预登记弱形式（链路 down 全零锚点）通过；②即便链路 down，rx_bits 也按标称线率精确累积——BER 分母在无链路时依然有效。
 
 ```
-定时器（默认 100ms，monitor_interval_ms RW）
-  → access_reg(PPCNT, port=1, counter_group∈{0x0, 0x12})
-  → 解析 symbol_errors / sync_headers_errors / fc_fec_corrected(4 lanes) /
-    rs_fec_corrected / rs_fec_uncorrectable / link_down_events
-  → caps 缓存辅助判断 + sysfs 导出 + 阈值状态机（T13 按 8.3 输入源推导 BER）
+delayed_work（默认 100ms，monitor_interval_ms RW，下一 tick 生效）
+  → access_reg(PPCNT, port=1, grp 0x16)   ← BER 真分母（T12 判决可用）
+  → access_reg(PPCNT, port=1, grp 0x12)   ← FEC rs 总量 + sym/sync_hdr + link_down
+  → access_reg(PAOS, port=1)              ← oper_status：状态机链路 down 冻结的输入
+  → [access_reg(MTMP, sensor 0)]          ← 仅探测通过时（温度，毫摄氏度）
+  → 差分更新快照 + 阈值状态机推进（§8.3）
+  → queue_delayed_work(wq, self, interval)  ← 尾部自重排
 ```
+
+执行体选型（2026-09-27 功课翻案，原设计 timer_list 作废）：上述读取全部走 EVENT 模式阻塞 invoke（`wait_for_completion_timeout` + GFP_KERNEL 分配）——timer_list 回调在软中断上下文不能睡眠。mlx5_core 自证同一取舍：health.c 纯 MMIO 健康轮询用 timer_list（回调只 ioread+queue_work），而周期性下发会睡眠命令的任务（fw-log-ts 每小时 ACCESS_REG/MRTC）用自建单线程 wq + delayed_work 自重排 + `cancel_delayed_work_sync` + `destroy_workqueue`——prism 照抄后者，每 dev 一个 `create_singlethread_workqueue`。grp 0x0（ethtool 锚点）不入监控环：那是 T12 交叉对账的口径，监控不需要 tx/rx_packets。
+
+新寄存器（偏移入 fmt.h，几何对 mlx5_ifc.h paos_reg/mtmp_reg 核对，fmt_equiv_check 断言）：PAOS(0x5006, 16B) local_port@1、oper_status@byte3 低半字（1=up 2=down，mlx5_core port.c 同源）；MTMP(0x900A) sensor_index=首 be32 低 12 位、temperature=be16@6（0.125°C/LSB，×125 转毫摄氏度）。MTMP 长度探测：先 8B（CX4 时代 PRM 最小布局）再 32B（含阈值/传感器名的现代布局），两者皆拒才判不支持——内核读温唯一路径即 MTMP（hwmon.c），但门禁 MCAM mtmp 位对 CX4 Lx 固件基本不可达；照 0x16 探测方法论（能力位可能谎报），运行时探测定去留，判决无论哪边都入怪癖档案。读失败处理：跳过该样本（保留上次值），连续 10 次打一条 rate-limited warn，监控不死于瞬态。
+
+**PAOS/MTMP 上机判决（2026-09-27，T13 双口实测）**：PAOS 双口 accepted、oper_status=1——**链路 up**（机器自 T12 后接线），状态机冻结分支暂未触发、活链路评估路径已实证（零误码 → ok 恒稳）。MTMP 双口 **accepted 且 len=8 首探即中**（CX4 时代最小布局即本卡固件实现），双口同读 94000 mdegC（94°C）——双 PF 同芯片 ASIC 传感器读数一致自洽，94°C 在 CX4 Lx 结温区间（上限约 105-110°C）偏热但合理。能力位谎报前科再添一例：MCAM mtmp 位对 CX4 Lx 不可达（mlx5_core hwmon 因此静默跳过），而寄存器照常维护并放行——temperature sysfs 属性经 is_visible 落地可见。
 
 clr 恒为 0：prism 的读不得清零固件计数器（ethtool 交叉对账与 T13 采样都建立在计数器单调存活上）。
 
-### 8.2 sysfs 接口（/sys/class/misc/mlx5_prism0/）
+### 8.2 sysfs 接口（/sys/class/misc/mlx5_prism<N>/，双 PF 每口一实例）
+
+misc 设备与 netdev 职责分离：netdev 是网络栈入口（T15），PHY 监控是诊断功能。本卡双 PF（08:00.0/.1）一 PF 一口（§8.1），故每 dev 实例注册一个 misc 设备：`mlx5_prism0`、`mlx5_prism1`（ida 序号，循环装卸不爬号；MISC_DYNAMIC_MINOR，.parent=&pdev->dev，.groups 一次挂属性——dw-xdata-pcie.c 范式）。不聚合：聚合设备需 per-port 子目录属性，与 sysfs"一文件一值"规范相性差，且无真实消费者。
+
+字段表 v2.3（v1 遗产 `symbol_error_rate` 删除——与 pre_fec_ber 语义重复且非硬件字段名；`link_quality` 删除——无对应硬件字段，被状态机输出取代）：
 
 ```
-pre_fec_ber  symbol_error_rate  fec_corrected  fec_uncorrectable   (RO)
-temperature  link_quality       status                              (RO)
-monitor_interval_ms                                                 (RW)
+RO  phy_symbol_errors / phy_received_bits / phy_corrected_bits   grp 0x16 原始绝对值
+RO  fec_corrected / fec_uncorrectable                             grp 0x12 rs_fec 总量
+RO  link_down_events                                              grp 0x12 be32
+RO  pre_fec_ber                                                   推导：Δsym_err/Δrx_bits（锚点=监控首样本）
+RO  status                                                        ok / degraded / critical
+RO  link_up                                                       PAOS oper_status（1/0）
+RO  temperature                                                   MTMP 毫摄氏度；仅探测通过才可见（is_visible）
+RW  monitor_interval_ms                                           默认 100，钳位 20..60000，下一 tick 生效
 ```
 
-misc 设备与 netdev 职责分离：netdev 是网络栈入口（T15），PHY 监控是诊断功能。
+pre_fec_ber 的差分锚点是监控首样本——同一加载生命周期内的差分（§8.1 tslc 现象学的直接落实：计数器时钟随引导重启，跨加载绝对值不可比）。show 取快照零睡眠（spinlock 拷贝后 sysfs_emit），不做实时读——监控 100ms 刷新已足够新鲜，且天然免疫 remove 路径锁序问题（show/store 在进程上下文本可睡眠，hwmon.c 即先例；prism 选快照式是简单性取舍而非硬约束）。
 
 ### 8.3 阈值状态机
 
 ```
-ok ──BER≥1e-10──→ degraded ──BER≥1e-7──→ critical   （带滞回，防抖）
-      dmesg WARNING              dmesg ERR
+ok ──BER≥1e-10──→ degraded ──BER≥1e-7──→ critical   （进入）
+ok ←──BER<5e-11── degraded ←──BER<5e-8── critical    （退出：半阈值）
+    每个方向都需连续 K=5 个样本确认（滞回防抖）
+      转移沿打 dmesg WARNING（进 degraded）/ ERR（进 critical）
 ```
 
-输入源（v2.2 勘误 + 上机判决）：BER 为推导量——**优先 grp 0x16 真分母（本卡固件实测可用，见 §8.1 判决）**，fallback 为 25G 标称线速 × 采样间隔估算分母、grp 0x12 symbol_errors 做分子（链路 up 时 PHY 持续发送，idle 符号计入，口径成立；链路 down 时状态机冻结在 ok——但注意 rx_bits 分母在链路 down 时仍有效累积）。sysfs 同时导出原始计数器，读者可自行换算口径。
+输入源（v2.3 细化）：每 tick 的**区间 BER**——本样本 0x16 增量之比（Δsym_err/Δrx_bits），真分母（§8.1 判决）。fallback 线速估算法（25.78125 Gbps × 采样间隔做分母）仅在 0x16 不可用的假想固件上启用，本卡不需要。BER 比较用 u64 乘法（num × 10^10 ≥ den 形式），不做浮点。
+
+链路 down（PAOS oper_status=2）：状态机置 ok 并冻结（不评估）——down 链路上 BER 无意义；实测注记：down 时 rx_bits 分母仍按线率累积、sym_err 恒 0，BER 自然为 0，冻结是语义正确性而非数值必要性。PAOS 不可得的固件上按 BER 自然演化（如实记档）。
+
+**采样量化注记（如实记录）**：100ms 窗口每样本期望误码数 = 2.58e8 bit × 1e-10 ≈ 0.026 个——1e-10 阈值在此粒度下实际触发点在 ~1e-8 档（需要每样本稳定出现 ≥1 个误码）。这是采样物理不是缺陷；sysfs 同时导出原始计数器与首样本锚定的累计 BER，读者可自行换算任意窗口口径。
 
 交叉验证：mlx5_core 加载时 `ethtool -S` 同名计数器（`tx/rx_packets_phy`、`rx_symbol_err_phy`、`link_down_events_phy`）对账，V_prism ≥ V_mlx5（计数器单调存活）或同数量级（<5% 偏差仅适用于同时间窗双读，跨驱动切换用单调性）。链路 down 的实测注记：锚点全零时该判据为弱形式（§8.1 tslc 现象学——计数器时钟随引导重启）。
 
@@ -661,6 +686,16 @@ R0 安全规则：基线 diff 必须为空；绝不原地改写协议字节（kn
 | §6.1 / §12 | profile EQ 字段、常数速查 | 激活重试降级为防御参数；EQ 常数更新（log12/4096 条目，10/10 接受） | 同上 |
 
 ---
+
+## 附：v2.2 → v2.3 修订登记（2026-09-27，T13）
+
+| 位置 | 原内容 | 处置 | 依据 |
+|------|--------|------|------|
+| §8.1 | 监控循环用 timer_list、grp∈{0x0,0x12} | 执行体改 delayed_work + 每 dev 单线程 wq（读取走 EVENT 模式阻塞 invoke，软中断不能睡）；环改 0x16+0x12+PAOS(+MTMP)，0x0 退出监控环 | cmdq.c invoke 睡眠路径实锤；mlx5_core health.c 两套定时范式对照（timer_list 仅纯 MMIO 轮询）；fw_reset.c 100ms timer_list 反例 |
+| §8.2 | v1 字段表（pre_fec_ber/symbol_error_rate/link_quality/...） | v2.3 字段表：0x16 三元组原始值 + 0x12 FEC/链路事件 + 推导 BER + 状态机输出 + PAOS link_up + 条件可见 temperature；symbol_error_rate/link_quality 删除；misc 改双 PF 每口一实例 | v2.2 勘误（BER 为推导量）+ T12 实测能力 + sysfs.rst 一文件一值 |
+| §8.2 | temperature 无条件在列 | MTMP 运行时探测定去留（is_visible）；长度先 8B 后 32B 两级探测 | 内核读温唯一路径 MTMP（hwmon.c）但 MCAM 门禁对 CX4 Lx 不可达；照 0x16 探测方法论（能力位可能谎报） |
+| §8.3 | "带滞回防抖"（未定义形态） | 细化：区间 BER 输入、半阈值退出 + 连续 K=5 确认、PAOS down 冻结、u64 定点比较、100ms 量化注记 | sysfs.rst/health.c 功课 + 采样物理核算 |
+| §3.2 | phy 行"定时器 vs sysfs 读" | 定稿为快照式 spinlock（work 发布/show 拷贝，ACCESS_REG 锁外睡） | 本表预设计落地 |
 
 ## 附：v2.1 → v2.2 修订登记（2026-09-26，T12）
 

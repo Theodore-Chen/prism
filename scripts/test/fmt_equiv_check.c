@@ -427,6 +427,45 @@ int main(void)
 		}
 	}
 
+	/* 12. paos/mtmp_reg (T13): request encodings and response decoders
+	 * against emulated MLX5_SET algebra (paos local_port 8b @0x08,
+	 * oper_status 4b @0x1c; mtmp sensor_index 12b @0x14 — an all-zero
+	 * request image IS sensor 0, no packing needed), the offset table
+	 * against the ifc geometry, and the 0.125°C→mdeg scaling. */
+	printf("paos/mtmp_reg geometry (T13)\n");
+	{
+		uint32_t opers[] = { 0, 1, 2, 0xf };
+		size_t a;
+
+		for (a = 0; a < sizeof(opers) / sizeof(opers[0]); a++) {
+			u8 emu[PRISM_PAOS_REG_SIZE] = { };
+			u8 n[PRISM_PAOS_REG_SIZE] = { };
+			uint32_t dw0;
+			char name[64];
+
+			prism_paos_set_port(n);
+			dw0 = emu_mlx5_set(0, 1, 0x08, 8);
+			mlx5_prism_put_be32(emu, dw0);
+			check_eq("paos request (local_port=1)", emu, n, 8);
+
+			memset(emu, 0, sizeof(emu));
+			memset(n, 0, sizeof(n));
+			dw0 = emu_mlx5_set(0, opers[a], 0x1c, 4);
+			mlx5_prism_put_be32(emu, dw0);
+			memcpy(n, emu, sizeof(n));
+			snprintf(name, sizeof(name), "paos oper_status=%u decode",
+				 opers[a]);
+			check_val(name, prism_paos_oper_readback(n), opers[a]);
+		}
+
+		check_val("mtmp temperature off", PRISM_OFF_MTMP_TEMPERATURE,
+			  0x30 / 8);
+		check_val("mtmp len min", PRISM_MTMP_LEN_MIN, 8);
+		check_val("mtmp len full", PRISM_MTMP_LEN_FULL, 32);
+		check_val("mtmp 8 LSB to mdeg", prism_mtmp_to_mdeg(8), 1000);
+		check_val("mtmp 0 LSB to mdeg", prism_mtmp_to_mdeg(0), 0);
+	}
+
 	printf(failures ? "FAILURES: %d\n" : "ALL EQUIVALENT (%d failures)\n",
 	       failures);
 	return failures ? 1 : 0;

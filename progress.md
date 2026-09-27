@@ -486,16 +486,24 @@
 
 ### T13-phy-sysfs
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: in_progress → completed（2026-09-27）
+- **开始时间**: 2026-09-27
+- **完成时间**: 2026-09-27
+- **Commit**: 见本次 T13 提交（timer_list→delayed_work 翻案 + v2.3 字段集 + 全绿证据）
+- **读过源码**: Documentation/filesystems/sysfs.rst（一文件一值/sysfs_emit/生命周期）；mlx5_core health.c（两套定时范式：timer_list 纯 MMIO 轮询 vs delayed_work 周期睡眠任务 fw-log-ts/MRTC）；core/hwmon.c（MTMP 路径 + MCAM mtmp 门禁 + show 里睡眠的合法实例）；drivers/misc/dw-xdata-pcie.c（misc+.groups 范式）；fs/kernfs/file.c + fs/sysfs/file.c（of->mutex/active ref 语义）；kernel/workqueue.c（cancel_delayed_work_sync 对自重排的保证原文）
+- **关键决策**: ①**采样执行体 timer_list→delayed_work 翻案**——PPCNT 读取走 EVENT 模式阻塞 invoke（wait_for_completion + GFP_KERNEL），软中断回调不能睡；mlx5_core 自证同一取舍（health.c 健康轮询 timer_list 只因纯 MMIO，周期睡眠任务走单线程 wq+delayed_work），按"如实记录"回写 task.json/DESIGN v2.3；②字段集 v2.3：0x16 三元组原始值 + 0x12 FEC/链路事件 + 推导 BER（锚点=监控首样本，同加载差分）+ 状态机输出，v1 遗产 symbol_error_rate/link_quality 删除；③misc 每 PF 一实例（mlx5_prism0/1，ida 序号回收），show 全部快照式零睡眠（spinlock 拷贝+sysfs_emit）；④状态机：区间 BER 输入，半阈值退出+连续 K=5 确认，u64 倒数比较无浮点，PAOS down 冻结 ok；⑤MTMP 照 0x16 方法论运行时探测（先 8B 后 32B），is_visible 门控 temperature
+- **遇到的问题与解决**: ①首轮 J5 FAIL——脚本把事件路径写成 events/mlx5_prism/cmdq_issue/enable（实际事件名 prism_cmdq_issue），ENOENT→计数 0→awk 除零连锁；改系统级 enable（G3 加固同款）+正确事件名后全绿，判据未动；②J5 原始比值 0.746 而非预期 0.5——trace_pipe 是消费式读取，打开先排空积压再进实时流，N2 窗口实为 2s 积压+3s 实时；按校正窗口复算 76/s→39.6/s，节奏精确 2:1，测量口径问题非驱动问题（判据容差恰好覆盖，如实入档）
+- **与设计的偏差**: 无（DESIGN 先行升 v2.3 作为判定基准，实现与设计一致；task.json timer_list 原文按"如实记录"修订并注明依据）
+- **学习心得**: sysfs show/store 在进程上下文本可睡眠（hwmon.c 先例），真实约束是 remove 锁序与生命周期，prism 选快照式是简单性取舍；cancel_delayed_work_sync 内核文档明文支持"回调自重排"场景（workqueue.c 原文 "can be used even if the work re-queues itself"），health.c 无 guard 模式同此语义；misc_register 的 .groups 一次挂属性 + is_visible 条件隐藏是标准做法
+- **reflection_questions 答案**:
+  - **Q: 为什么挂 /sys/class/misc/ 而不是 /sys/class/net/?** A: T15 之前没有 netdev；PHY 监控是诊断功能与数据面正交，misc 是无 netdev 身份时设备注册的最小通道。本卡双 PF 一口一函数，每 dev 一实例（mlx5_prism0/1）天然对齐；聚合设备需 per-port 子目录，违背 sysfs 一文件一值精神且无消费者。
+  - **Q: show 里能 sleep 吗？** A: 能——kernfs 的 of->mutex 是每打开文件一把普通 mutex，active reference 钉住属性节点；hwmon 的 show 就在持 mutex 下发阻塞 access_reg。真正要防的是锁序倒挂（remove 持锁删属性 vs show 持同一锁睡）与对象生命周期。prism 的 show 取快照零睡眠，天然免疫，监控 100ms 刷新已够新鲜。
+  - **Q: timer callback 能调 sleeping API 吗？** A: 不能——timer_list 回调在软中断上下文。这正是本任务翻案的依据：ACCESS_REG 走 EVENT 模式阻塞 invoke，必须住进程上下文；mlx5_core 的答案是分层——纯 MMIO 轮询用 timer_list（health.c/fw_reset.c 100ms 先例），周期睡眠任务用单线程 wq+delayed_work（health.c fw-log-ts）。
+  - **Q: 滞回是什么？为什么阈值告警需要？** A: 进出门槛分离（本实现：进入 1e-10/1e-7，退出半阈值 5e-11/5e-8）+ 连续 K=5 样本确认。BER 在阈值附近抖动时，单门槛会反复翻转告警（flapping）；双门槛留出死区，K 确认吸收单样本噪声——100ms 窗在 1e-10 档期望误码仅 ~0.026 个，没有 K 确认的告警纯属噪声驱动。
+- **上机结果（/var/tmp/t13_run.log 两轮，黑匣子 /var/tmp/t13_live.log）**: J1-J7 全绿。J2 双口 10 属性 + temperature 可见；J3 双口 rx_bits 差分 26.0e9/s（25.78125 Gbps 线率吻合）；J4 pre_fec_ber=0、status=ok、**link_up=1（机器自 T12 后接线，链路活）**——状态机在真链路上评估；J5 100→200ms 读写生效、节奏精确减半（见上）；J7 rmmod 2-3s 干净。
+- **硬件判决三件（回填 DESIGN §8.1/怪癖口径）**: ①PAOS accepted，oper_status=1 双口——链路态输入源成立；②MTMP **accepted（len=8 首探即中，CX4 时代最小布局），双口同读 94000 mdegC（94°C）**——双 PF 同芯片 ASIC 传感器读数一致自洽，94°C 在 CX4 Lx 结温区间（上限 ~105-110°C）偏热但合理，能力位谎报前科再添一例：MCAM mtmp 位对 CX4 Lx 不可达而寄存器照常服务；③基线 42 行/口（39+3 monitor 族，与预测分毫不差），G3 监控期 issue=266 complete=266 dropped=0——周期 ACCESS_REG 全配对。
+- **收尾**: task.json T13 → completed；t13_verify.sh 归档（scripts/archive/，横幅注明 J5 事件路径修正史与 trace_pipe 积压口径）；rebaseline 后 r0_gate 8/8 全绿（/var/tmp/rebaseline_run.log）。
+- **任务总结**: PHY 监控转正为生产服务（misc+sysfs v2.3 十属性 + delayed_work 采样 + 阈值状态机）；副产物三条——①timer_list→delayed_work 翻案入档（软中断不能睡的工程结论 + mlx5_core 双范式对照）；②MTMP 8B 判决（温度从"待核实"变"实测可用"，is_visible 落地）；③测量方法两课（tracefs 事件名要以 TRACE_EVENT 为准；trace_pipe 积压排空口径要算进窗口）。
 
 ---
 
@@ -828,10 +836,22 @@
 - **收尾**：task.json T12 → completed（出口判定逐项满足：compile/checkpatch ✓、双口 PPCNT 行 ✓、J1-J6 ✓、黑匣子 ✓、BER 口径入 DESIGN ✓）；t12_verify.sh / t12_trace_diag.sh 归档（scripts/archive/，横幅注明判据针对 T12 窗口勿跑后改）。
 - **任务总结**：ACCESS_REG 通用化（fw.c wrapper + host_endianness 归一）+ PPCNT 读取链路（fmt.h 偏移表 → phy.c L3 → selftest）转正；副产物三条——①pre_fec_ber 判据勘误（非硬件字段，BER 为 grp 0x16 推导量）与判据改版（J1-J6 预登记）；②**0x16 上机判决推翻 pre-PCAM 预期**（FW 接受且计数器活跃，T13 可用真分母）；③门禁工程两课（归一化对"设计上就存在的合法变体"的覆盖缺口；trace 采集的瞬态瑕疵要有快照/丢事件/重试三重防护而非裸判）。
 
+### T13-phy-sysfs——misc + sysfs v2.3 + delayed_work 监控（2026-09-27，两轮全绿收官）
+
+- **开工前功课（三张力裁决）**：①采样执行体翻案——timer_list 软中断不能承载 EVENT 模式阻塞 invoke（cmdq.c:350 wait_for_completion + fw.c GFP_KERNEL 实锤），改 per-dev 单线程 wq + delayed_work 尾部自重排，mlx5_core health.c 双范式对照为证（timer_list 仅纯 MMIO：健康轮询/fw_reset 100ms；周期睡眠任务：fw-log-ts/MRTC）；task.json 原文按"如实记录"修订。②字段集 v2.3 重定（原始计数器 + 推导 BER + 状态机输出），v1 遗产 symbol_error_rate/link_quality 删除；temperature 以 MTMP 运行时探测定去留（照 0x16 方法论）。③misc 每 PF 一实例 mlx5_prism0/1（ida 序号，MISC_DYNAMIC_MINOR，.parent=&pdev->dev，.groups）。功课纠错一则：task.json concepts"show 不能用 mutex"不准确——kernfs of->mutex 是普通 mutex，show 可睡（hwmon.c 先例），真实约束是锁序倒挂与生命周期。
+- **实现**（驱动侧 ~570 行）：fmt.h +47（PAOS/MTMP 偏移，位号经 MLX5_SET 移位代数核对：oper_status=byte3 低半字=FLD 24、temperature=be16@6、sensor_index=0 时全零免打包）；mlx5_prism.h +76（phy 结构+快照+状态枚举）；phy.c +552（监控 sample/状态机/九属性+is_visible/misc 注册/PAOS·MTMP 探测）；pci.c +12（probe 尾启动、remove 头 cancel→destroy→deregister，先于 EQ teardown）；fmt_equiv_check.c +39（PAOS 编解码/MTMP 偏移/0.125°C 换算断言，ALL EQUIVALENT）。锁按 §3.2：睡眠读全在锁外，锁内只有快照算术。BER 比较用倒数 u64（den/w ≤ num）+溢出护栏，无浮点。
+- **状态机**：区间 BER 输入（本样本 0x16 增量），进入 1e-10/1e-7、退出半阈值 5e-11/5e-8 + 连续 K=5 确认；PAOS down 冻结 ok；转移沿打 pci_warn/err/info。100ms 量化注记如实入 DESIGN（1e-10 档每样本期望误码 ~0.026 个，实际触发点 ~1e-8 档）。计数器倒退守卫：rx_bits/sym_err 回退即重锚（BER 窗不跨计数器时钟重启）。
+- **上机第一轮（J5 脚本笔误）**：事件路径写成 events/mlx5_prism/cmdq_issue/enable（实际 TRACE_EVENT 名 prism_cmdq_issue）→ ENOENT → 计数 0 → awk 除零连锁 FAIL；J1-J4/J6/J7 已全过。修为系统级 enable（G3 加固同款）+正确事件名，判据不动。
+- **上机第二轮（全绿）**：J1 build/checkpatch（gcc-11 零警告，新增文件 0/0/0）✓；J2 双口 10 属性 + temperature 可见 ✓；J3 双口 rx_bits 差分 26.0e9/s（线率吻合）✓；J4 pre_fec_ber=0、status=ok、link_up=1——**机器自 T12 后接线，状态机在真链路上评估**（比预登记的 down 场景更强）✓；J5 读写生效 + 节奏减半（原始比值 0.746 系 trace_pipe 消费式读取先排空 2s 积压的窗口口径，按校正窗口 76/s→39.6/s 精确 2:1）✓；J7 rmmod 2-3s 干净 ✓。
+- **硬件判决三件（入档）**：①PAOS accepted oper_status=1 双口——链路态输入源成立；②**MTMP accepted（len=8 首探即中——CX4 时代 8B 最小布局），双口同读 94°C**——双 PF 同芯片传感器自洽，能力位谎报前科再添一例（MCAM mtmp 位不可达而寄存器服务照常）；③G3 监控期 issue=266 complete=266 dropped=0（周期 ACCESS_REG 全配对），基线 42 行/口（+3 monitor 族精确命中）。
+- **收官**：rebaseline ALL GREEN（族过滤零意外、自洽 zero diff、r0_gate 8/8、mlx5_core 恢复）；task.json T13 → completed；t13_verify.sh 归档（横幅注明 J5 修正史与 trace_pipe 口径）。
+- **任务总结**：PHY 监控转正为生产服务；副产物三条——①timer_list→delayed_work 翻案方法论（"回调上下文能否睡"是执行体选型的唯一裁决问题，mlx5_core 双范式是活教材）；②MTMP 8B 判决（temperature 从"待核实"变"实测可用"）；③测量两课（tracefs 事件名以 TRACE_EVENT 宏为准勿凭记忆；trace_pipe 积压排空要算进测量窗）。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
+- **v2.3（2026-09-27，T13）**：§8.1 监控环重画（delayed_work 翻案 + 0x16/0x12/PAOS/MTMP 四读、0x0 退出监控环）+ PAOS/MTMP 上机判决回填（PAOS accepted/链路 up；MTMP accepted len=8/94°C——MCAM mtmp 位谎报第二例）；§8.2 字段表 v2.3（三分类 + misc 每 PF + is_visible 温度；symbol_error_rate/link_quality 删除）；§8.3 状态机细化（区间 BER、半阈值+K=5、PAOS 冻结、u64 倒数比较、100ms 量化注记）；§3.2 phy 行定稿（快照式 spinlock）。依据：health.c/hwmon.c/sysfs.rst/dw-xdata-pcie.c 功课 + T13 上机（/var/tmp/t13_run.log、/var/tmp/rebaseline_run.log）。
 - **v2.2（2026-09-26，T12）**：§8.1 pre_fec_ber 勘误（非硬件字段，BER 为 grp 0x16 推导量）+ 0x16 上机判决（FW 接受、计数器活跃，PCAM 能力位谎报缺失）+ tslc/rx_bits 现象学（引导期计数器时钟重启、链路 down 时 rx_bits 仍按线率累积）；§8.3 输入源改真分母优先；§10.1 C4 改计数器单调性口径。依据：mlx5_ifc.h v5.15/en_stats.c 全量核查 + T12 上机（/var/tmp/t12_run.log）。
 
 
