@@ -20,7 +20,7 @@
 L0 硬件访问   mlx5_prism_pci.c (BAR0/iseg)
 L1 传输       mlx5_prism_cmdq.c  mlx5_prism_eq.c  mlx5_prism_irq.c  mlx5_prism_fmt.h
 L2 固件       mlx5_prism_fw.c (状态机/caps/怪癖档案 fw_profile)
-L3 服务       (T12+ phy / T14 smoke / T15 netdev，未建)
+L3 服务       (T12/T13 phy 监控 / T14 smoke 已建 / T15 netdev 待建)
 横切          mlx5_prism_trace.{h,c}
 ```
 

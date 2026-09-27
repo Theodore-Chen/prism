@@ -180,6 +180,10 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 		err = mlx5_prism_phy_selftest(dev);
 		if (err)
 			goto err_eq_teardown;
+		/* T14: raw-ethernet QP loopback (PD/mkey/CQ/QP + WQE/CQE). */
+		err = mlx5_prism_smoke_selftest(dev);
+		if (err)
+			goto err_eq_teardown;
 	}
 
 	/* T13: PHY monitor + sysfs — the production service on top. */

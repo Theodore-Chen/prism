@@ -30,11 +30,11 @@
 | R0.4-fw-state-quirks | R0 重构 IV：固件状态机门禁 + 怪癖档案命名化 | S4.5 | — | **completed** | 见 R0.4 节 | 2026-09-15 |
 | R0.5-dev-ctx-teardown-selftest | R0 重构 V：设备结构重组 + 统一 teardown + selftest=1 分离 | S4.5 | — | **completed** | 见 R0.5 节 | 2026-09-15 |
 | R0.6-trace-scaffold | R0 重构 VI：tracepoint 脚手架（T11 核心提前） | S4.5 | — | **completed** | 见 R0.6 节 | 2026-09-15 |
-| T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | pending | — | — |
-| T10-eq-irq-enable | MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径） | S5 | — | pending | — | — |
-| T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | pending | — | — |
-| T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | pending | — | — |
-| T14-smoke-test | 硬件冒烟测试（QP→WQE→CQE） | S5 | — | pending | — | — |
+| T11-tracepoints | tracepoint 完善与延迟基线采集（P1'/P2'） | S5 | — | **completed** | 7addf48 | 2026-09-17 |
+| T10-eq-irq-enable | MSI-X 点亮 + 硬中断事件模式（镜像 mlx5_core 官方路径） | S5 | — | **completed** | 41018f4 | 2026-09-18 |
+| T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | **completed** | 3432cdb | 2026-09-27 |
+| T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | **completed** | 4a12bba | 2026-09-27 |
+| T14-smoke-test | 硬件冒烟测试（ETH TX SQ→WQE→CQE，路线 A） | S5 | — | **completed** | 见 T14 节 | 2026-09-27 |
 | T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | pending | — | — |
 | T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | pending | — | — |
 | T17-architecture-summary | 架构总结文档 | S6 | — | pending | — | — |
@@ -509,16 +509,71 @@
 
 ### T14-smoke-test
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed（2026-09-27，十六趟上机 + 收官链全绿：t14_verify ALL GREEN → rebaseline 基线 64 行/口 → r0_gate 8/8）
+- **开始时间**: 2026-09-27
+- **完成时间**: 2026-09-27
+- **Commit**: —（未 commit：探针版在树，按"全绿才 commit"惯例挂起）
+- **读过源码**: mlx5 7.0.0 树 fpga/conn.c（QP 全生命周期模板）、steering/sws/dr_send.c（CQ/PA mkey/doorbell）、wc.c（NOP WQE 中间档）、wq.c（QP WQ 布局：RQ@0/SQ 同页紧随）、ib/wr.c+qp.c（WQE 构造/to_mlx5_st/转移命令）、include/linux/mlx5/{qp,cq,doorbell}.h（WQE/CQE/doorbell 几何）、vport.c（mlx5_nic_vport_enable_roce）、rdma.c（core 侧 RoCE 启用三步）；本机 5.15 headers（fs 布局对照）；v4.19 ib/qp.c（opt_mask 允许表，web 取证）；社区 syndrome 表（lukego gist，web 取证）
+- **功课核准（无论后续选哪条路线都成立）**：
+  - **send doorbell 正式答案**（v1 writeq 假设的终结）：普通 doorbell = WQE ctrl 段前 8 字节（本身 BE）memcpy+`__raw_writeq` 裸写 `BAR0 + uar×4K + 0x800`；屏障序 = mlx5e_notify_hw 逐字（dma_wmb→SQ dbr be32 BB 计数→wmb→MMIO）；BF 拷贝语义入档不用
+  - **"MODIFY_QP" 不存在**：状态转移是独立 opcode RST2INIT 0x502/INIT2RTR 0x503/RTR2RTS 0x504，opt_param_mask 语义经 v4.19 允许表核准
+  - fmt.h 新增 `prism_ifc_set/get`（MLX5_SET 移位代数直译，31 字段×32 随机 == emu，fmt_equiv 锁死）+ qpc/cqc/mkc/WQE/CQE/doorbell 偏移表
+- **九趟上机判决链**（全部双口一致，黑匣子 /var/tmp/t14_live.log 在案）：
+  1. **st=9 (RAW_ETHERTYPE) 不存在**：CREATE_QP 拒 0x3/0x28b996 "create_qp: bad service type"（社区表）；内核自 raw-packet QP 拆成 SQ/RQ 后从未发过 st=9，此固件（FW 14.32.1908）从未实装——task.json 原设计路线撞固件现实
+  2. **st 阶梯**：st=4 (MLX, fre=0) 拒 0xe3e6dd（表外，另有未满足约束）；**st=0 RC 接受**（qpn=128 双口）——qpc 全部几何字段被判有效；RST2INIT 过；INIT2RTR 拒 0x2/0xe18032
+  3. **RTR 富集梯 V1-V4 内容无关**：+mtu/log_msg_max/+src_idx/hop/+完整合成 AV 全部同 syndrome（拒绝发生在内容校验之前）；V4（opt_param_mask）单独换 0x7016b9 "bad opt_param_mask"（v4.19 允许表证实位组合不合法 → mask=0 语义没错）
+  4. **双 QP 对照（peer/self × L2/L3）全拒**：remote_qpn 排除，INIT2RTR 属范畴级拒绝
+  5. **三诊断定因**：QUERY_NIC_VPORT 双口 **roce_en=0**；INIT2INIT 对照接受（拒绝精确限定在 RTR 的连接绑定路径）；QUERY_QP 读回 state=2/st=34 与预期不符（疑老固件 query_qp_out 布局差异，原始 hexdump 在案未解，次要疑点）
+  6. **RoCE 门被前置校验封锁**：MODIFY_NIC_VPORT fs@0x7e 拒 0xc1f678（表外）；no-op mtu 写接受（命令路径+ctx@256 自证）；fs@0x7d 接受但回读全零（写中他字段，无效写）；(fs,ctx) 四组合矩阵：**唯 v7.0 编码被拒、其余全是无操作**
+  7. **收口证据**：本机 5.15 headers fs 布局与 v7.0 完全一致 → 正常工作的 mlx5_core（rocep8s0f0/f1 存在、caps byte67=0xff HCA RoCE 能力位=1）发同款字节成功启用 → 差异在 mlx5_core bring-up 的某个前置状态（en aux attach/eswitch/IB 注册阶段，未知），非编码、非卡能力
+- **卫生记录**：第八趟 fs@0x7d 无效写在 ensure 失败早退时遗留脏位，第九趟入口清理逻辑还原（"restored to 0" 在案）；teardown 2305/2305 九趟全程干净，零 WARNING/Oops
+- **已证明的硬件行为**（无论选哪条路线，怪癖档案级事实）：PD/MKEY/CQ/CREATE_QP(RC)/RST2INIT/INIT2INIT/DESTROY 全对象生命周期双口全绿；RC 的 RTR 被 vport roce_en=0 范畴级封锁；roce_en 运行时启用对 prism 拒绝（对 mlx5_core 放行，前置不明）
+- **代码现状**：探针版在树——smoke.c 1026 行（st 梯/RTR 富集梯/双 QP RC 对/RoCE 门矩阵/三诊断，smoke_stage 1/2/3 分级点火），fmt.h +~210 行，h/fw/trace_names/pci/Makefile 配套，t14_verify.sh（判据预登记+黑匣子+mktemp，头部修正史 1-9 趟全登记），normalize.sh/rebaseline.sh smoke 行族已预登记（未启用）。本地门禁全绿：make 0 警告、checkpatch 全部改动文件 0/0/0、fmt_equiv 102 断言 ALL EQUIVALENT
+- **决策点（用户拍板中）**：**A** 改 SQ/RQ 对象模型（mlx5e 原生数据面，不依赖 RoCE，WQE/doorbell/CQE 管线 ~60% 复用，T15 红利，估 2-3 趟 TX + 2-3 趟可选 RX）/ **B** 继续追 mlx5_ib 前置条件（无界）/ **C** 降级出口判据为对象生命周期（放弃 WQE/CQE，任务核心目的落空）
+- **参考版本对口调查（2026-09-27，用户拍板路线 A 后、定计划前；参考树已切 linux-v5.15-study 分支，v7.0 原状保留于 linux-v7.0-study）**：
+  - **方法论入档**：行为问题查 fw 同代（v4.9/v4.14）+ 本机运行版（5.15）双参考；几何问题用 7.0 树并与 5.15 headers 交叉；读旧版用 `git show TAG:path` 零 checkout 副作用。首例兑现：**5.15 的 sqc 无 non_wire（bit 0xf 为 reserved_at_f）——non_wire 是 6.x HWS 才插入的字段，这颗固件从未被任何跑过的驱动写过**；且 5.15 无 wc.c、无 hws（steering/hws 目录仅 7.0 构建的 .o 残留）→ deepseek 方案把 non_wire=1 当主档不妥，主档改 wc 形态。
+  - **③档（TD/TIS/SQ）字段级参考（5.15 en_main/transobj 实跑代码）**：ALLOC_TD（16B in，out transport_domain@0x48）；CREATE_TIS（tisc 仅 transport_domain，tls_en 时才带 pd）；CREATE_SQ sqc = tis_lst_sz=1 + tis_num_0=tisn + cqn + ts_cqe_to_dest_cqn=0 + ts_format + state=RST + flush_in_error_en=1 + wq{CYCLIC=1,uar_page,log_wq_pg_sz,dbr_addr,pas}（wq.stride=6/pd/log_wq_sz 在 param 预填）；MODIFY_SQ RST→RDY = 顶层 sq_state@0x40 + ctx.state=RDY + modify_bitmask=0（状态转移不需 bitmask，mlx5e 仅 rl/qos 更新才置位）。
+  - **ABI 三代交叉（v4.9/5.15/7.0）**：wq_bits 逐字相同（pd@0x48/uar_page@0x68/dbr_addr@0xa0/log_wq_stride@0x10c/log_wq_pg_sz@0x113/log_wq_sz@0x11b，wq 尾部内嵌 pas→create_sq_in 绝对偏移 272=家族 0x880 惯例）；sqc 仅 7.0 插入 non_wire@0xf（v4.9 连 allow_swp/hairpin 都还是保留位——我们全写 0，era 安全）；modify_sq_in/create_sq_out 两代一致（sq_state@0x40/sqn@0x48/bitmask@0x80/ctx@byte32、out sqn@byte9）。**fmt.h 只写三代不变的字段位号，non_wire 位号标注"7.0-only、此固件预期=保留位"仅作②档探针用。**
+  - **0xc1f678 之谜封档（不再深究）**：5.15 的 update_roce_state 与 7.0 逐字相同（同 fs 位、同 ctx 位、同 inlen=512）；今天 13:30 mlx5_core 加载日志干净无 "Failed to enable RoCE"（该失败必打日志）+ rdma aux 设备在册 → **同字节 mlx5_core 成功、prism 被拒**，差异锁定在其 bring-up 某前置状态（eswitch/en attach/完整 vport 上下文一类），路线 A 不依赖 RoCE，就此入档。
+- **路线 A 代码落地（2026-09-27，T14-A 计划获批后；QP/RoCE 探针整体退役，上机判据随路线重登记完毕，待第十趟上机）**：
+  - **改动清单**：smoke.c 1026→657 行——删 17 个探针符号（st 阶梯/RTR 富集梯/create_qp/transition_qp/qp_to_rtr/post_recv/RoCE 门六件套/三诊断），保留 PD/MKEY/CQ/doorbell/CQE/stage 框架（qpn→sqn 语义），新增 create_sq(tier)/modify_sq_rdy/alloc_td/create_tis/teardown_sq 与同趟升档（CREATE 被拒或 doorbell 后无 CQE/错误 CQE → 销毁 SQ 重建下一档，PD/MKEY/CQ 复用，WQ/dbr/pc 归零而 CQ 的 ci 连续）；SEND 改 ETH 形态 ds=3（ctrl+全零 eseg+dseg）。fmt.h qpc/ADS/NVC/RoCE 段删除、sqc/wq/tisc/modsq 位号表新增（全为三代 ABI 交叉不变位）；h 的 QP/NVC opcode 族→SQ/TD/TIS 族（CREATE_SQ 0x904/MODIFY_SQ 0x905/DESTROY_SQ 0x906/ALLOC_TD 0x816/DEALLOC_TD 0x817/CREATE_TIS 0x912/DESTROY_TIS 0x914）；fw.c 门禁表同步；trace_names.h 换名表；fmt_equiv_check.c T14 节 29 字段×32 随机+偏移几何+create_sq/modify_sq 打包；normalize.sh smoke 行族 qpn→sqn/tdn/tisn 占位符。
+  - **全档公共字段集（对deepseek 方案的三处修正后定稿）**：cqn/state=RST/flush_in_error_en=1/**ts_format=0**（有意偏离 mlx5e 的 FREE_RUNNING——老固件保留位安全值）/wq{CYCLIC=1、**pd=pdn、log_wq_stride=6**（en/params.c:573-580 证据，修正此前"wq 五件无 pd"的记录）、uar_page=eq.uar、log_wq_pg_sz=0、log_wq_sz=4、dbr_addr、pas@272}。三档：①wc.c 最小形态（主档）→②+non_wire@0xf（7.0-only，预期拒）→③+ALLOC_TD/CREATE_TIS(仅 transport_domain@0x128)/tis_lst_sz=1+tis_num_0。smoke_sq_tier 模块参数可钉档。
+  - **本地门禁全绿**：make 0 警告；checkpatch 5 文件 0/0/0；fmt_equiv ALL EQUIVALENT（两处新断言读回窗口自查纠正：24 位字段在 dword 高位应 `>>8` 读——驱动写入路径由随机等价锁死无误）；t14_verify.sh/normalize.sh bash -n 过。J1 行族换 CREATE_SQ(tier=N)/SQ to RDY/DESTROY_SQ,TIS,TD,CQ,MKEY,PD，J3 换 TX CQE(REQ, wqe_counter=1, byte_cnt=64)，RX 判据删除并显式移交 T15；修正史第十条（路线 A 决策）入 verify.sh 头部。
+- **第十趟上机（2026-09-27，路线 A 首趟，NOT GREEN——判决产出型失败）**：
+  - **CREATE_SQ (0x904) 三档全拒 0x3/0x17a194**：首负载（干净状态）即现、双口一致、全趟确定性复现（208 次负载同码）。tier1 与 7.0 wc.c 字段集逐项一致（stride=6/pd 从 wc.c:229-235 模板再证实；`MLX5_TIMESTAMP_FORMAT_FREE_RUNNING=0x0` 排除 ts_format 差异）而仍被拒 → **拒绝属环境性**（同 roce_en 故事的结构），非字段编码。
+  - **新能力事实**：ALLOC_TD 收（tdn=1）、CREATE_TIS 收（tisn=0）——TD/TIS 对象层可用；脏状态趟 tier2 换 syndrome（0x991046≠0x4fde71）→ **non_wire 位被此 2016 fw 解析**（修正"7.0-only 预期拒"的推断，语义未知）。
+  - **驱动 bug 自查自纠（id=0 卫语句）**：`if (s->tisn)` 把 fw 合法分配的 tisn=0 当"无对象"→ DESTROY_TIS 跳过 → DEALLOC_TD 拒 0x9（bad resource state，TIS 仍引用 TD）→ 销毁链中断 → CQ/MKEY/PD 每失败负载泄漏（cqn 涨至 2128）→ DESTROY_EQ 拒 0x9 → CMDQ 舔化（2000ms 无 ownership 交接、邮箱泄漏）→ 探针 -5、0/2305 页、基线 2305 行消失。修复：六对象全改显式 have_* 有效性标志（qpn 时代 128+ 从未踩 0，tisn=0 首次踩中——id!=0 哨兵模式正式退役）。
+  - **定位线索**：caps 补丁字节 82 在 5.15 布局= **max_wqe_sz_sq 低字节**（T05"未识别字段"获得 ifc 身份；清位对 ≤0x1F 的值理论无操作，但此 fw 在该字节自报非零=布局漂移嫌疑仍在）；eth-offload caps 页（QUERY 组1）从未查过——wqe_inline_mode 若=1 则 vport min_wqe_inline_mode 是 CREATE_SQ 的必填项（mlx5e_create_sq 唯一条件字段）。
+  - **第十一趟上机（2026-09-27，V 梯判决 + 根因假设定案，NOT GREEN）**：
+    - **12 次尝试（V 富集梯 × tier 三档）全部同码 0x17a194**——v1 的 min_wqe_inline_mode=1（探针实读：vport=1、eth caps wqe_inline_mode=1）被整体吞掉 → **内容无关范畴级拒绝**（与当年 INIT2RTR 同形状）。id=0 卫语句修复生效（销毁链不再中断，"tier N vN failed — next form" 逐档落盘）。
+    - **环境探针读数**：caps 补丁字节 82-83=**0x0400**（T05 清位后 SET 进去的值；固件自报 0x0?，bit2 保留、bits0-1 被清）。对照 **v4.14（同代）与 v5.15 ifc：bytes 82-83 = max_wqe_sz_sq**，此代 fw 在低字节携带 log2 值 → 清位后 max WQE = 2^4 = **16B**。
+    - **根因假设（第十二趟实验对象）**：T05 清位把 max_wqe_sz_sq 砍到 16B < SQ WQEBB 步长 64B(log 6) → CREATE_SQ 内容无关 bad param。同时解释：12 变体同码、TD/TIS（非 WQ 对象）全过、mlx5_core（默认从不 SET_HCA_CAP）SQ 可用、QP 时代 CREATE_QP(RC) 可用（qpc 的 log_sq_stride 是 QP 语义 4bit 字段，与此 cap 校验路径不同）。反证也备好：若 0x06 被拒/无效，则转 162-163 轴或 stride 实验。
+    - **实现**：fw.c 新增 `caps82` 模块参数（0=旧清位默认；4-7=强制 byte82 终值）+ SET_HCA_CAP ok 行带 wqe_sz82 回显；verify.sh 第二位置参数注入（`t14_verify.sh all 6`），J0 横幅记录 knobs，判据 J1-J3 不变。本地门禁全绿。
+  - **第十二趟上机（2026-09-27，caps 轴判死 + 真根因落网，NOT GREEN 但闭环）**：
+    - **caps 轴判死**：caps82=6 的 SET 命令被收（回显落盘）但 CREATE_SQ 仍全码 0x17a194；caps[post] 读回仍 0x04，caps[cur]（pre-SET）本就 0x04/0x00==补丁值 → 固件对这些字节"收命令不改值"、**补丁本就是 no-op**；mlx5e 在原生 0x04 下 SQ 照常 → caps 不是拦截点。
+    - **社区 syndrome 表命中（web 取证，lukego gist）**：**0x17A194 = "create_sq: dbr_address must be dword aligned"**；邻居 0x5F5A07 "create_sq: wq_type must be 1" 未触发 → wq 块起点（sqc+0x30）正确。
+    - **fmt.h 双位号错误（自查落网）**：wq.dbr_addr 真位 wq 字节 16（ifc bit 0x80，v4.14/5.15 机械双证）——早前调查笔记误记 0xa0/字节 20 并流入实现；sqc.cqn 真位 bit 0x48，误记 0x40。机理闭环：错位 be64 使固件从 16-23 字节读到"总线地址高 32 位"（0xd6 类值非 4 对齐）→ 12 变体全同码（变体梯从不触碰 dbr）。旁证：CQ 全程可过（cqc dbr@56 独立字段没抄错）；wq_type=1 不触发邻居码。
+    - **方法论教训入档**：①**笔记常量≠ifc 事实**——位号必须从 ifc 原文机械推导（本轮补审计脚本：fmt.h 全部 T14 常量 vs v4.14/5.15 逐项对照全 OK）；②**fmt_equiv 的边界**——等价测试锁"prism_ifc_set==MLX5_SET 编码代数"，不锁"偏移==ifc"，错位断言会自洽通过（期望值也要独立推导）；③社区 syndrome 表（lukego gist）对逐字段 BAD_PARAM 类判决是免费高倍率工具，先查表再做实验（本次 0x28b996 后第二例命中）。
+    - **修复**：fmt.h dbr_addr 20→16、cqn 0x40→0x48，注释记录事故；fmt_equiv 期望值改为 ifc 独立推导（0x80/8=16、0x48 读法回低 24 位）。本地门禁全绿（make 0 警告/checkpatch 0-0-0/fmt_equiv ALL EQUIVALENT）。第十三趟预登记：直接 `t14_verify.sh all`，预期 tier1 v0 全链通过。
+  - **第十三趟上机（2026-09-27，J1/J2 全绿——位号修复实证；卡点后移至 SEND）**：
+    - **J1 生命周期全绿 ×2**（CREATE_SQ tier=1 v=0 sqn=128 **首试即中**、RDY、销毁链全绿）+ **J2 NOP 全绿 ×2**（REQ CQE wqe_counter=0）——CREATE/doorbell/CQE 全链打通，十二趟战役的正宫字段集成立。tier2（non_wire）CREATE 被拒（回归最初预期），tier1/tier3 全过。
+    - **J3 SEND 确定性错误 CQE**：opcode=13 (REQ_ERR)、byte_cnt=0、wqe_counter=1，8 个到点火的变体（4v×{tier1,tier3}）同形。头号假设：**vport min_wqe_inline_mode=1 在 WQE 执行期强制**（NOP 无数据豁免、指针式 dseg 违规）；次嫌：PA mkey 无 len（fpga/conn.c 同款空 mkey 但 QP-MLX 传输语境，且 dr_send 的空 mkey 先例从不透过 mkey 读内存）。
+    - **第十四趟预登记**：SEND 改 inline 形态（dseg counter bit31 + 64B payload 内嵌，ds=7 跨双 WQEBB，mlx5e 小包标准形）——对两类真因通吃；CQE dump 增打错误 syndrome@0x20/wqe_opcode@0x21（mlx5_err_cqe 布局），若仍失败黑匣子直接点名。fmt_equiv 换 inline 打包断言（ds=7/counter 0x80000040/payload 落位/doorbell）。本地门禁全绿。
+  - **第十四趟上机（2026-09-27，inline dseg 不足 + 打印偏移自纠）**：SEND inline dseg 后仍同形 REQ_ERR（opcode=13/wc=1）；syndrome 读回全零——自查发现 **err_cqe 打印偏移错误**（按 0x20/0x21 读的是 srqn 区；正确布局 v4.14==v5.15：vendor@0x36、**syndrome@0x37**、s_wqe_opcode_qpn@0x38）。嫌疑收窄至 **ESEG inline_hdr**：vport min_wqe_inline_mode=1 要求 L2 头放在 eseg.inline_hdr（mlx5e attr.ihs 机制：sz@eseg+12 be16、头字节从 eseg+14 溢入后续 DS），inline dseg 不满足该检查。
+    - **第十五趟上机（2026-09-27，SEND 三因子因果链闭环——成功被门禁误杀）**：
+      - **诊断弹药兑现**：错误 CQE 完整落盘——tier1（无 TIS）SEND：**syndrome=0x02 (LOCAL_QP_OPERATION_ERROR)**、vendor=0x68、s_wqe_opcode_qpn=0x0a000080（wqe_opcode=SEND、qpn 吻合）；**tier3（TD+TIS）SEND：opcode=REQ、wqe_counter=1、byte_cnt=0——成功完成**（NOP 后 1ms 即返回、非超时；本 fw 的 TX CQE 不报字节数），被 J3 的 64/78 写死判据误杀。
+      - **三因子因果链定案**：①**TIS**——无传输域的 SEND 判 0x02 本地 QP 操作错（tier1 全灭的原因）；②**vport L2 inline 地板**——tier3+指针 dseg 在第13趟 REQ_ERR、tier3+eseg inline_hdr 本趟成功（inline 工作缺一不可）；③**门禁 byte_cnt**——{0,64,78} 三值，实测值即口径。tier2（non_wire）维持 CREATE 被拒（该位语义与 6.x HWS 语境绑定，弃）。
+      - **第十六趟上机（2026-09-27，T14 数据面首次全过；J6 仪表窗口 bug 修正）**：byte_cnt 三值判据生效后 **J1/J2/J3 全 PASS**（stage3 双口 TX CQE ok ×2 + PASSED；胜者形态=tier3 TD/TIS + eseg inline_hdr + inline payload）；本趟真实计数 **206 PASSED / 0 FAILED**（时间戳切窗核实：3 stage 负载×2 口 + 100 stress×2 口，一个不差）。J6 报 FAILED×22 系**测量仪表 bug**：黑匣子 `dmesg -w` 启动先转储环形缓冲存量，第十五趟 FAILED 残尾被整文件计数吞入。判据未动，修仪表：启动后 sleep 1 标记本趟起始行（LIVE_SKIP），J6 只计本趟。第十七趟：重跑取干净 ALL GREEN 判决（206/0 已核实留档）。
+      - **第十七趟上机（2026-09-27，ALL GREEN 收官）**：修正仪表后干净判决——J0-J6 全 PASS，黑匣子本趟 233 PASSED / 0 FAILED（233 含上趟 PASSED 残尾流过标记线的无害溢计，硬判据 FAILED=0 为零）。**收官链**：rebaseline 首跑被族外守卫熔断（两族新行未登记：SET_HCA_CAP 的 wqe_sz82 回显后缀、tier2 探针的 0x904 拒绝行——status/syndrome 归一化后登记，判据未动）；二跑全绿（族内通过 → 基线重采 **64 行/口**（42+smoke 族 22）→ 自洽 zero diff → r0_gate 8/8 → mlx5_core 恢复）。
+- **最终形态**（十六趟收敛的答案，与 task.json 原设计的偏差全数有据）：ETH TX SQ 数据面 = ALLOC_PD → CREATE_MKEY（PA）→ CREATE_CQ → **ALLOC_TD → CREATE_TIS（仅 transport_domain）→ CREATE_SQ（tis_lst_sz=1）** → MODIFY_SQ RST→RDY（bitmask=0）→ NOP/SEND WQE → CQE 轮询 → 销毁链。SEND 必须 L2-inline（vport min_wqe_inline_mode=1 地板：eseg.inline_hdr 14B 头 + inline dseg 载荷）；无 TIS 的 SEND 判 0x02 LOCAL_QP_OP_ERR；TX CQE byte_cnt=0（本 fw 不报字节数）；non_wire 位被解析但 CREATE 被拒（语义与 6.x HWS 绑定）。RX（RQ/RESP_SEND/帧比对）显式移交 T15。
+- **学习心得**：①**判别式阶梯 + 黑匣子**是唯一能在"每次上机一个判决"约束下收敛的方法论——十六趟里每一趟都至少杀死一个假设或定位一个 bug，没有一趟是白跑的；②**位号必须从 ifc 机械推导**——dbr_addr（0x80 记成 0xa0）与 cqn（0x48 记成 0x40）两次事故都源于"笔记常量"未回验原文，fmt_equiv 只能锁编码代数不能锁偏移正确性；③**社区 syndrome 表是免费的倍增器**——0x28b996 与 0x17a194 两弹命中，先查表再做实验应当成为逐字段类 BAD_PARAM 的第一反应；④**固件"收命令不改值"**（caps82 实验）与**门禁自身的 bug**（byte_cnt 写死、黑匣子窗口）提醒：拒绝信任何一层——驱动、判据、仪表——都可能是错的那层，判决要以原始字节（hexdump）为准；⑤版本对口方法论二次兑现：err_cqe/sqc/wq 布局用 v4.14==v5.15 双版锁死后再写代码。
+- **reflection_questions 答案**：
+  - **Q: 为什么 QP 必须先 RTR 再 RTS？** A: RTR 配置接收侧资源（地址向量/接收 PSN/MTU 协商），RTS 激活发送侧——顺序错则发送引用未建立的接收上下文。本卡实证更硬：INIT2RTR 因 vport roce_en=0 被范畴级拒绝（0xe18032），而路线 A 用 SQ/RQ 对象模型天然绕开了整个连接状态机——对象模型的"状态"藏在命令序列（CREATE→MODIFY RDY）而非 qpc 状态机里。
+  - **Q: CQE owner bit 解决什么问题？** A: 环复用歧义——producer/consumer 共享环形索引，owner 位是每圈翻转的圈号签名，使"上一圈的旧 CQE"永不过期成"新完成"。实测本 fw HW 首圈写 owner=0，与预填 0xf1 的谓词 `(op_own&1)==((ci>>log)&1)` 精确咬合，NOP/SEND/错误 CQE 三种完成全验证。
+  - **Q: 为什么 WQE 要在 coherent DMA 内存？** A: WQE 不是一次写完的（ctrl/eseg/dseg 分段构造，posted 后 SW 不再触碰）——关键是**写序对设备可见**：dma_wmb 保证 WQE 先于 dbr、wmb 保证 dbr 先于 MMIO doorbell（mlx5e_notify_hw 逐字）。coherent 映射免去 cache 维护；本趟的 L2-inline WQE 跨两个 WQEBB（112B），同序约束成立。
+  - **Q: smoke test 通过说明了什么？** A: 全数据面电路闭环——fw 经 PAS 找到 WQE 页并 DMA 读 WQE、解析 ctrl（wqe_index/sqn/ds）、执行（NOP 直Complete/SEND 组帧出队）、DMA 写回 CQE 且 owner 语义正确、销毁链零泄漏（r0_gate 40 循环零投诉）。没通过的十七趟同样有价值：它们把"这颗固件上什么可行"的边界逐条钉进了怪癖档案。
+- **DESIGN 回写**: v2.4 已完成（§2.2 文件映射 + §5.6 send doorbell 硬件实证 + §5.7 数据面冒烟小节新增 + §6.3 数据面怪癖 + 附 v2.4 修订登记），见下节记录。
+- **代码现状**: 最终版在树——smoke.c 799 行（三档梯 × V 富集梯 × 同趟升级，胜者 tier3+eseg inline_hdr），fmt.h sqc/wq/tisc/WQE/CQE 全位号表（ifc 机械审计），配套 .h/fw.c/trace_names/fmt_equiv（31 字段）。本地门禁全绿；t14_verify.sh 判据随修正史（16 条）归档。
 
 ---
 
@@ -851,6 +906,7 @@
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
+- **v2.4（2026-09-27，T14）**：§2.2 smoke.c 定稿行 + §5.6 send doorbell 硬件实证（ctrl 前 8B 裸写 BAR0+uar×4K+0x800、mlx5e_notify_hw 屏障序）+ §5.7 数据面冒烟服务新增（对象链/三档梯/L2-inline WQE 形态/byte_cnt 判决口径）+ §6.2 caps 补丁 no-op 勘定（c[82..83]=max_wqe_sz_sq 低字节，门闩语义）+ §6.3 数据面怪癖新增（QP 范畴封锁、SQ 三因子、TX byte_cnt=0、err_cqe 布局、零 id 对象等十六趟判决）。依据：T14 上机（/var/tmp/t14_run.log、t14_live.log、rebaseline_run.log）。
 - **v2.3（2026-09-27，T13）**：§8.1 监控环重画（delayed_work 翻案 + 0x16/0x12/PAOS/MTMP 四读、0x0 退出监控环）+ PAOS/MTMP 上机判决回填（PAOS accepted/链路 up；MTMP accepted len=8/94°C——MCAM mtmp 位谎报第二例）；§8.2 字段表 v2.3（三分类 + misc 每 PF + is_visible 温度；symbol_error_rate/link_quality 删除）；§8.3 状态机细化（区间 BER、半阈值+K=5、PAOS 冻结、u64 倒数比较、100ms 量化注记）；§3.2 phy 行定稿（快照式 spinlock）。依据：health.c/hwmon.c/sysfs.rst/dw-xdata-pcie.c 功课 + T13 上机（/var/tmp/t13_run.log、/var/tmp/rebaseline_run.log）。
 - **v2.2（2026-09-26，T12）**：§8.1 pre_fec_ber 勘误（非硬件字段，BER 为 grp 0x16 推导量）+ 0x16 上机判决（FW 接受、计数器活跃，PCAM 能力位谎报缺失）+ tslc/rx_bits 现象学（引导期计数器时钟重启、链路 down 时 rx_bits 仍按线率累积）；§8.3 输入源改真分母优先；§10.1 C4 改计数器单调性口径。依据：mlx5_ifc.h v5.15/en_stats.c 全量核查 + T12 上机（/var/tmp/t12_run.log）。
 

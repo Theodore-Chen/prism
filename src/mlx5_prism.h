@@ -53,6 +53,20 @@
 #define MLX5_PRISM_CMD_OP_SET_HCA_CAP	0x109
 #define MLX5_PRISM_CMD_OP_QUERY_ISSI	0x10a
 #define MLX5_PRISM_CMD_OP_SET_ISSI	0x10b
+#define MLX5_PRISM_CMD_OP_CREATE_MKEY	0x200
+#define MLX5_PRISM_CMD_OP_DESTROY_MKEY	0x202
+#define MLX5_PRISM_CMD_OP_CREATE_CQ	0x400
+#define MLX5_PRISM_CMD_OP_DESTROY_CQ	0x401
+#define MLX5_PRISM_CMD_OP_CREATE_SQ	0x904
+#define MLX5_PRISM_CMD_OP_MODIFY_SQ	0x905
+#define MLX5_PRISM_CMD_OP_DESTROY_SQ	0x906
+#define MLX5_PRISM_CMD_OP_ALLOC_TD	0x816
+#define MLX5_PRISM_CMD_OP_DEALLOC_TD	0x817
+#define MLX5_PRISM_CMD_OP_CREATE_TIS	0x912
+#define MLX5_PRISM_CMD_OP_DESTROY_TIS	0x914
+#define MLX5_PRISM_CMD_OP_ALLOC_PD	0x800
+#define MLX5_PRISM_CMD_OP_DEALLOC_PD	0x801
+#define MLX5_PRISM_CMD_OP_QUERY_NIC_VPORT_CTX 0x754
 #define MLX5_PRISM_CMD_OP_ACCESS_REG	0x805
 #define MLX5_PRISM_CMD_HDR_SIZE		16
 #define MLX5_PRISM_CMD_DATA_BLOCK_SIZE	512
@@ -477,6 +491,17 @@ void mlx5_prism_irq_free(struct mlx5_prism_dev *dev);
 
 /* T12: PPCNT one-shot reads (selftest only, R0.5 discipline). */
 int mlx5_prism_phy_selftest(struct mlx5_prism_dev *dev);
+/*
+ * T14: hardware datapath smoke test (selftest only) — ETH TX send queue:
+ * PD/mkey/CQ/SQ lifecycle, MODIFY_SQ RST->RDY, then a NOP WQE and a
+ * 64-byte SEND through the send queue with the TX CQE polled from the CQ.
+ * The SQ form walks a three-tier ladder in the same load (1 = wc.c
+ * minimal, 2 = +non_wire, 3 = +ALLOC_TD/CREATE_TIS, the mlx5e real form);
+ * the smoke_stage module param gates ignition (1 = lifecycle only,
+ * 2 = + NOP WQE, 3 = + 64-byte SEND, default 3). RX (receive side,
+ * RESP_SEND, frame compare) moves to T15 with the RQ.
+ */
+int mlx5_prism_smoke_selftest(struct mlx5_prism_dev *dev);
 /*
  * T13: production monitor + sysfs — start registers the misc device and
  * launches the sampler (PAOS/MTMP probed first, their verdict recorded);

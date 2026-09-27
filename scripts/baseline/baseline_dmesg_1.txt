@@ -19,7 +19,7 @@ host endianness declared (reg 0x7004)
 caps[max]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 a0 00 00 01 00 00 00 00 2e 1b 9b 1b 0f 0f 80 0e 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 80 44 20 04 f1 e1 00 00 fc ff 00 00 ff f0 f5 01 7e 00 b0 00 00 01 80 81 c0 08 0e 1f fb fb cb 8f 00 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 00 0f 18 00 7c 90 00 00 00 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 00 01 00 00 04 8f 00 00 00 00
 caps[cur]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 bf 00 00 01 00 00 00 00 2e 1b 9b 1b 0f 0f 80 11 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 84 44 60 04 f9 e1 00 04 fc ff 00 05 ff f0 fd 01 7e 00 b0 00 00 01 c0 81 c0 08 ce 1f fb fb cb 8f 80 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 01 0f 18 00 7c 90 00 00 0c 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 10 00 00 00 04 8f 00 00 00 00
 caps probe: max/cur ok (8-block chains), cur payload[16:18]=0f 0f, num_ports=1
-SET_HCA_CAP ok: profile known-good, num_ports=1 log_max_qp=2
+SET_HCA_CAP ok: profile known-good, num_ports=1 log_max_qp=2 wqe_sz82=0xX
 caps[post]: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 00 00 01 bf 00 00 01 00 00 00 00 2e 1b 9b 1b 0f 0f 80 11 00 97 00 40 03 16 20 18 16 98 03 97 04 c0 d0 d0 20 04 e0 44 84 44 60 04 f9 e1 00 04 fc ff 00 05 ff f0 fd 01 7e 00 b0 00 00 01 c0 81 c0 08 ce 1f fb fb cb 8f 80 05 67 0c f8 09 00 d2 00 83 04 00 00 00 02 00 00 00 01 00 00 00 00 f0 8c e4 00 15 10 17 00 18 fe 0f ff b8 97 17 10 17 b7 14 0b 00 69 04 06 06 00 00 00 0f e0 a9 0b 07 00 00 00 40 00 00 00 00 00 00 00 01 0f 18 00 7c 90 00 00 0c 00 00 00 00 00 00 00 9c 00 02 62 5a 00 00 00 00 00 00 10 00 00 00 04 8f 00 00 00 00
 init pages: firmware wants 2299
 MANAGE_PAGES(give 2299): out entries 0
@@ -34,6 +34,28 @@ eq self-test: 10/10 commands ok in event mode (E events, H consumed in hardirq, 
 PHY PPCNT(0x12): tslc=N sym_err=N sync_hdr=N edpl=B[N] fec_corr=B[rs N] fec_unc=B[rs N] link_down=N
 PHY PPCNT(0x00): tx_ok=N rx_ok=N sym_err_carrier=N
 PHY PPCNT(0x16) probe: rx_bits=N sym_err=N corr_bits=N (pre-FEC BER derivable)
+smoke self-test: stage 3 (ETH SQ datapath)
+smoke self-test: ALLOC_PD ok pd=N
+smoke self-test: env: caps patch bytes 82-83=0x0400 162-163=0x0000 (as set at bootstrap)
+smoke self-test: env: vport min_wqe_inline_mode=1 eth caps wqe_inline_mode=1
+smoke self-test: CREATE_MKEY ok mkey=0xX
+smoke self-test: CREATE_CQ ok cqn=N
+smoke self-test: CREATE_SQ ok tier=1 v=0 sqn=N
+smoke self-test: SQ to RDY ok
+smoke self-test: NOP WQE ok (opcode=REQ wqe_counter=0)
+smoke self-test: CQE dump: op_own=0xd2 opcode=13 byte_cnt=N wqe_counter=1
+smoke self-test: error CQE: vendor=0x68 syndrome=0x02 s_wqe_opcode_qpn=0x0a000080
+smoke self-test: tier 1 v0 failed (-N) — next form
+opcode 0x904: command status 0xN, syndrome 0xX
+smoke self-test: tier 2 v0 failed (-N) — next form
+smoke self-test: ALLOC_TD ok tdn=N
+smoke self-test: CREATE_TIS ok tisn=N
+smoke self-test: CREATE_SQ ok tier=3 v=0 sqn=N
+smoke self-test: SQ to RDY ok
+smoke self-test: NOP WQE ok (opcode=REQ wqe_counter=0)
+smoke self-test: TX CQE ok (opcode=REQ wqe_counter=1 byte_cnt=N)
+smoke self-test: DESTROY_SQ/TIS/TD/CQ/MKEY/PD ok
+Hardware datapath smoke test: PASSED
 PHY monitor: PAOS probe accepted (oper_status=N)
 PHY monitor: MTMP probe accepted (len=8, N mdegC)
 PHY monitor up: mlx5_prism1, interval Nms, paos=yes, mtmp=yes

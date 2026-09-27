@@ -24,12 +24,26 @@
 #include <linux/dma-mapping.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 
 #include "mlx5_prism.h"
 #include "mlx5_prism_fmt.h"
+
+/*
+ * Trip-12 experiment knob: overrides caps byte 82 (max_wqe_sz_sq's low
+ * byte on this era fw — v4.14 and v5.15 ifc both map bytes 82-83 there)
+ * at SET_HCA_CAP. 0 = the T05 legacy patch (clear bits 0-1, turning the
+ * fw-reported 0x0? into 0x04); 4-7 forces the value — 6 restores a max
+ * WQE size equal to the 64 B WQEBB stride, testing the trip-11/12
+ * hypothesis that the crippled cap is what makes CREATE_SQ a
+ * content-invariant bad parameter (0x17a194).
+ */
+static unsigned int caps82;
+module_param(caps82, uint, 0444);
+MODULE_PARM_DESC(caps82, "caps byte 82 (max_wqe_sz_sq lo byte) at SET_HCA_CAP: 0=legacy clear bits 0-1 (default), 4-7=force value");
 
 /*
  * Interface version negotiation (ISSI). Old firmware without QUERY_ISSI
@@ -83,6 +97,20 @@ bool mlx5_prism_fw_cmd_allowed(struct mlx5_prism_dev *dev, u16 opcode)
 		[MLX5_PRISM_CMD_OP_QUERY_EQ]		= MLX5_PRISM_FW_OPERATIONAL,
 		[MLX5_PRISM_CMD_OP_GEN_EQE]		= MLX5_PRISM_FW_OPERATIONAL,
 		[MLX5_PRISM_CMD_OP_NOP]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_CREATE_MKEY]	= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DESTROY_MKEY]	= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_CREATE_CQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DESTROY_CQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_CREATE_SQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_MODIFY_SQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DESTROY_SQ]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_ALLOC_TD]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DEALLOC_TD]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_CREATE_TIS]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DESTROY_TIS]	= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_ALLOC_PD]		= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_DEALLOC_PD]	= MLX5_PRISM_FW_OPERATIONAL,
+		[MLX5_PRISM_CMD_OP_QUERY_NIC_VPORT_CTX] = MLX5_PRISM_FW_OPERATIONAL,
 	};
 
 	if (opcode >= ARRAY_SIZE(min_state) || !min_state[opcode])
@@ -425,8 +453,12 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 		       dev->profile.caps_log_max_klm_cap);
 	if (dev->profile.caps_zero_cmdif_checksum)
 		memset(c + PRISM_OFF_CAPS_CMDIF_CHKSUM, 0, 2);
-	if (dev->profile.caps_clear_82_bits01)
-		c[PRISM_OFF_CAPS_UNIDENT_82] &= (u8)~0x3;
+	if (dev->profile.caps_clear_82_bits01) {
+		if (caps82)
+			c[PRISM_OFF_CAPS_UNIDENT_82] = (u8)caps82;
+		else
+			c[PRISM_OFF_CAPS_UNIDENT_82] &= (u8)~0x3;
+	}
 	if (dev->profile.caps_zero_162_163)
 		memset(c + PRISM_OFF_CAPS_UNIDENT_162, 0, 2);
 
@@ -438,9 +470,10 @@ static int mlx5_prism_fw_set_hca_cap(struct mlx5_prism_dev *dev)
 		goto out;
 	dev->fw.state = MLX5_PRISM_FW_CAPS_SET;
 	pci_info(dev->pdev,
-		 "SET_HCA_CAP ok: profile known-good, num_ports=%u log_max_qp=%u\n",
+		 "SET_HCA_CAP ok: profile known-good, num_ports=%u log_max_qp=%u wqe_sz82=0x%02x\n",
 		 prism_get_bits(c, PRISM_FLD_CAPS_NUM_PORTS, 8),
-		 prism_get_bits(c, PRISM_FLD_CAPS_LOG_MAX_QP, 5));
+		 prism_get_bits(c, PRISM_FLD_CAPS_LOG_MAX_QP, 5),
+		 c[PRISM_OFF_CAPS_UNIDENT_82]);
 
 	/* Read back: verifies the fw accepted and kept the profile. */
 	err = mlx5_prism_cmdq_invoke(dev, MLX5_PRISM_CMD_OP_QUERY_HCA_CAP, 0,

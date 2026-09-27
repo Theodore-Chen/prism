@@ -1,4 +1,4 @@
-# mlx5_prism 设计文档 v2.3 —— ConnectX-4 Lx 控制面驱动
+# mlx5_prism 设计文档 v2.4 —— ConnectX-4 Lx 控制面驱动
 
 > 内核模块名：`mlx5_prism.ko`
 > 从零实现 ConnectX-4 Lx 的固件-驱动控制面协议：CMDQ 引擎 + 9 步固件引导 + EQ 事件 + PHY 诊断 + 最小 netdev 骨架 + ftrace 全链路追踪。全部指标与 mlx5_core 对照验证。
@@ -152,7 +152,7 @@ sudo modprobe mlx5_core              # 回生产驱动
 | `mlx5_prism_fw.c` | L2 | 引导状态机、caps、页池、teardown、fw_profile | 492 |
 | `mlx5_prism_trace.{h,c}`（新，R0.6） | 横切 | tracepoint 定义与实例化 | ~150 |
 | `mlx5_prism_phy.c`（T12/T13） | L3 | ACCESS_REG PPCNT + sysfs + 定时器 | ~450 |
-| `mlx5_prism_smoke.c`（T14） | L3 | CREATE_QP→RTS→WQE→CQE | ~300 |
+| `mlx5_prism_smoke.c`（T14） | L3 | ETH TX SQ 数据面冒烟：PD/MKEY/CQ/TD/TIS/SQ 生命周期 + NOP/L2-inline SEND + CQE 轮询（三档梯 × V 富集梯，同趟自动升级） | 799 |
 | `mlx5_prism_netdev.c`（T15） | L3 | 最小 netdev + NAPI | ~350 |
 
 横切关注点：tracepoint（R0.6 起插桩 L1 关键路径）、日志规范（`pr_fmt` 前缀；生产路径 pci_info，自检路径额外 verbose）、黑匣子记录器（验证脚本内建，落 /var/tmp 逐行 sync）。
@@ -377,7 +377,29 @@ static inline u32  prism_get_bits(const u8 *buf, u16 first_bit, u8 nbits);
 
 - EQ doorbell 地址 = BAR0 + uar_idx×4KB + 0x40（arm）/ 0x48（仅更新 ci）〔实证〕；值为 `(ci & 0xffffff) | (eqn << 24)` 大端裸写。
 - 命令 doorbell = iseg 内 `cmd_dbell` 寄存器（§5.1）。
-- QP doorbell（T14/T15）：BF/UAR 页每 QP 独立——这是 Mellanox 不需要 VFIO 的硬件根基：硬件在硅片层面校验 doorbell 页归属，非法主人写不进去。prism 学的控制面（CMDQ 创建 QP/分配 UAR）正是该机制的前提。
+- **Send doorbell（T14 硬件实证，v2.4）**：普通 doorbell = WQE ctrl 段前 8 字节（本身 BE）`memcpy` + `__raw_writeq` 裸写 `BAR0 + uar×4KB + 0x800`；屏障序 = mlx5e_notify_hw 逐字（`dma_wmb` → SQ dbr be32 WQEBB 计数 → `wmb` → MMIO）。BF 拷贝语义不入库。硬件在硅片层面校验 doorbell 页归属——prism 学的控制面（CMDQ 分配 UAR）正是该机制的前提，v1 的 writeq 假设就此终结。
+
+### 5.7 数据面冒烟服务（T14，v2.4 新增）
+
+> v1/v2.3 均无：原设计走 QP 路线（CREATE_QP→RTR→RTS），九趟判别实验被
+> 固件现实否决（§6.3），路线 A 改 ETH TX SQ。十六趟上机收敛的最终形态：
+
+- **对象链**：`ALLOC_PD → CREATE_MKEY(PA) → CREATE_CQ → ALLOC_TD →
+  CREATE_TIS(tisc 仅 transport_domain) → CREATE_SQ(tis_lst_sz=1) →
+  MODIFY_SQ RST→RDY(顶层 sq_state@0x40 + ctx.state + bitmask=0) →
+  NOP/SEND WQE → CQE 轮询 → 销毁链（SQ→TIS→TD→CQ→MKEY→PD）`。
+- **三档梯 × V 富集梯**（同趟自动升级，syndrome 全程落黑匣子）：档①wc.c
+  最小形态（NOP 可用、SEND 不可用）→ 档②+non_wire（CREATE 被拒，弃）→
+  档③mlx5e 实跑形态（唯一能 SEND 的形态）；V 轴（min_wqe_inline_mode
+  /log_wq_sz 富集）最终非必需但保留为探针基础设施。
+- **WQE 形态**：NOP = ctrl(1 DS)；SEND = ctrl + eseg（L2 头 inline：
+  `inline_hdr.sz@eseg+12`、头字节从 eseg+14 溢入后续 DS）+ inline 数据段
+  （counter 置 bit31 + 载荷内嵌），14B 头 + 64B 载荷 = 8 DS 跨两个 WQEBB
+  ——vport `min_wqe_inline_mode=1` 地板使指针式 dseg 全灭（§6.3）。
+- **判决口径**：TX 成功 = CQE opcode=REQ 且 wqe_counter 吻合；byte_cnt
+  本 fw 恒 0（§6.3），不门禁。RX（RQ/RESP_SEND/帧比对）移交 T15。
+- 运行约束沿用 R0.5：仅 `selftest=1` 点火（`smoke_stage` 1/2/3 分级），
+  全部对象同调用内销毁；stress 100 循环零投诉实证。
 
 ---
 
@@ -415,8 +437,24 @@ SET_HCA_CAP 的语义在此固件上是**门闩而非字段写入**〔实证：S
 
 - 唯一必须的数值补丁：`log_max_klm ≤ 18`（c[35] bits3-7）。
 - 清零补丁：c[66..67]（cmdif_checksum 区）、c[82] 低 2 位、c[162..163]——考古见 progress.md T08，两处字段含义未识别但效果实证。
+- **v2.4 勘定（T14 实测）**：c[82..83] 在 v4.14/v5.15 ifc 均为 `max_wqe_sz_sq` 低字节；实测固件 PRE-SET 自报即 0x0400/0x0000 == 补丁后值，且强制 0x06 的 SET 命令被收但读回仍 0x04——**这些清零补丁对存储值实为 no-op**，其"必需"性只对 SET 命令被接受成立（门闩语义的又一实证）；它们与 CREATE_SQ 的行为无关（caps 轴由三趟判别实验排除）。
 - **禁止**写入 v5.15 语义字段（log_max_qp/pkey/log_uar_page_sz）。
 - 字段最小化实验（哪个补丁可省）是独立上机实验课题，不在重构路径上。
+
+### 6.3 数据面怪癖（T14，FW 14.32.1908，v2.4 新增）
+
+十六趟上机判决链的怪癖档案级事实（黑匣子 /var/tmp/t14_live.log 全程在案）：
+
+- **QP 路线被范畴级封锁**：CREATE_QP 接受 st=0 (RC)，但 INIT2RTR 以内容无关的 0x2/0xe18032 拒绝（九趟富集/对照实验定因：vport `roce_en=0`）；运行时启用 RoCE 被 0xc1f678 拒（同字节 mlx5_core 可行，bring-up 前置差异不明，封档）。
+- **SQ 三因子**（CREATE_SQ 曾 12 变体同码 0x3/0x17a194 的最终归因）：
+  1. `wq.dbr_addr` 位于 wq 内字节 16（ifc bit 0x80）——早期笔记误记 0xa0/字节 20 使固件读到"总线地址高 32 位"而拒；`sqc.cqn` 位于 bit 0x48（误记 0x40）。**教训入档：位号必须从 ifc 机械推导**。
+  2. **SEND 必须 TIS**：无传输域的 SEND 立即错误 CQE syndrome=0x02（LOCAL_QP_OPERATION_ERROR，vendor=0x68）；NOP 豁免。
+  3. **vport `min_wqe_inline_mode=1`（L2 inline 地板）在 WQE 执行期强制**：指针式 dseg（零 eseg）→ REQ_ERR；eseg.inline_hdr 承载 14B 以太头 + inline 数据段 → REQ 成功。
+- **TX CQE byte_cnt 恒 0**：本 fw 的发送完成不报字节数（门禁以 opcode=REQ + wqe_counter 为判决，byte_cnt 打印不门禁）。
+- **non_wire 位（sqc bit 0xf）被解析但 CREATE 被拒**（0x991046/0x17a194 随负载状态漂）——6.x HWS 语境字段，此 2016 固件无此形态。
+- **错误 CQE 布局**（v4.14==v5.15 `mlx5_err_cqe`）：srqn@0x20、vendor_err_synd@0x36、syndrome@0x37、s_wqe_opcode_qpn@0x38（[wqe_opcode][opmod][qpn]）；0x2c 处 byte_cnt 对错误 CQE 是保留区。
+- **对象 id 可为 0**：fw 会分配 tisn=0/cqn 低位等合法零值——有效性必须显式标志跟踪（`id!=0` 哨兵模式在此翻车：漏销毁 TIS → DEALLOC_TD 0x9 连锁 → EQ 拆除被拒 → CMDQ 舔化 → 探针失败 0/2305 页）。
+- **社区 syndrome 表（lukego gist）两次命中**（0x28b996 bad service type、0x17a194 dbr dword aligned）——逐字段类 BAD_PARAM 先查表再做实验。
 
 ---
 
@@ -686,6 +724,14 @@ R0 安全规则：基线 diff 必须为空；绝不原地改写协议字节（kn
 | §6.1 / §12 | profile EQ 字段、常数速查 | 激活重试降级为防御参数；EQ 常数更新（log12/4096 条目，10/10 接受） | 同上 |
 
 ---
+
+## 附：v2.3 → v2.4 修订登记（2026-09-27，T14）
+
+- §2.2：smoke.c 行更新为最终形态（799 行，ETH TX SQ 数据面）；§5.6 send doorbell 以 T14 硬件实证定稿（ctrl 前 8 字节裸写 + mlx5e_notify_hw 屏障序），v1 writeq 假设终结条目改写。
+- §5.7 新增：数据面冒烟服务（对象链/三档梯/WQE 形态/判决口径/R0.5 约束）。
+- §6.2 补 v2.4 勘定：c[82..83]=max_wqe_sz_sq 低字节（v4.14/v5.15 ifc 双证），清零补丁对存储值实为 no-op（门闩语义），与 CREATE_SQ 行为无关。
+- §6.3 新增：数据面怪癖（QP 路线范畴封锁、SQ 三因子、TX byte_cnt=0、non_wire、err_cqe 布局、零 id 对象、syndrome 表方法论）。
+- 依据：progress.md T14 节十六趟判决链 + /var/tmp/t14_run.log、/var/tmp/t14_live.log、/var/tmp/rebaseline_run.log。
 
 ## 附：v2.2 → v2.3 修订登记（2026-09-27，T13）
 

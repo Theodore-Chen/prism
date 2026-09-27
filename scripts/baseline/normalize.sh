@@ -41,6 +41,11 @@
 # mdegC reading varies with ambient, interval is normalized defensively;
 # the probe OUTCOMES (accepted/rejected, len, yes/no) are quirk-profile
 # anchors and stay literal.
+# (T14 2026-09-27) "smoke self-test" lines (selftest=1 loads only): the
+# fw-assigned object ids (pd/mkey/cqn/sqn/tdn/tisn) vary every load and
+# collapse to placeholders; the line STRUCTURE — stage number, tier value,
+# wqe_counter 0/1, byte_cnt=64, the PASSED verdict — are regression
+# anchors and stay literal. Scoped to smoke lines only.
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -57,6 +62,17 @@ sed -e 's/^\[[^]]*\] //' \
     -e '/PHY monitor/ s/interval [0-9]\+ms/interval Nms/' \
     -e '/PHY monitor/ s/oper_status=[0-9]\+/oper_status=N/' \
     -e '/PHY monitor/ s/-\{0,1\}[0-9]\+ mdegC/N mdegC/' \
+    -e '/smoke self-test/ s/pd=[0-9]\+/pd=N/' \
+    -e '/smoke self-test/ s/mkey=0x[0-9a-f]\+/mkey=0xX/' \
+    -e '/smoke self-test/ s/cqn=[0-9]\+/cqn=N/' \
+    -e '/smoke self-test/ s/sqn=[0-9]\+/sqn=N/' \
+    -e '/smoke self-test/ s/tdn=[0-9]\+/tdn=N/' \
+    -e '/smoke self-test/ s/tisn=[0-9]\+/tisn=N/' \
+    -e '/smoke self-test/ s/byte_cnt=[0-9]\+/byte_cnt=N/' \
+    -e '/smoke self-test/ s/failed (-[0-9]\+)/failed (-N)/' \
+    -e '/SET_HCA_CAP ok/ s/wqe_sz82=0x[0-9a-f]\+/wqe_sz82=0xX/' \
+    -e '/opcode 0x904/ s/command status 0x[0-9a-f]\+/command status 0xN/' \
+    -e '/opcode 0x904/ s/syndrome 0x[0-9a-f]\+/syndrome 0xX/' \
 | grep 'mlx5_prism ' \
 | grep -v -e 'no EQE within' \
           -e 'eqe\[[0-9]*\]: type=' \
