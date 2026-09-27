@@ -1210,7 +1210,7 @@
       "title": "PHY 监控 part 1：ACCESS_REG PPCNT 读取",
       "phase": "S5",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T08-fw-bootstrap-2",
         "R0.6-trace-scaffold"
@@ -1249,7 +1249,7 @@
         ]
       },
       "goal": "通过 ACCESS_REG 读到 PPCNT 数据，dmesg 打印 symbol_errors/fec_corrected 等原始计数器，并与 ethtool -S 交叉对账（判据已按 CX4 Lx 实际能力修订，见 context）",
-      "context": "本 task 是验证 #1 第二层（CMDQ 读寄存器）。判据修订（2026-09-26，用户拍板）：原 'pre_fec_ber=X 量级 1e-15~1e-5' 按原语义不可达成——pre_fec_ber 非硬件字段，BER 推导组 grp 0x16 需 PCAM（CX5+），CX4 Lx pre-PCAM。改为原始计数器判据（J1-J6，预登记于 scripts/gate/t12_verify.sh 头部）：J1 双口 grp 0x12 status=0 且 tslc 非零非全F；J2 双口 grp 0x00 解析成功；J3 ethtool 同名计数器对账（tx/rx_packets_phy、rx_symbol_err_phy、link_down_events_phy；V_prism ≥ V_mlx5 单调存活，或分支二同驱动单调）；J4 grp 0x16 探测入档案（失败不阻塞）；J5 行为保持（默认 probe 零 PHY 行 + t09 20 循环 + diff_baseline 差异仅 PHY 行族）；J6 非全0/全F 的链路感知裁决。DESIGN §8.1/8.3/10.1 已同步修订（v2.2）。one-shot 读取走 selftest=1（R0.5 纪律），T13 再上定时器。 执行更新（2026-09-26 上机）：硬件判据全过——J1 tslc=7/8（活性成立）；J2 全零（空闲端口合法）；J3 branch-1 弱形式通过（双口链路 down，锚点 0==0；tslc 新鲜说明计数器时钟随引导重启，跨驱动存活未证明，见 DESIGN §8.1 现象学）；J4 判决推翻预期——FW 14.32.1908 接受 grp 0x16 且计数器活跃（rx_bits=200e6/225e6 按标称线率累积，sym_err=0），PCAM 能力位谎报缺失、固件行为先行，T13 可用真分母推导 BER；J5a 默认 probe 零 PHY 行、J5b 20/20 循环零投诉、J5c 差异全部落在 PHY PPCNT 行族（脚本汇总行一处布尔取反 bug 已修，两口分项判定与 diff 内容为证）。黑匣子 /var/tmp/t12_live.log 全程在案。",
+      "context": "本 task 是验证 #1 第二层（CMDQ 读寄存器）。判据修订（2026-09-26，用户拍板）：原 'pre_fec_ber=X 量级 1e-15~1e-5' 按原语义不可达成——pre_fec_ber 非硬件字段，BER 推导组 grp 0x16 需 PCAM（CX5+），CX4 Lx pre-PCAM。改为原始计数器判据（J1-J6，预登记于 scripts/gate/t12_verify.sh 头部）：J1 双口 grp 0x12 status=0 且 tslc 非零非全F；J2 双口 grp 0x00 解析成功；J3 ethtool 同名计数器对账（tx/rx_packets_phy、rx_symbol_err_phy、link_down_events_phy；V_prism ≥ V_mlx5 单调存活，或分支二同驱动单调）；J4 grp 0x16 探测入档案（失败不阻塞）；J5 行为保持（默认 probe 零 PHY 行 + t09 20 循环 + diff_baseline 差异仅 PHY 行族）；J6 非全0/全F 的链路感知裁决。DESIGN §8.1/8.3/10.1 已同步修订（v2.2）。one-shot 读取走 selftest=1（R0.5 纪律），T13 再上定时器。 执行更新（2026-09-26 上机）：硬件判据全过——J1 tslc=7/8（活性成立）；J2 全零（空闲端口合法）；J3 branch-1 弱形式通过（双口链路 down，锚点 0==0；tslc 新鲜说明计数器时钟随引导重启，跨驱动存活未证明，见 DESIGN §8.1 现象学）；J4 判决推翻预期——FW 14.32.1908 接受 grp 0x16 且计数器活跃（rx_bits=200e6/225e6 按标称线率累积，sym_err=0），PCAM 能力位谎报缺失、固件行为先行，T13 可用真分母推导 BER；J5a 默认 probe 零 PHY 行、J5b 20/20 循环零投诉、J5c 差异全部落在 PHY PPCNT 行族（脚本汇总行一处布尔取反 bug 已修，两口分项判定与 diff 内容为证）。黑匣子 /var/tmp/t12_live.log 全程在案。 收官更新（2026-09-26）：rebaseline 首轮 NOT GREEN（G1 归一化缺口/G3 采集瞬态，均非驱动漂移，溯源与加固见 progress.md）；修复后 r0_gate 8/8 全绿（G3 加固版首试 90/90/28 零丢、G1 双口 zero diff、G4 四十循环零投诉），基线落地 39 行/口（含归一化 PHY 行）。task → completed，t12_verify/t12_trace_diag 归档。",
       "steps": [
         "1. fmt.h：PPCNT 偏移表（负载相对）+ prism_ppcnt_ctr64/set_grp + ctr 解码（L3 禁触线格式的合规通道，eqc readback 先例）",
         "2. fw.c：通用 mlx5_prism_access_reg(reg_id, write, arg, in_reg, out_reg, reg_len)；host_endianness 重构为调它（字节级不变，基线门禁覆盖）",

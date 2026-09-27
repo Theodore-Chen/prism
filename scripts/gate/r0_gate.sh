@@ -114,10 +114,11 @@ for attempt in 1 2; do
 	rmmod mlx5_prism 2>/dev/null
 done
 res "$G3INS" "insmod selftest=1"
+# Disarm BEFORE unload — enabled module events may pin the module, and
+# the event dir vanishes with it (a disarm-after-rmmod write errors).
+echo 0 > "$TR/events/mlx5_prism/enable" 2>/dev/null
 rmmod mlx5_prism 2>/dev/null
 res "$G3RC" "full-load capture, issue/complete paired, eq_event seen, zero drops"
-# Disarm before unload — enabled module events may pin the module.
-echo 0 > "$TR/events/mlx5_prism/enable" 2>/dev/null
 
 say "G4 stress (20x selftest=1 + 20x default)"
 for n in $(seq 20); do

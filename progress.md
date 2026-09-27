@@ -820,6 +820,14 @@
 - **G3 加固**（r0_gate.sh）：单写系统级 `events/mlx5_prism/enable` 武装三事件（原三次 per-event 写窗口宽 3 倍）；计数取自快照拷贝而非活文件；per-CPU 丢事件计数进判据（有丢=配对决言无效而非 FAIL）；非干净捕获自动重试一次，重试后干净失配才算真 FAIL；失败快照落 /var/tmp 供验尸。
 - **教训登记**：判定行布尔取反 bug（`$((! BAD))`，t12_verify.sh）与缓冲区被清导致证据灭失——后者说明"门禁失败时当场留快照"应该内建（已随 G3 加固落地），而不是等诊断脚本再取。
 
+#### T12 收官（2026-09-26，r0_gate 修复后 8/8 全绿）
+
+- **门禁结果**：G0 build ✓、G1 双口 zero diff（归一化修复后）✓、G2 生产路径三项 ✓、**G3 加固版首试即干净：issue=90 complete=90 eq_event=28 dropped=0**（90=84+6，与诊断复现一致）✓、G4 四十循环零投诉 ✓、mlx5_core 恢复 ✓——8/8。
+- **小修**：r0_gate G3 的 disarm 在 rmmod 之后落空（事件目录随模块消失，报一行 No such file——模块未被 pin、纯属顺序颠倒），改回 disarm→rmmod 原序。
+- **基线落地**：39 行/口（36 + 3 行归一化 PHY 自检行），随本收官提交入库。
+- **收尾**：task.json T12 → completed（出口判定逐项满足：compile/checkpatch ✓、双口 PPCNT 行 ✓、J1-J6 ✓、黑匣子 ✓、BER 口径入 DESIGN ✓）；t12_verify.sh / t12_trace_diag.sh 归档（scripts/archive/，横幅注明判据针对 T12 窗口勿跑后改）。
+- **任务总结**：ACCESS_REG 通用化（fw.c wrapper + host_endianness 归一）+ PPCNT 读取链路（fmt.h 偏移表 → phy.c L3 → selftest）转正；副产物三条——①pre_fec_ber 判据勘误（非硬件字段，BER 为 grp 0x16 推导量）与判据改版（J1-J6 预登记）；②**0x16 上机判决推翻 pre-PCAM 预期**（FW 接受且计数器活跃，T13 可用真分母）；③门禁工程两课（归一化对"设计上就存在的合法变体"的覆盖缺口；trace 采集的瞬态瑕疵要有快照/丢事件/重试三重防护而非裸判）。
+
 ## 修改 DESIGN.md 的记录
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。

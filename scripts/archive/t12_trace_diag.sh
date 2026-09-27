@@ -1,4 +1,8 @@
 #!/bin/bash
+# [已归档 2026-09-26] 一次性诊断已完成使命（结论：G3 61/62 为采集侧瞬态
+# 瑕疵，受控复现 90/90/28 逐条配对零丢；r0_gate G3 已按结论加固）。
+# 现场抢救+受控复现+配对分析的方法可复用于未来 trace 异常。
+#
 # t12_trace_diag.sh — G3 issue/complete 失配诊断（2026-09-26，rebaseline
 # step5 G3 issue=61 complete=62 eq_event=28，T10 时代 84/84/22）。
 #

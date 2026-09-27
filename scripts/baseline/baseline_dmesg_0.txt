@@ -31,6 +31,9 @@ ALLOC_UAR ok: uar=4096 doorbell=X
 QUERY_EQ: fw reports log_eq_size=12 (4096 entries; requested 4096) eqn=4
 EQ up (event mode): eqn=4 entries=4096 budget=128
 eq self-test: 10/10 commands ok in event mode (E events, H consumed in hardirq, I interrupts)
+PHY PPCNT(0x12): tslc=N sym_err=N sync_hdr=N edpl=B[N] fec_corr=B[rs N] fec_unc=B[rs N] link_down=N
+PHY PPCNT(0x00): tx_ok=N rx_ok=N sym_err_carrier=N
+PHY PPCNT(0x16) probe: rx_bits=N sym_err=N corr_bits=N (pre-FEC BER derivable)
 removing (fw_rev 14.32.1908)
 DESTROY_EQ ok: eq_number=4, E events consumed
 teardown: 2305/2305 pages reclaimed, HCA disabled
