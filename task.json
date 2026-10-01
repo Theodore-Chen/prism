@@ -1426,7 +1426,7 @@
    "title": "最小 netdev 骨架（register_netdev + ndo_start_xmit + NAPI）",
    "phase": "S5.5",
    "milestone": null,
-   "status": "pending",
+   "status": "completed",
    "prerequisites": [
     "T14-smoke-test"
    ],
@@ -1473,7 +1473,7 @@
     ]
    },
    "goal": "ip link 看到 prism0 接口，单包收发链路通",
-   "context": "DESIGN.md 明确要求做最小 netdev（不做 GRO/GSO/TSO/multiqueue/RSS）。目的：覆盖 JD 关键词 'register_netdev/NAPI/ndo_start_xmit'，证明 API 链路理解。复用 T14 的 SQ/RQ/CQ 创建逻辑。",
+   "context": "DESIGN.md 明确要求做最小 netdev（不做 GRO/GSO/TSO/multiqueue/RSS）。目的：覆盖 JD 关键词 'register_netdev/NAPI/ndo_start_xmit'，证明 API 链路理解。复用 T14 的 SQ/RQ/CQ 创建逻辑。 执行更新（2026-10-01，二十七趟上机判决链收官，ALL GREEN 25/0 + rebaseline 68 行/口 + r0_gate 8/8）：最终形态=DESIGN v2.5 §5.8——TX 腿复刻 T14 胜者（PD/PA-mkey/CQ/TD/TIS/SQ），RX 腿 CREATE_RQ→dbr-only 投递→MODIFY_RQ RDY→CREATE_TIR(direct+inline_rqn+复用 tdn)→FT/FG(catch-all)/SET_FTE→SET_FLOW_TABLE_ROOT，销毁链 DELETE_FTE(0x938) 前置；ndo_open=验证-重试环（comp EQ 事件引擎静默→recreate 重掷 ≤4 次）+ PAOS 有界等待 carrier；TX=hdr-inline+指针 dseg（v5.15 正典形态在此 fw 首证，全 inline 回退钮）+arm-on-xmit；RX=RESP_SEND→napi_alloc_skb→napi_gro_receive；NAPI 双路=comp 事件 dispatch+10ms 看门狗 napi_schedule（怪癖：事件只认 arm→doorbell→µs 完成三元组，空闲 CQ 到达从不通知）。判决链要点：TIR 位号早 8 位（fmt_equiv 自洽陷阱，改 ifc 独立推导断言）；arm write64 字序（LE 低字=arm 值）；BIT(COMP) 掩码证伪→专用 comp EQ（vector0+零掩码）；sn 模型定案（期望 sn mod-4 循环含 0，全零 VALUE 仅推进序号→零值同步臂开局）；arm 一次性；poll owner 判定反转移植（修复后 E2E 首亮）；空闲到达无事件→看门狗；收官五趟：rx=tx 严丝合缝+AF_PACKET 双向字节比对过+PPCNT 线缆级对账；嗅探器判决 ARP 应答从未发出；栈四件套（addr/sysctl/nft/route）全净；kretprobe ip_route_input_noref 参数配对（-EINVAL×3@1.02s=本方重传）；根因=单机双口对拉拓扑下对端地址≡本机本地地址→__fib_validate_source 判 martian——accept_local=1 修复（环境项，非驱动缺陷），ping exit 0 首真。怪癖 11 条入 DESIGN §6.4；修正史 1-27 条在 t15_verify.sh 头部；黑匣子 /var/tmp/t15_live.log。",
    "steps": [
     "1. 实现 mlx5_prism_netdev_register：alloc_etherdev_mq + 填 net_device_ops + register_netdev",
     "2. 实现 ndo_open：CMDQ 创建 RQ/SQ/CQ + napi_enable + 打开接口",

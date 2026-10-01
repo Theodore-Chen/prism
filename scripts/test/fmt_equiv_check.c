@@ -673,6 +673,183 @@ int main(void)
 		}
 	}
 
+	/* 14. T15 netdev geometry: the receive-side objects and the flow
+	 * steering chain. Same discipline as T14 — prism_ifc_set/get == the
+	 * MLX5_SET algebra (random per-dword round trips), and every offset
+	 * checked against a bit position independently derived from the
+	 * v5.15 ifc and cross-read on v4.14 (create_rq_in: rqc @0x100 bits
+	 * with wq @rqc 0x30 and pas @payload 272; tirc @0x100 bits; the flow
+	 * command family: table_type@0x80, table_id@0xa8, fte ctx@0x200 with
+	 * destinations @fc 0x1800; flow_context.destination_list_size is at
+	 * fc bit 0x88 — NOT 0x84, the survey-note correction). */
+	printf("net rqc/tirc/flow geometry (T15)\n");
+	{
+		struct { unsigned bit; unsigned sz; } flds[] = {
+			{ PRISM_RQC_BIT_VSD, 1 },   { PRISM_RQC_BIT_STATE, 4 },
+			{ PRISM_RQC_BIT_CQN, 24 },
+			{ PRISM_TIRC_BIT_DISP_TYPE, 4 },
+			{ PRISM_TIRC_BIT_INLINE_RQN, 24 },
+			{ PRISM_TIRC_BIT_RX_HASH_FN, 4 },
+			{ PRISM_TIRC_BIT_TRANSPORT_DOMAIN, 24 },
+			{ PRISM_FTCMD_BIT_TABLE_TYPE, 8 },
+			{ PRISM_FTCMD_BIT_TABLE_ID, 24 },
+			{ PRISM_FTCMD_BIT_OP_MOD, 16 },
+			{ PRISM_FTC_BIT_LEVEL, 8 }, { PRISM_FTC_BIT_LOG_SIZE, 8 },
+			{ PRISM_FG_BIT_START, 32 }, { PRISM_FG_BIT_END, 32 },
+			{ PRISM_FG_BIT_MATCH_EN, 8 },
+			{ PRISM_FTE_BIT_FLOW_INDEX, 32 },
+			{ PRISM_FC_BIT_GROUP_ID, 32 }, { PRISM_FC_BIT_ACTION, 16 },
+			{ PRISM_FC_BIT_DEST_LIST_SZ, 24 },
+			{ PRISM_DEST_BIT_TYPE, 8 },  { PRISM_DEST_BIT_ID, 24 },
+		};
+		unsigned int rng = 4242;
+		size_t a;
+		int k, bad = 0;
+
+		for (a = 0; a < sizeof(flds) / sizeof(flds[0]); a++) {
+			u8 buf[256];
+			unsigned off = (flds[a].bit / 32) * 4;
+			u32 mask = (flds[a].sz == 32) ? 0xffffffffu :
+				   ((1u << flds[a].sz) - 1);
+
+			for (k = 0; k < 32; k++) {
+				u32 old_v, val, exp, got;
+
+				rng = rng * 1103515245 + 12345;
+				buf[off] = (uint8_t)(rng >> 16);
+				buf[off + 1] = (uint8_t)(rng >> 24);
+				rng = rng * 1103515245 + 12345;
+				buf[off + 2] = (uint8_t)(rng >> 16);
+				buf[off + 3] = (uint8_t)(rng >> 24);
+				old_v = mlx5_prism_get_be32(buf + off);
+				val = rng >> 8;
+
+				prism_ifc_set(buf, flds[a].bit, flds[a].sz, val);
+				exp = emu_mlx5_set(old_v, val, flds[a].bit, flds[a].sz);
+				got = mlx5_prism_get_be32(buf + off);
+				if (got != exp || prism_ifc_get(buf, flds[a].bit, flds[a].sz) !=
+						  (val & mask)) {
+					printf("  [FAIL] field bit 0x%x/%u iter %d: 0x%x vs 0x%x\n",
+					       flds[a].bit, flds[a].sz, k, got, exp);
+					failures++;
+					bad = 1;
+					break;
+				}
+			}
+			if (bad)
+				break;
+		}
+		if (!bad)
+			printf("  [ok]   ifc set/get == MLX5_SET, %zu fields x 32 randoms\n",
+			       sizeof(flds) / sizeof(flds[0]));
+
+		check_val("rqc byte off (ifc 0x100/8)", PRISM_OFF_RQC, 32);
+		check_val("rqc wq byte off (ifc 0x180/8)", PRISM_OFF_RQC_WQ, 48);
+		check_val("rq pas off (family 0x880/8)", PRISM_OFF_RQ_PAS, 272);
+		check_val("tirc byte off (ifc 0x100/8)", PRISM_OFF_TIRC, 32);
+		check_val("create_rq inlen 1 pas", PRISM_CREATE_RQ_IN_LEN(1), 280);
+		check_val("modify_rq inlen (32 B hdr + 240 B rqc)",
+			  PRISM_MODIFY_RQ_IN_LEN, 272);
+		check_val("create_tir inlen (32 B hdr + 240 B tirc)",
+			  PRISM_CREATE_TIR_IN_LEN, 272);
+		check_val("create_ft inlen (24 B hdr + 40 B ftc)",
+			  PRISM_CREATE_FT_IN_LEN, 64);
+		check_val("create_fg inlen (ifc 0x2000/8)", PRISM_CREATE_FG_IN_LEN, 1024);
+		check_val("set_fte inlen 1 dest (0x1a00+0x40 bits)/8",
+			  PRISM_SET_FTE_IN_LEN(1), 840);
+		check_val("delete_fte inlen (0x200/8)", PRISM_DELETE_FTE_IN_LEN, 64);
+		check_val("set_root inlen (ifc 0x200/8)", PRISM_SET_ROOT_IN_LEN, 64);
+		check_val("eqe comp cqn off", PRISM_EQE_OFF_COMP_CQN, 0x38);
+		check_val("cq dbr arm off", PRISM_CQ_DBR_ARM_OFF, 4);
+		check_val("cq arm doorbell off", PRISM_CQ_ARM_DOORBELL_OFFSET, 0x20);
+		check_val("nvc permanent mac off (0x7a0/8 + 2)",
+			  PRISM_OFF_NVC_PERM_MAC, 246);
+
+		{
+			/* compose the flow chain the way net_create_flow does
+			 * and verify landing bytes: table_id be24 in the dword
+			 * @ in+20 (bit 0xa8), flow_context group_id be32 at
+			 * fc+4 (fc bit 0x20), dest at fc byte 0x300 */
+			u8 fe[PRISM_SET_FTE_IN_LEN(1)] = { };
+			u8 *fc = fe + 64;
+			u8 *dest = fc + PRISM_FC_OFF_DEST;
+
+			prism_ifc_set(fe, PRISM_FTCMD_BIT_TABLE_ID, 24, 0x345);
+			/* table_id @ ifc bit 0xa8: low 24 bits of dword @fe+20 */
+			check_val("fte table_id lands be24 @ fe+20",
+				  mlx5_prism_get_be32(fe + 20) & 0xffffff, 0x345);
+			prism_ifc_set(fc, PRISM_FC_BIT_GROUP_ID, 32, 0xaabbccdd);
+			check_val("fc group_id be32 @ fc+4",
+				  mlx5_prism_get_be32(fc + 4), 0xaabbccddu);
+			prism_ifc_set(fc, PRISM_FC_BIT_ACTION, 16, PRISM_FC_ACTION_FWD_DEST);
+			check_val("fc action be16 @ fc+14",
+				  mlx5_prism_get_be16(fc + 14), PRISM_FC_ACTION_FWD_DEST);
+			prism_ifc_set(fc, PRISM_FC_BIT_DEST_LIST_SZ, 24, 1);
+			check_val("fc dest_list_sz be24 @ fc+17",
+				  mlx5_prism_get_be32(fc + 17) >> 8, 1);
+			prism_ifc_set(dest, PRISM_DEST_BIT_ID, 24, 0x777);
+			check_val("dest tirn be24 @ dest+1",
+				  mlx5_prism_get_be32(dest) & 0xffffff, 0x777);
+		}
+
+		{
+			/* tirc landing bytes, expectations derived straight
+			 * from the ifc label arithmetic (NOT from our own
+			 * bit constants — the trip-1 lesson: inline_rqn and
+			 * transport_domain were both recorded eight bits
+			 * early by the survey, and self-referential asserts
+			 * passed anyway): inline_rqn @ ifc bit 0xe8 = low 24
+			 * bits of the dword @ tirc+28, transport_domain @
+			 * 0x128 = low 24 of the dword @ tirc+36.
+			 */
+			u8 tir[PRISM_CREATE_TIR_IN_LEN] = { };
+			u8 *tirc = tir + PRISM_OFF_TIRC;
+
+			prism_ifc_set(tirc, PRISM_TIRC_BIT_INLINE_RQN, 24, 0x1234);
+			check_val("tirc inline_rqn lands be24 @ tirc+28",
+				  mlx5_prism_get_be32(tirc + 28) & 0xffffff, 0x1234);
+			check_val("tirc inline_rqn NOT in the reserved dword @ +24",
+				  mlx5_prism_get_be32(tirc + 24) & 0xffffff, 0);
+			prism_ifc_set(tirc, PRISM_TIRC_BIT_TRANSPORT_DOMAIN, 24,
+				      0x1a2);
+			check_val("tirc transport_domain lands be24 @ tirc+36",
+				  mlx5_prism_get_be32(tirc + 36) & 0xffffff, 0x1a2);
+			check_val("tirc rx_hash_fn dword @ +32 still clean",
+				  mlx5_prism_get_be32(tirc + 32), 0);
+		}
+
+		{
+			/* the pointer-dseg TX WQE: 14 B header inline, payload
+			 * behind {byte_cnt, lkey, addr} at DS 3 */
+			u8 wqe[PRISM_WQE_BB_SIZE * 2] = { };
+			u8 *dseg = wqe + PRISM_WQE_OFF_DATA_SEG +
+				   PRISM_WQE_DS_SIZE;
+
+			mlx5_prism_put_be32(dseg + PRISM_WQE_SEG_OFF_BYTE_CNT, 84);
+			mlx5_prism_put_be32(dseg + PRISM_WQE_SEG_OFF_LKEY, 0x0100);
+			mlx5_prism_put_be64(dseg + PRISM_WQE_SEG_OFF_ADDR,
+					    0x1122334455667788ull);
+			check_val("ptr dseg byte_cnt be32 @ dseg+0",
+				  mlx5_prism_get_be32(dseg), 84);
+			check_val("ptr dseg lkey be32 @ dseg+4",
+				  mlx5_prism_get_be32(dseg + 4), 0x0100);
+			check_val("ptr dseg addr hi @ dseg+8",
+				  mlx5_prism_get_be32(dseg + 8), 0x11223344);
+			check_val("ptr dseg addr lo @ dseg+12",
+				  mlx5_prism_get_be32(dseg + 12), 0x55667788);
+		}
+
+		{
+			/* CQ arm record value: sn<<28 | 0<<24 | ci */
+			u32 val = ((u32)(2 & 3) << 28) | (0x1234 & 0xffffff);
+			u8 dbr[8];
+
+			mlx5_prism_put_be32(dbr + PRISM_CQ_DBR_ARM_OFF, val);
+			check_val("cq arm record = sn<<28 | ci",
+				  mlx5_prism_get_be32(dbr + 4), 0x20001234u);
+		}
+	}
+
 	printf(failures ? "FAILURES: %d\n" : "ALL EQUIVALENT (%d failures)\n",
 	       failures);
 	return failures ? 1 : 0;

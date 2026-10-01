@@ -1,4 +1,4 @@
-# mlx5_prism 设计文档 v2.4 —— ConnectX-4 Lx 控制面驱动
+# mlx5_prism 设计文档 v2.5 —— ConnectX-4 Lx 控制面驱动
 
 > 内核模块名：`mlx5_prism.ko`
 > 从零实现 ConnectX-4 Lx 的固件-驱动控制面协议：CMDQ 引擎 + 9 步固件引导 + EQ 事件 + PHY 诊断 + 最小 netdev 骨架 + ftrace 全链路追踪。全部指标与 mlx5_core 对照验证。
@@ -401,6 +401,49 @@ static inline u32  prism_get_bits(const u8 *buf, u16 first_bit, u8 nbits);
 - 运行约束沿用 R0.5：仅 `selftest=1` 点火（`smoke_stage` 1/2/3 分级），
   全部对象同调用内销毁；stress 100 循环零投诉实证。
 
+### 5.8 netdev 数据面（T15，v2.5 新增）
+
+> 二十七趟上机收敛的最小 netdev（`mlx5_prism_net.c` ~1300 行，自含设计
+> 沿用 T13 phy.c 先例——不抽共享 dp 层，共享面留在 fmt.h 位号表）：
+
+- **netdev 形态**：`alloc_etherdev_mqs(sizeof(priv), 1, 1)`，name
+  `prism%d`，MAC 取 QUERY_NIC_VPORT `permanent_address`；
+  `net_device_ops{open, stop, start_xmit, get_stats64}`；probe 尾注册
+  （DOWN 态），remove 头注销（unregister 同步走 ndo_stop）。
+- **完整对象链**（ndo_open 每次重建，逆序销毁）：
+  TX 腿（T14 胜者复刻）：`ALLOC_PD → CREATE_MKEY(PA，TX 指针 dseg 与
+  RX lkey 共用) → CREATE_CQ(c_eqn=专用 comp EQ) → ALLOC_TD →
+  CREATE_TIS → CREATE_SQ → MODIFY_SQ RDY`；
+  RX 腿（T15 新增）：`CREATE_RQ(RST) → 16×2KB dseg 投递(仅写 dbr) →
+  MODIFY_RQ RDY(bitmask=0) → CREATE_TIR(disp_type=DIRECT +
+  inline_rqn + transport_domain 复用 tdn) → CREATE_FLOW_TABLE(NIC_RX
+  level 0) → CREATE_FLOW_GROUP(catch-all, match 全零) → SET_FTE
+  (FWD_DEST→TIR) → SET_FLOW_TABLE_ROOT`；销毁链 `DELETE_FTE(0x938)`
+  必须先于 `DESTROY_FLOW_GROUP`（§6.4）。
+- **ndo_open = 验证-重试环**（≤4 次）：建链 → napi_add → root 设定 →
+  napi_enable → 零值同步臂 + 真臂（§6.4 sn 模型）→ NOP 探针验证
+  comp EQ 事件引擎；静默则整链卸载 + `comp_eq_recreate` 重掷。成功尾
+  （armed）：重武装（arm 一次性）→ PAOS oper 有界等待（50ms 步进
+  ≤2s，§6.4）设 carrier → PPCNT 窗口清零 → xmit_on → 10ms tick。
+- **TX**：`ndo_start_xmit` 线性化 → `ihs=max(network_offset, ETH_HLEN)`
+  → **hdr-inline + 指针 dseg**（v5.15 skb 正典形态，首证于此 fw 可用；
+  `netdev_inline_all=1` 钉 T14 全 inline 胜者形作回退钮）；环边界 NOP
+  填充；stop_room=96；**arm-on-xmit**（先 arm 再敲 SQ dbr，§6.4 事件
+  模型）；完成回收按 wqe_info num_wqebbs 对账公式（en_tx.c:846-855）。
+- **RX**：RQ WQE = 纯 dseg 数组（log_wq_stride=4，无 ctrl 段），投递只
+  写 dbr 无 UAR MMIO；RESP_SEND(0x2) CQE → `napi_alloc_skb` + memcpy
+  （coherent 缓冲池，骨架取舍）→ `napi_gro_receive`；重投 = rq_pc++ +
+  dbr 写。单 CQ 共享 SQ/RQ，poll 按 CQE opcode 分流（REQ→TX 回收 /
+  RESP_SEND→RX）。
+- **NAPI 调度双路**：①comp EQE → 硬中断 → cqn 门卫 → napi_schedule
+  （事件引擎可用时的快路径）；②10ms delayed_work 看门狗 = 重武装 +
+  `napi_schedule`（§6.4 事件模型的兜底，`netdev_arm_ms=0` 可关）。
+- **验证口径**（t15_verify.sh，判据 J0-J6 预登记）：双 netdev 注册
+  DOWN、up/down 生命周期、ping 回环、AF_PACKET 0x88b5 双向（含单播
+  反向腿）逐字节比对、trace（sq_xmit/rx_cqe/eq_event）、20×up/down +
+  20×模块循环 stress；PPCNT 802.3 线缆计数 open 清零/close 增量作
+  wire-vs-steering 判别器。
+
 ---
 
 ## 6. 怪癖档案（mlx5_core 没有的层）
@@ -455,6 +498,47 @@ SET_HCA_CAP 的语义在此固件上是**门闩而非字段写入**〔实证：S
 - **错误 CQE 布局**（v4.14==v5.15 `mlx5_err_cqe`）：srqn@0x20、vendor_err_synd@0x36、syndrome@0x37、s_wqe_opcode_qpn@0x38（[wqe_opcode][opmod][qpn]）；0x2c 处 byte_cnt 对错误 CQE 是保留区。
 - **对象 id 可为 0**：fw 会分配 tisn=0/cqn 低位等合法零值——有效性必须显式标志跟踪（`id!=0` 哨兵模式在此翻车：漏销毁 TIS → DEALLOC_TD 0x9 连锁 → EQ 拆除被拒 → CMDQ 舔化 → 探针失败 0/2305 页）。
 - **社区 syndrome 表（lukego gist）两次命中**（0x28b996 bad service type、0x17a194 dbr dword aligned）——逐字段类 BAD_PARAM 先查表再做实验。
+
+### 6.4 netdev 数据面怪癖（T15，FW 14.32.1908，v2.5 新增）
+
+二十七趟上机判决链的怪癖档案级事实（黑匣子 /var/tmp/t15_live.log 在案，
+修正史 1-27 条全登记于 t15_verify.sh 头部）：
+
+- **comp 事件不骑异步/cmd EQ**：BIT(COMP) 进 event_bitmask 被
+  0x3/0x008fef 全梯拒绝——非零掩码的 EQ 是异步类，CQ 完成事件只路由给
+  **专用 comp EQ**（v4.14/v5.15 create_comp_eqs 形态：vector 0 + 零掩码
+  + 共享 UAR 页，cqc.c_eqn 改绑之）。
+- **CQ arm 序列号模型**（12/19 趟定案）：fw 对每 CQ 维护从 0 起步的期望
+  sn，按 **mod-4 循环且含 0**（0,1,2,3,0,1,…）；sn 不匹配的 arm 当过期
+  丢弃；**全零 VALUE 的 arm 仅推进序号、不请求通知**——新 CQ 必须先发
+  零值同步臂再发真臂（sn=1）。跳零会使首次绕环起永久失步、全部 arm 被判
+  过期（trip-11/12 全灭的根因）。
+- **arm 是一次性的**：一次 arm 被一个完成事件消耗；armed 尾部、poll 出口
+  都必须重武装。
+- **事件通知只认 arm→doorbell→µs 级完成三元组**（17/21 趟定案，本档案
+  最重条目）：空闲 CQ 上的到达**从不产生事件**，10ms keep-fresh 重武装
+  也救不回（trip-21 黑匣子深读：静默口 11 个 TX 完成 + RX CQE 全部 fresh
+  躺环，而 open 验证 NOP / close 探针事件每次必中）；连续重武装下固件对
+  整个流量窗完全停发通知（trip-22 零 EQE 实证）。**workaround =
+  10ms NAPI 看门狗**（消费时延由 netdev_arm_ms 界定，不依赖事件引擎）。
+- **CQ arm write64 字序**：LE 下 u64 低字落低地址——doorbell[0]=arm 值
+  @UAR+0x20、doorbell[1]=cqn @+0x24；两字互换则零 EQE（trip-5 判决）。
+- **CQE owner 判定**：owner 位 == 圈奇偶 = 新鲜（T14 同形）；不可从 EQ
+  消费者的 XOR 形移植（trip-16 反面教训：poll 跑而不消费）。
+- **DESTROY_FLOW_GROUP 拒绝组内活 FTE**（0x9）：销毁链必须
+  `DELETE_FTE(0x938)` 前置；断链会级联 T14 形态的 CMDQ 舔化。
+- **PAOS oper_status 读数落后 PHY 重同步 ~250ms**：open 单读是竞态
+  （trip-21 prism1 全流量相 carrier-less）——有界等待（50ms 步进 ≤2s）
+  后 carrier 才可靠。
+- **PPCNT 802.3 计数器 clear-on-read**：open 读即清零，close 读=本窗口
+  线缆增量（天然的 wire-vs-steering 判别器）。
+- **短帧 TX 的固件补齐**：42B skb（ARP 请求）直接发送，线上为 60B
+  （TX 侧固件补 padding）；接收侧 byte_cnt 与帧型对齐（ARP=60、MLD=90、
+  DAD NS=86、RS=70）——trip-17 的"ARP byte_cnt=90"实为 MLD 帧。
+- **环境怪癖（非 fw，验机拓扑）**：单机双口对拉时对端地址 ≡ 本机另一口
+  的本地地址 → `fib_validate_source` 以 RTN_LOCAL+!accept_local 判
+  martian（-EINVAL）→ ARP 永不完成。修复=双口 `accept_local=1`（脚本
+  内置）；kprobe `ip_route_input_noref` 返回值按 1.02s 重传节奏配对定案。
 
 ---
 

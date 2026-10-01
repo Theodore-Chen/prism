@@ -23,21 +23,24 @@
 static irqreturn_t mlx5_prism_irq_handler(int irq, void *dev_id)
 {
 	struct mlx5_prism_dev *dev = dev_id;
+	struct mlx5_prism_eq *eq;
 	int eqes;
 
 	atomic_inc(&dev->irq.count);
 
 	/*
+	 * Vector 0 carries the completion EQ (T15), vector 1 the cmd EQ.
 	 * Poll fallback (T09 semantics): count only. Also covers spurious
-	 * or late IRQs around the EQ lifecycle.
+	 * or late IRQs around the EQ lifecycles.
 	 */
-	if (!dev->eq.event_mode || !READ_ONCE(dev->eq.created) ||
-	    READ_ONCE(dev->eq.storm_latched))
+	eq = (irq == dev->irq.vector[0]) ? &dev->comp_eq : &dev->eq;
+	if (!eq->event_mode || !READ_ONCE(eq->created) ||
+	    READ_ONCE(eq->storm_latched))
 		return IRQ_HANDLED;
 
-	eqes = mlx5_prism_eq_irq_consume(dev);
+	eqes = mlx5_prism_eq_irq_consume(dev, eq);
 	if (eqes) {
-		WRITE_ONCE(dev->eq.empty_irqs, 0);
+		WRITE_ONCE(eq->empty_irqs, 0);
 		return IRQ_HANDLED;
 	}
 
@@ -48,8 +51,8 @@ static irqreturn_t mlx5_prism_irq_handler(int irq, void *dev_id)
 	 * before it starves the machine; the selftest's recreate ladder
 	 * re-enables with a fresh EQ.
 	 */
-	if (++dev->eq.empty_irqs > MLX5_PRISM_EQ_STORM_LIMIT) {
-		WRITE_ONCE(dev->eq.storm_latched, true);
+	if (++eq->empty_irqs > MLX5_PRISM_EQ_STORM_LIMIT) {
+		WRITE_ONCE(eq->storm_latched, true);
 		disable_irq_nosync(irq);
 		dev_warn_ratelimited(&dev->pdev->dev,
 				     "EQ irq storm: %u+ empty interrupts, line self-disabled\n",

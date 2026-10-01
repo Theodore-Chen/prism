@@ -78,20 +78,12 @@ static const struct {
 	{ 6,  1, "4 KiB / log6 / 1 pas" },
 };
 
-int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev)
+static void prism_eq_init_state(struct mlx5_prism_eq *eq)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
-	struct mlx5_prism_eqe *eqe;
+	struct mlx5_prism_eqe *eqe = eq->buf;
 	int i;
 
-	eq->size = MLX5_PRISM_EQ_BUF_PAGES * MLX5_PRISM_PAGE_SIZE;
-	eq->buf = dma_alloc_coherent(&dev->pdev->dev, eq->size,
-				     &eq->dma, GFP_KERNEL);
-	if (!eq->buf)
-		return -ENOMEM;
-
 	memset(eq->buf, 0, eq->size);
-	eqe = eq->buf;
 	for (i = 0; i < eq->size / MLX5_PRISM_EQE_SIZE; i++)
 		eqe[i].owner = MLX5_PRISM_EQE_OWNER_INIT;
 
@@ -102,20 +94,50 @@ int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev)
 	eq->storm_latched = false;
 	eq->event_mode = strcmp(eq_mode, "poll") != 0;
 	eq->created = false;
+	eq->eqn = 0;
 	eq->uar = 0;
 	eq->doorbell = NULL;
+}
+
+static int prism_eq_alloc_buf(struct mlx5_prism_dev *dev,
+			      struct mlx5_prism_eq *eq, const char *name)
+{
+	eq->size = MLX5_PRISM_EQ_BUF_PAGES * MLX5_PRISM_PAGE_SIZE;
+	eq->buf = dma_alloc_coherent(&dev->pdev->dev, eq->size,
+				     &eq->dma, GFP_KERNEL);
+	if (!eq->buf)
+		return -ENOMEM;
+
+	prism_eq_init_state(eq);
 
 	pci_info(dev->pdev,
-		 "eq: cpu=%pK dma=%pad size=%zu pages=%zu\n",
-		 eq->buf, &eq->dma, eq->size, eq->size / MLX5_PRISM_PAGE_SIZE);
-
+		 "%s: cpu=%pK dma=%pad size=%zu pages=%zu\n",
+		 name, eq->buf, &eq->dma, eq->size,
+		 eq->size / MLX5_PRISM_PAGE_SIZE);
 	return 0;
 }
 
-void mlx5_prism_eq_free(struct mlx5_prism_dev *dev)
+int mlx5_prism_eq_alloc(struct mlx5_prism_dev *dev)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
+	int err;
 
+	err = prism_eq_alloc_buf(dev, &dev->eq, "eq");
+	if (err)
+		return err;
+	/* The completion EQ (T15) has its own ring on vector 0. */
+	err = prism_eq_alloc_buf(dev, &dev->comp_eq, "comp eq");
+	if (err) {
+		dma_free_coherent(&dev->pdev->dev, dev->eq.size,
+				  dev->eq.buf, dev->eq.dma);
+		dev->eq.buf = NULL;
+		return err;
+	}
+	return 0;
+}
+
+static void prism_eq_free_buf(struct mlx5_prism_dev *dev,
+			      struct mlx5_prism_eq *eq)
+{
 	if (!eq->buf)
 		return;
 
@@ -126,14 +148,20 @@ void mlx5_prism_eq_free(struct mlx5_prism_dev *dev)
 	eq->cons_index = 0;
 }
 
+void mlx5_prism_eq_free(struct mlx5_prism_dev *dev)
+{
+	prism_eq_free_buf(dev, &dev->comp_eq);
+	prism_eq_free_buf(dev, &dev->eq);
+}
+
 /*
  * EQ doorbell (v5.15 mlx5_eq_update_ci): consumer index | eqn in the high
  * byte, big-endian, to uar + 0x40 to arm (re-enable event generation) or
  * + 0x48 to only publish the index.
  */
-static void mlx5_prism_eq_update_ci(struct mlx5_prism_dev *dev, bool arm)
+static void mlx5_prism_eq_update_ci(struct mlx5_prism_dev *dev,
+				     struct mlx5_prism_eq *eq, bool arm)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
 	u32 val = (eq->cons_index & 0xffffff) | (eq->eqn << 24);
 
 	__raw_writel((__force u32)cpu_to_be32(val),
@@ -149,9 +177,9 @@ static void mlx5_prism_eq_update_ci(struct mlx5_prism_dev *dev, bool arm)
  * silence is normal; diagnostics come from the tracepoints, the eq
  * counters, and the storm guard.
  */
-int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev)
+int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev,
+			      struct mlx5_prism_eq *eq)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
 	u32 nent = 1 << eq->log_sz;
 	struct mlx5_prism_eqe *e;
 	int walked = 0;
@@ -170,6 +198,21 @@ int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev)
 			trace_prism_eq_event(eq->eqn, e->type, v,
 					     eq->cons_index);
 			mlx5_prism_cmdq_complete_slots(dev, v);
+		} else if (e->type == MLX5_PRISM_EVENT_TYPE_COMP) {
+			u32 raw = mlx5_prism_get_be32((u8 *)e +
+					PRISM_EQE_OFF_COMP_CQN);
+			u32 cqn = raw & 0xffffff;
+
+			trace_prism_eq_event(eq->eqn, e->type, cqn,
+					     eq->cons_index);
+			/* trip-15: the events ride the hardirq branch — the
+			 * parsed cqn has never been verified against a real
+			 * comp EQE; one line per event until settled
+			 */
+			dev_info_ratelimited(&dev->pdev->dev,
+					     "eqe[%u]: comp cqn_raw=0x%08x parsed=%u\n",
+					     eq->cons_index, raw, cqn);
+			mlx5_prism_net_comp_event(dev, cqn);
 		} else {
 			trace_prism_eq_event(eq->eqn, e->type, 0,
 					     eq->cons_index);
@@ -181,7 +224,7 @@ int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev)
 			break;		/* remainder arrives with the next IRQ */
 	}
 
-	mlx5_prism_eq_update_ci(dev, true);
+	mlx5_prism_eq_update_ci(dev, eq, true);
 	return walked;
 }
 
@@ -198,9 +241,9 @@ int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev)
  * So each iteration walks the ring, then writes both doorbells; repeat
  * until an iteration consumes nothing new and the timeout expires.
  */
-static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
+static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev,
+			      struct mlx5_prism_eq *eq, int timeout_ms)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
 	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
 	u32 nent = 1 << eq->log_sz;
 	int processed = 0;
@@ -227,6 +270,22 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
 					 eq->cons_index, e->type, v);
 				/* The EQE acknowledges these slots — free them. */
 				mlx5_prism_cmdq_complete_slots(dev, v);
+			} else if (e->type == MLX5_PRISM_EVENT_TYPE_COMP) {
+				u32 cqn = mlx5_prism_get_be32((u8 *)e +
+						PRISM_EQE_OFF_COMP_CQN) & 0xffffff;
+
+				trace_prism_eq_event(eq->eqn, e->type, cqn,
+						     eq->cons_index);
+				pci_info(dev->pdev,
+					 "eqe[%u]: comp cqn_raw=0x%08x parsed=%u\n",
+					 eq->cons_index,
+					 mlx5_prism_get_be32((u8 *)e +
+							 PRISM_EQE_OFF_COMP_CQN),
+					 cqn);
+				print_hex_dump(KERN_INFO, "comp eqe: ",
+					       DUMP_PREFIX_OFFSET, 16, 1, e,
+					       MLX5_PRISM_EQE_SIZE, false);
+				mlx5_prism_net_comp_event(dev, cqn);
 			} else {
 				trace_prism_eq_event(eq->eqn, e->type, 0,
 						     eq->cons_index);
@@ -239,8 +298,8 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
 		}
 		processed += walked;
 
-		mlx5_prism_eq_update_ci(dev, false);	/* commit staged */
-		mlx5_prism_eq_update_ci(dev, true);	/* keep posting */
+		mlx5_prism_eq_update_ci(dev, eq, false);	/* commit staged */
+		mlx5_prism_eq_update_ci(dev, eq, true);	/* keep posting */
 
 		if (walked)
 			continue;	/* the doorbells may release more */
@@ -274,9 +333,9 @@ static int mlx5_prism_eq_poll(struct mlx5_prism_dev *dev, int timeout_ms)
  * the fw's event engine engages on only ~10% of loads (measured, cause
  * unknown; likely a create/arm race), and a fresh EQ rolls the dice again.
  */
-static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
+static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev,
+				struct mlx5_prism_eq *eq, int vec, u64 mask)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
 	int err, i;
 
 	/* Fresh ring state for the new EQ instance. */
@@ -308,9 +367,17 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		 * mlx5_prism_fmt.h.
 		 */
 		prism_eqc_write_dw3(cin, log_sz, eq->uar);
-		prism_eqc_set_intr(cin, MLX5_PRISM_EQ_VEC_CMD);
-		mlx5_prism_put_be64(cin + PRISM_OFF_EQ_EVENT_BITMASK,
-				    BIT(MLX5_PRISM_EVENT_TYPE_CMD));
+		prism_eqc_set_intr(cin, vec);
+		/*
+		 * Trip-8 refutation: adding BIT(COMP) here had CREATE_EQ
+		 * rejected outright on every ladder rung (0x3 / 0x008fef) —
+		 * COMP (type 0x00) is not a subscribable async class on this
+		 * fw. The cmd EQ rides the CMD-only mask; the comp EQ rides
+		 * a ZERO mask — the exact v4.14/v5.15 create_comp_eqs form
+		 * (mlx5_create_map_eq(..., 0, ...)) that this fw accepts
+		 * from stock mlx5_core every day.
+		 */
+		mlx5_prism_put_be64(cin + PRISM_OFF_EQ_EVENT_BITMASK, mask);
 		for (j = 0; j < npas; j++)
 			mlx5_prism_put_be64(cin + PRISM_OFF_EQ_PAS + 8 * j,
 					    eq->dma + (dma_addr_t)j *
@@ -354,7 +421,7 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		}
 
 		/* Initial arm (mlx5_eq_enable's eq_update_ci(eq,1)). */
-		mlx5_prism_eq_update_ci(dev, true);
+		mlx5_prism_eq_update_ci(dev, eq, true);
 		/*
 		 * Drain-before-enable (event mode): the force-polled
 		 * EQ-lifecycle commands release their slot inline, but their
@@ -370,7 +437,7 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 		 * line instead of a race.
 		 */
 		if (eq->event_mode)
-			mlx5_prism_eq_poll(dev, 0);
+			mlx5_prism_eq_poll(dev, eq, 0);
 		return 0;
 	}
 
@@ -378,9 +445,9 @@ static int mlx5_prism_eq_create(struct mlx5_prism_dev *dev)
 	return -EIO;
 }
 
-static void mlx5_prism_eq_destroy(struct mlx5_prism_dev *dev)
+static void mlx5_prism_eq_destroy(struct mlx5_prism_dev *dev,
+				  struct mlx5_prism_eq *eq)
 {
-	struct mlx5_prism_eq *eq = &dev->eq;
 	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
 	int err;
@@ -400,7 +467,8 @@ static void mlx5_prism_eq_destroy(struct mlx5_prism_dev *dev)
 	eq->created = false;
 	eq->eqn = 0;
 	eq->log_sz = 0;
-	mlx5_prism_cmdq_eq_gone(dev);
+	if (eq == &dev->eq)
+		mlx5_prism_cmdq_eq_gone(dev);
 }
 
 int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
@@ -422,13 +490,31 @@ int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
 	pci_info(dev->pdev, "ALLOC_UAR ok: uar=%u doorbell=%pK\n",
 		 uar, eq->doorbell);
 
-	err = mlx5_prism_eq_create(dev);
+	err = mlx5_prism_eq_create(dev, &dev->eq, MLX5_PRISM_EQ_VEC_CMD,
+				   BIT(MLX5_PRISM_EVENT_TYPE_CMD));
 	if (err)
 		return err;
 
+	/*
+	 * T15: dedicated completion EQ — the v4.14/v5.15 create_comp_eqs
+	 * form: vector 0, ZERO event bitmask, sharing the function UAR
+	 * page (all mlx5_core EQs doorbell the same page; the value
+	 * carries the eqn). The CQs bind c_eqn to THIS eq; the trip-7/8
+	 * chain showed comp events do not ride the async/cmd EQ.
+	 */
+	dev->comp_eq.uar = uar;
+	dev->comp_eq.doorbell = dev->bar0 +
+				 (dma_addr_t)uar * MLX5_PRISM_PAGE_SIZE +
+				 MLX5_PRISM_EQ_DOORBELL_OFFSET;
+	err = mlx5_prism_eq_create(dev, &dev->comp_eq, 0, 0);
+	if (err)
+		goto err_destroy_eq;
+	enable_irq(dev->irq.vector[0]);
+
 	enable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
 	/* Second arm after the line is live — absorbs the create/arm race. */
-	mlx5_prism_eq_update_ci(dev, true);
+	mlx5_prism_eq_update_ci(dev, &dev->eq, true);
+	mlx5_prism_eq_update_ci(dev, &dev->comp_eq, true);
 	/*
 	 * T10: bind the cmdq completion mode only after the line is live.
 	 * Backlog EQEs (QUERY_EQ's own completion, consumed by the irq in
@@ -444,7 +530,14 @@ int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev)
 		pci_info(dev->pdev,
 			 "EQ ready: eqn=%u entries=%u (armed, poll fallback: irq counts only)\n",
 			 eq->eqn, 1 << eq->log_sz);
+	pci_info(dev->pdev,
+		 "comp EQ up: eqn=%u entries=%u (vector 0, zero mask)\n",
+		 dev->comp_eq.eqn, 1 << dev->comp_eq.log_sz);
 	return 0;
+
+err_destroy_eq:
+	mlx5_prism_eq_destroy(dev, &dev->eq);
+	return err;
 }
 
 /*
@@ -463,13 +556,14 @@ static int mlx5_prism_eq_recreate(struct mlx5_prism_dev *dev)
 	eq->storm_latched = false;
 	eq->empty_irqs = 0;
 
-	mlx5_prism_eq_destroy(dev);
-	err = mlx5_prism_eq_create(dev);
+	mlx5_prism_eq_destroy(dev, &dev->eq);
+	err = mlx5_prism_eq_create(dev, &dev->eq, MLX5_PRISM_EQ_VEC_CMD,
+				   BIT(MLX5_PRISM_EVENT_TYPE_CMD));
 	if (err)
 		return err;
 
 	enable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
-	mlx5_prism_eq_update_ci(dev, true);
+	mlx5_prism_eq_update_ci(dev, &dev->eq, true);
 	mlx5_prism_cmdq_eq_bound(dev, eq->event_mode);
 	return 0;
 }
@@ -531,7 +625,7 @@ int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 			return err;
 		}
 		for (retries = 0; ; retries++) {
-			eqes = mlx5_prism_eq_poll(dev, patience);
+			eqes = mlx5_prism_eq_poll(dev, &dev->eq, patience);
 			if (eqes > 0)
 				break;
 			if (retries >= max_retries) {
@@ -543,11 +637,13 @@ int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 			pci_info(dev->pdev,
 				 "eq self-test: event engine silent at %d/10 — recreating EQ (attempt %d)\n",
 				 i + 1, retries + 1);
-			mlx5_prism_eq_destroy(dev);
-			err = mlx5_prism_eq_create(dev);
+			mlx5_prism_eq_destroy(dev, &dev->eq);
+			err = mlx5_prism_eq_create(dev, &dev->eq,
+						   MLX5_PRISM_EQ_VEC_CMD,
+						   BIT(MLX5_PRISM_EVENT_TYPE_CMD));
 			if (err)
 				return err;
-			mlx5_prism_eq_update_ci(dev, true);
+			mlx5_prism_eq_update_ci(dev, &dev->eq, true);
 		}
 		total += eqes;
 	}
@@ -558,12 +654,74 @@ int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev)
 	return 0;
 }
 
+/*
+ * Close-time forensic probe (T15 trip-9/10): walk the comp EQ with the
+ * poll machinery. The ci-publish doorbell commits any staged-but-
+ * uncommitted EQEs (the T09 phenomenon), and each consumed event prints
+ * its own line — type 0x00 entries here mean comp events were generated
+ * but never committed/raised; an empty walk (with the raw ring dump)
+ * means the fw never generated them at all.
+ */
+/*
+ * (Re)create the completion EQ — the netdev open path retries with a
+ * fresh comp EQ when its event engine lands silent (the T09-era
+ * stochastic engagement: a recreate re-rolls the dice; the caller owns
+ * the CQ lifetime around it, as DESTROY_EQ refuses EQs still bound by
+ * a CQ).
+ */
+int mlx5_prism_comp_eq_recreate(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_eq *eq = &dev->comp_eq;
+	u32 uar = dev->eq.uar;
+	int err;
+
+	if (eq->created) {
+		if (!eq->storm_latched)
+			disable_irq(dev->irq.vector[0]);
+		eq->storm_latched = false;
+		mlx5_prism_eq_destroy(dev, eq);
+	}
+
+	eq->uar = uar;
+	eq->doorbell = dev->bar0 + (dma_addr_t)uar * MLX5_PRISM_PAGE_SIZE +
+		       MLX5_PRISM_EQ_DOORBELL_OFFSET;
+	err = mlx5_prism_eq_create(dev, eq, 0, 0);
+	if (err)
+		return err;
+	enable_irq(dev->irq.vector[0]);
+	mlx5_prism_eq_update_ci(dev, eq, true);
+	pci_info(dev->pdev, "comp EQ up: eqn=%u entries=%u (vector 0, zero mask)\n",
+		 eq->eqn, 1 << eq->log_sz);
+	return 0;
+}
+
+int mlx5_prism_comp_eq_probe(struct mlx5_prism_dev *dev)
+{
+	struct mlx5_prism_eq *eq = &dev->comp_eq;
+	int n;
+
+	if (!eq->created)
+		return 0;
+	n = mlx5_prism_eq_poll(dev, eq, 100);
+	pci_info(dev->pdev,
+		 "comp eq probe: %d events this probe, %u total\n",
+		 n, eq->events);
+	return n;
+}
+
 void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev)
 {
 	struct mlx5_prism_eq *eq = &dev->eq;
 	u8 in[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE];
 	int err;
+
+	if (dev->comp_eq.created) {
+		if (!dev->comp_eq.storm_latched)
+			disable_irq(dev->irq.vector[0]);
+		dev->comp_eq.storm_latched = false;
+		mlx5_prism_eq_destroy(dev, &dev->comp_eq);
+	}
 
 	if (eq->created) {
 		/*
@@ -574,7 +732,7 @@ void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev)
 		if (!eq->storm_latched)
 			disable_irq(dev->irq.vector[MLX5_PRISM_EQ_VEC_CMD]);
 		eq->storm_latched = false;
-		mlx5_prism_eq_destroy(dev);
+		mlx5_prism_eq_destroy(dev, eq);
 	}
 
 	if (eq->doorbell) {

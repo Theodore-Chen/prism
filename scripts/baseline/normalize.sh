@@ -46,6 +46,12 @@
 # collapse to placeholders; the line STRUCTURE — stage number, tier value,
 # wqe_counter 0/1, byte_cnt=64, the PASSED verdict — are regression
 # anchors and stay literal. Scoped to smoke lines only.
+# (T15 2026-10-01) netdev bring-up lines (every default load now): the
+# dedicated comp EQ adds "comp eq:" (cpu/dma covered by the generic
+# rule) and "comp EQ up:" (eqn is fw-assigned and normalized; the
+# entries=4096/vector 0/zero-mask wording stays literal as the v5.15
+# create_comp_eqs-form anchor), plus "netdev prismN registered (mac ..)"
+# (mac collapses; port pairing and wording stay literal).
 
 sed -e 's/^\[[^]]*\] //' \
     -e 's/cpu=[0-9a-fx]* dma=0x[0-9a-f]*/cpu=X dma=X/g' \
@@ -71,6 +77,8 @@ sed -e 's/^\[[^]]*\] //' \
     -e '/smoke self-test/ s/byte_cnt=[0-9]\+/byte_cnt=N/' \
     -e '/smoke self-test/ s/failed (-[0-9]\+)/failed (-N)/' \
     -e '/SET_HCA_CAP ok/ s/wqe_sz82=0x[0-9a-f]\+/wqe_sz82=0xX/' \
+    -e '/comp EQ up/ s/eqn=[0-9]\+/eqn=N/' \
+    -e '/netdev prism/ s/(mac [0-9a-f:]*)/(mac X)/' \
     -e '/opcode 0x904/ s/command status 0x[0-9a-f]\+/command status 0xN/' \
     -e '/opcode 0x904/ s/syndrome 0x[0-9a-f]\+/syndrome 0xX/' \
 | grep 'mlx5_prism ' \

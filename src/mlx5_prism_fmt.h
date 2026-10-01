@@ -544,4 +544,149 @@ static inline u32 prism_ifc_get(const u8 *buf, u16 bit, u8 nbits)
  */
 #define PRISM_SEND_DOORBELL_OFFSET	0x800
 
+/*
+ * ---- T15: receive-side objects + flow steering (netdev datapath) ----
+ * Every position below was mechanically re-derived from v5.15 mlx5_ifc.h
+ * and cross-checked byte-for-byte against v4.14 (the fields prism writes
+ * are all inside the two-generation intersection; the diffs are later
+ * insertions in areas left zero). The one deliberate correction to the
+ * survey notes: flow_context.destination_list_size sits at fc bit 0x88,
+ * not 0x84 (extended_destination@0x80 + flow_source@0x82 precede it).
+ *
+ * Layout maps (byte ranges into the in/out payload, header at [0:16]):
+ *
+ *	create_rq_in  (272 + 8*npas B)	modify_rq_in  (272 B)
+ *	  [32:272]  rqc ctx		  [8:9.5]   rq_state (top nibble)
+ *	  rqc.wq @ rqc byte 0x30	  [8:12]    rqn (24-bit)
+ *	  pas @ payload 272 (family)	  [16:24]   modify_bitmask be64 (0)
+ *	create_rq_out: rqn @ [8:12]	  [32:272]  rqc ctx
+ *	destroy_rq_in: rqn be32 @ [8:12]
+ *
+ *	create_tir_in (272 B = 32 B hdr + 240 B tirc)
+ *	create_tir_out: tirn @ [8:12]; destroy_tir_in: tirn be32 @ [8:12]
+ *
+ *	create_flow_table_in (64 B = 24 B hdr + 40 B ftc)
+ *	  table_type @bit 0x80; ftc @ [24:64] (level@ftc bit 0x8,
+ *	  log_size@ftc bit 0x18)
+ *	create_flow_table_out: table_id @ [8:12]
+ *	destroy_flow_table_in: table_type@0x80, table_id@bit 0xa8
+ *
+ *	create_flow_group_in (1024 B)
+ *	  table_type@0x80, table_id@0xa8, start_flow_index be32 @ [28:32]
+ *	  (bit 0xe0), end_flow_index be32 @ [36:40] (bit 0x120),
+ *	  match_criteria_enable @bit 0x1f8 (0 = match nothing = catch-all),
+ *	  match_criteria @ [64:576]
+ *	destroy_flow_group_in: as destroy_flow_table + group_id be32 @ [24:28]
+ *
+ *	set_fte_in (832 + 8*ndest B)
+ *	  table_type@0x80, table_id@0xa8, flow_index be32 @ [32:36]
+ *	  (bit 0x100), flow_context @ [64:832):
+ *	    group_id be32 @ fc bit 0x20, action be16 @ fc bit 0x70,
+ *	    destination_list_size be24 @ fc bit 0x88,
+ *	    match_value @ fc byte 64 (all zero), destinations @ fc byte 768:
+ *	    dest_format {destination_type u8, destination_id be24} 8 B each
+ *	delete_fte_in (64 B) — same family header: table_type@0x80,
+ *	  table_id@0xa8, flow_index be32 @ [32:36] (bit 0x100); the fw
+ *	  refuses DESTROY_FLOW_GROUP with 0x9 (BAD_RES_STATE) while the
+ *	  group still holds a live entry (trip-2 verdict, syndrome 0x563e2f)
+ *
+ *	set_flow_table_root_in (64 B)
+ *	  table_type @bit 0x80, table_id @bit 0xa8; op_mod 1 = disconnect
+ */
+#define PRISM_OFF_RQN_IN		8	/* destroy_rq_in: be32 */
+#define PRISM_OFF_RQN_OUT		8	/* create_rq_out */
+#define PRISM_OFF_RQC			32	/* create/modify_rq_in ctx */
+#define PRISM_OFF_RQC_WQ		48	/* wq embedded at rqc byte 0x30 */
+#define PRISM_OFF_RQ_PAS		272
+#define PRISM_OFF_TIRN_IN		8	/* destroy_tir_in: be32 */
+#define PRISM_OFF_TIRN_OUT		8	/* create_tir_out */
+#define PRISM_OFF_TIRC			32	/* create_tir_in ctx */
+#define PRISM_OFF_TABLE_ID_OUT		8	/* create_flow_table_out */
+#define PRISM_OFF_GROUP_ID_IN		24	/* destroy_flow_group_in: be32 */
+
+#define PRISM_CREATE_RQ_IN_LEN(npas)	(272 + 8 * (npas))
+#define PRISM_MODIFY_RQ_IN_LEN		272
+#define PRISM_CREATE_TIR_IN_LEN		272	/* 32 B hdr + 240 B tirc */
+#define PRISM_CREATE_FT_IN_LEN		64	/* 24 B hdr + 40 B ftc */
+#define PRISM_CREATE_FG_IN_LEN		1024
+#define PRISM_SET_FTE_IN_LEN(nd)	(832 + 8 * (nd))
+#define PRISM_DELETE_FTE_IN_LEN		64
+#define PRISM_SET_ROOT_IN_LEN		64
+
+/* rqc field bits (mlx5_ifc_rqc_bits; wq block reuses PRISM_WQ_BIT_* above). */
+#define PRISM_RQC_BIT_VSD		0x3	/* 1 bit: vlan strip disable */
+#define PRISM_RQC_BIT_STATE		0x8	/* 4 bits: 0 RST 1 RDY */
+#define PRISM_RQC_BIT_CQN		0x48	/* 24 bits */
+#define PRISM_RQC_STATE_RST		0x0
+#define PRISM_RQC_STATE_RDY		0x1
+
+/* tirc field bits (mlx5_ifc_tirc_bits) — direct-dispatch TIR only.
+ * TRIP-1 LESSON (2026-09-27, CREATE_TIR status 0x5 BAD_RES / syndrome
+ * 0x2eb6a5, both ports deterministic): the survey notes carried
+ * inline_rqn@0xe0 and transport_domain@0x124 — both EIGHT BITS EARLY.
+ * Label arithmetic: reserved_at_e0[0x8] precedes inline_rqn (0xe8), and
+ * rx_hash_fn@0x120 + reserved_at_124[0x2] + self_lb_block[0x2] precede
+ * transport_domain (0x128). Written early, rqn/tdn landed in reserved
+ * space and the fw read zeros from the true fields — a nonexistent
+ * resource. Same class as the T14 dbr_addr/cqn incident: survey numbers
+ * are not ifc facts.
+ */
+#define PRISM_TIRC_BIT_DISP_TYPE	0x20	/* 4 bits; 0 = direct */
+#define PRISM_TIRC_BIT_INLINE_RQN	0xe8	/* 24 bits */
+#define PRISM_TIRC_BIT_RX_HASH_FN	0x120	/* 4 bits; 0 = NONE */
+#define PRISM_TIRC_BIT_TRANSPORT_DOMAIN	0x128	/* 24 bits */
+#define PRISM_TIRC_DISP_TYPE_DIRECT	0x0
+
+/* flow command header bits shared by the whole family. */
+#define PRISM_FTCMD_BIT_TABLE_TYPE	0x80	/* 8 bits; 0 = NIC_RX */
+#define PRISM_FTCMD_BIT_TABLE_ID	0xa8	/* 24 bits */
+#define PRISM_FTCMD_BIT_OP_MOD		0x30	/* 16 bits; root: 1 = disconnect */
+#define PRISM_FT_TYPE_NIC_RX		0x0
+#define PRISM_FTC_BIT_LEVEL		0x8	/* 8 bits, ftc-relative */
+#define PRISM_FTC_BIT_LOG_SIZE		0x18	/* 8 bits, ftc-relative */
+#define PRISM_FG_BIT_START		0xe0	/* 32 bits, fg-in-relative */
+#define PRISM_FG_BIT_END		0x120	/* 32 bits, fg-in-relative */
+#define PRISM_FG_BIT_MATCH_EN		0x1f8	/* 8 bits; 0 = match all */
+#define PRISM_FTE_BIT_FLOW_INDEX	0x100	/* 32 bits, fte-in-relative */
+
+/* flow_context fields, fc-relative (fc @ set_fte_in byte 64). */
+#define PRISM_FC_BIT_GROUP_ID		0x20	/* 32 bits */
+#define PRISM_FC_BIT_ACTION		0x70	/* 16 bits */
+#define PRISM_FC_BIT_DEST_LIST_SZ	0x88	/* 24 bits */
+#define PRISM_FC_OFF_DEST		768	/* dest_format[] at fc byte 0x300 */
+#define PRISM_DEST_BIT_TYPE		0x0	/* 8 bits; 2 = TIR */
+#define PRISM_DEST_BIT_ID		0x8	/* 24 bits */
+#define PRISM_DEST_TYPE_TIR		0x2
+#define PRISM_FC_ACTION_FWD_DEST	0x4
+
+/*
+ * EQE command-completion events carry the CQN at byte 0x38 (be32, 24-bit
+ * valid; struct mlx5_eqe_comp reserved[6] + cqn, v4.14 == v5.15).
+ */
+#define PRISM_EQE_OFF_COMP_CQN		0x38
+
+/*
+ * CQ arm protocol (include/linux/mlx5/cq.h mlx5_cq_arm): arm record be32 at
+ * cq_dbr + 4 with value (arm_sn << 28) | (cmd << 24) | cons_index — cmd 0 is
+ * MLX5_CQ_DB_REQ_NOT, the plain arm — then wmb, then an 8-byte MMIO write
+ * {same be32 value, cqn be32} to the UAR page + 0x20.
+ */
+#define PRISM_CQ_DBR_ARM_OFF		4	/* be32 within the cq dbr */
+#define PRISM_CQ_ARM_DOORBELL_OFFSET	0x20	/* UAR-relative */
+
+/* pointer data segment (qp.h mlx5_wqe_data_seg): byte_cnt be32 @0 (bit31
+ * clear), lkey be32 @4, addr be64 @8 — the non-inline counterpart of the
+ * inline counter form above.
+ */
+#define PRISM_WQE_SEG_OFF_LKEY		4
+#define PRISM_WQE_SEG_OFF_ADDR		8
+
+/*
+ * permanent MAC inside query_nic_vport_context_out: the context rides at
+ * payload byte 16 (PRISM_OFF_NVC_OUT), permanent_address is a
+ * mac_address_layout at context bit 0x7a0 = byte 244, and the six MAC bytes
+ * start two bytes into that field (vport.c ether_addr_copy(&addr[2])).
+ */
+#define PRISM_OFF_NVC_PERM_MAC		246	/* context-relative */
+
 #endif /* __MLX5_PRISM_FMT_H */

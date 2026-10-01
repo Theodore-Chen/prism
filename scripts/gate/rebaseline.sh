@@ -15,8 +15,9 @@
 #      non_wire 探针的每负载 CREATE 拒绝行，status/syndrome 经 normalize
 #      归一——首负载 0x17a194 / stress 态 0x991046 实测会漂）/ PHY PPCNT
 #      （T12 新自检行）/ PHY monitor（T13 监控行）/ smoke self-test +
-#      smoke test verdict（T14 冒烟行）——任何族外行 = 行为漂移，
-#      熔断退出，基线不动
+#      smoke test verdict（T14 冒烟行）/ comp eq + comp EQ up + netdev
+#      registered（T15 netdev 行族，mac/eqn 经 normalize 归一）——任何
+#      族外行 = 行为漂移，熔断退出，基线不动
 #   3. 族内差异确认后按 README 流程重采双口基线 + chown 回调用用户
 #   4. 重采后同周期自洽复验（必须 zero diff）
 #   5. r0_gate.sh          — 新基线下 G0-G4 全门禁（~10 min）
@@ -68,7 +69,10 @@ for PORT in 0 1; do
                   -e 'PHY PPCNT' \
                   -e 'PHY monitor' \
                   -e 'smoke self-test' \
-                  -e 'Hardware datapath smoke test')
+                  -e 'Hardware datapath smoke test' \
+                  -e 'comp eq:' \
+                  -e 'comp EQ up:' \
+                  -e 'netdev prism')
     if [ -n "$BAD" ]; then
         echo "   [FAIL] $D 出现族外漂移行（基线不动，停止）:"
         echo "$BAD"

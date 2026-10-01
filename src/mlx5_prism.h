@@ -14,6 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
+#include <linux/netdevice.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -66,6 +67,18 @@
 #define MLX5_PRISM_CMD_OP_DESTROY_TIS	0x914
 #define MLX5_PRISM_CMD_OP_ALLOC_PD	0x800
 #define MLX5_PRISM_CMD_OP_DEALLOC_PD	0x801
+#define MLX5_PRISM_CMD_OP_CREATE_TIR	0x900
+#define MLX5_PRISM_CMD_OP_DESTROY_TIR	0x902
+#define MLX5_PRISM_CMD_OP_CREATE_RQ	0x908
+#define MLX5_PRISM_CMD_OP_MODIFY_RQ	0x909
+#define MLX5_PRISM_CMD_OP_DESTROY_RQ	0x90a
+#define MLX5_PRISM_CMD_OP_SET_FLOW_TABLE_ROOT	0x92f
+#define MLX5_PRISM_CMD_OP_CREATE_FLOW_TABLE	0x930
+#define MLX5_PRISM_CMD_OP_DESTROY_FLOW_TABLE	0x931
+#define MLX5_PRISM_CMD_OP_CREATE_FLOW_GROUP	0x933
+#define MLX5_PRISM_CMD_OP_DESTROY_FLOW_GROUP	0x934
+#define MLX5_PRISM_CMD_OP_SET_FLOW_TABLE_ENTRY	0x936
+#define MLX5_PRISM_CMD_OP_DELETE_FLOW_TABLE_ENTRY	0x938
 #define MLX5_PRISM_CMD_OP_QUERY_NIC_VPORT_CTX 0x754
 #define MLX5_PRISM_CMD_OP_ACCESS_REG	0x805
 #define MLX5_PRISM_CMD_HDR_SIZE		16
@@ -94,6 +107,7 @@
 #define MLX5_PRISM_CMD_OP_ALLOC_UAR	0x802
 #define MLX5_PRISM_CMD_OP_DEALLOC_UAR	0x803
 #define MLX5_PRISM_CMD_OP_NOP		0x80d
+#define MLX5_PRISM_EVENT_TYPE_COMP	0x00	/* CQ completion (T15) */
 #define MLX5_PRISM_EVENT_TYPE_CMD	0x0a
 #define MLX5_PRISM_EQ_DOORBELL_OFFSET	0x40
 #define MLX5_PRISM_EQ_BUF_PAGES		64	/* ladder rung D needs 64 pas */
@@ -346,6 +360,95 @@ struct mlx5_prism_phy {
 	char				name[16];	/* "mlx5_prismN" */
 };
 
+/*
+ * T15 netdev datapath bookkeeping. Lives in the netdev's private area
+ * (netdev_priv()); the object chain mirrors the T14 winner form (DESIGN
+ * §5.7) plus the receive leg (RQ + direct TIR + catch-all flow table).
+ * Object validity is tracked by explicit have_* flags — the fw hands out
+ * legal zero ids (T14 trip-10 lesson). txwi[] is the per-posted-WQE ring
+ * (en_tx.c wqe_info shape); skbs are linearized so each carries at most
+ * one streaming DMA mapping.
+ */
+struct mlx5_prism_net_txwi {
+	struct sk_buff	*skb;
+	dma_addr_t	dma_addr;	/* mapped linear tail; 0 = inline form */
+	u32		dma_len;
+	u32		num_bytes;	/* skb->len at post time, for stats */
+	u8		num_wqebbs;
+};
+
+struct mlx5_prism_net {
+	struct net_device		*netdev;
+	struct mlx5_prism_dev		*dev;
+	struct napi_struct		napi;
+
+	u32		pdn;
+	u32		mkey;
+	u32		cqn;
+	u32		tdn;
+	u32		tisn;
+	u32		sqn;
+	u32		rqn;
+	u32		tirn;
+	u32		table_id;
+	u32		group_id;
+	bool		have_pd;
+	bool		have_mkey;
+	bool		have_cq;
+	bool		have_td;
+	bool		have_tis;
+	bool		have_sq;
+	bool		have_rq;
+	bool		have_tir;
+	bool		have_table;
+	bool		have_group;
+	bool		have_fte;
+	bool		root_set;
+	bool		opened;		/* cleared first in ndo_stop */
+	bool		napi_added;
+	bool		napi_enabled;
+	bool		xmit_on;	/* stage >= 3 opened the send path */
+	u8		tx_inline;	/* 1 = force the T14 all-inline WQE form */
+
+	u8		*wq;		/* send WQEBB ring */
+	dma_addr_t	wq_dma;
+	u8		*cq;		/* 64-B CQEs, shared by SQ and RQ */
+	dma_addr_t	cq_dma;
+	u8		*rxwq;		/* RQ WQE ring (pure dseg array) */
+	dma_addr_t	rxwq_dma;
+	u8		*rxbuf;		/* RX payload buffers, posted by dseg */
+	dma_addr_t	rxbuf_dma;
+	u8		*sq_dbr;
+	dma_addr_t	sq_dbr_dma;
+	u8		*cq_dbr;	/* [0] set_ci, [4] arm */
+	dma_addr_t	cq_dbr_dma;
+	u8		*rq_dbr;
+	dma_addr_t	rq_dbr_dma;
+	void __iomem	*bf;		/* bar0 + uar * 4K + 0x800 (send) */
+	void __iomem	*cq_arm;	/* bar0 + uar * 4K + 0x20 (CQ arm) */
+
+	u32		sq_pc;		/* TX producer counter (WQEBBs) */
+	u32		sq_cc;		/* TX consumer counter (WQEBBs) */
+	u32		cq_ci;		/* CQ consumer index */
+	u8		arm_sn;		/* CQ arm sequence number (2 bits) */
+	u32		rq_pc;		/* RX WQEs posted */
+	struct mlx5_prism_net_txwi	*txwi;	/* [1 << log_sq_sz] */
+	spinlock_t	arm_lock;	/* serialise arm writers (xmit/poll/tick) */
+	struct delayed_work	arm_dw;	/* 10 ms keep-fresh re-arm tick */
+
+	u64		tx_packets;
+	u64		tx_bytes;
+	u64		tx_errors;
+	u64		rx_packets;
+	u64		rx_bytes;
+	u64		rx_errors;
+};
+
+static inline struct mlx5_prism_net *mlx5_prism_net_of(struct net_device *ndev)
+{
+	return (struct mlx5_prism_net *)netdev_priv(ndev);
+}
+
 struct mlx5_prism_dev {
 	struct pci_dev			*pdev;
 	void __iomem			*bar0;
@@ -353,10 +456,12 @@ struct mlx5_prism_dev {
 
 	struct mlx5_prism_cmdq		cmdq;
 	struct mlx5_prism_eq		eq;
+	struct mlx5_prism_eq		comp_eq;
 	struct mlx5_prism_irq		irq;
 	struct mlx5_prism_fw		fw;
 	struct mlx5_prism_fw_profile	profile;
 	struct mlx5_prism_phy		phy;
+	struct net_device		*ndev;	/* T15: prism%d, or NULL */
 };
 
 static inline u16 mlx5_prism_fw_rev_major(const struct mlx5_prism_dev *dev)
@@ -480,7 +585,10 @@ void mlx5_prism_eq_free(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_setup(struct mlx5_prism_dev *dev);
 int mlx5_prism_eq_selftest(struct mlx5_prism_dev *dev);
 void mlx5_prism_eq_teardown(struct mlx5_prism_dev *dev);
-int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev);
+int mlx5_prism_eq_irq_consume(struct mlx5_prism_dev *dev,
+			      struct mlx5_prism_eq *eq);
+int mlx5_prism_comp_eq_probe(struct mlx5_prism_dev *dev);
+int mlx5_prism_comp_eq_recreate(struct mlx5_prism_dev *dev);
 
 /* EQ quirk knobs (module params, defaults = measured values, see profile). */
 extern u32 mlx5_prism_eq_patience_ms;
@@ -510,5 +618,17 @@ int mlx5_prism_smoke_selftest(struct mlx5_prism_dev *dev);
  */
 int mlx5_prism_phy_monitor_start(struct mlx5_prism_dev *dev);
 void mlx5_prism_phy_monitor_stop(struct mlx5_prism_dev *dev);
+
+/*
+ * T15: netdev service — register/unregister bracket the netdev lifetime
+ * (registered at probe tail, unregistered first in remove; unregister
+ * itself synchronously runs ndo_stop when the link is up). comp_event is
+ * the EQE dispatch hook called from hardirq context for CQ completion
+ * events (type 0x00): it schedules the NAPI instance when the datapath
+ * is open.
+ */
+int mlx5_prism_net_register(struct mlx5_prism_dev *dev);
+void mlx5_prism_net_unregister(struct mlx5_prism_dev *dev);
+void mlx5_prism_net_comp_event(struct mlx5_prism_dev *dev, u32 cqn);
 
 #endif /* __MLX5_PRISM_H */

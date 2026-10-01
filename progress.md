@@ -35,7 +35,7 @@
 | T12-phy-access-reg | PHY 监控 1：ACCESS_REG PPCNT | S5 | — | **completed** | 3432cdb | 2026-09-27 |
 | T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | **completed** | 4a12bba | 2026-09-27 |
 | T14-smoke-test | 硬件冒烟测试（ETH TX SQ→WQE→CQE，路线 A） | S5 | — | **completed** | 见 T14 节 | 2026-09-27 |
-| T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | pending | — | — |
+| T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | **completed** | 见 T15 节 | 2026-10-01 |
 | T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | pending | — | — |
 | T17-architecture-summary | 架构总结文档 | S6 | — | pending | — | — |
 
@@ -579,16 +579,25 @@
 
 ### T15-netdev-skeleton
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed（2026-10-01，二十七趟上机判决链 + 收官链全绿：t15_verify 25/0 ALL GREEN → rebaseline 基线 68 行/口 → r0_gate 8/8）
+- **开始时间**: 2026-09-27
+- **完成时间**: 2026-10-01
+- **Commit**: 见本 commit
+- **读过源码**: v5.15 树 en/main.c（netdev 注册形态/MAC/开关序）、en_tx.c（TX 配方与完成对账公式）、en_rx.c（RQ 投递/重投/NAPI）、en_common.c（hw mkey 形态）、cq.h:151-173（arm 双写序列）、fs_cmd.c（FT/FG/FTE/ROOT 命令族）、fpga/conn.c（RQ dbr-only 投递）、eq.c create_comp_eqs（专用 comp EQ 拓扑）；收官阶段 fib_frontend.c/__fib_validate_source + arp.c（根因层）
+- **关键决策**: net.c 自含不抽共享层（T13 先例，共享面留 fmt.h）；TX 主档 hdr-inline+指针 dseg（v5.15 正典，此前未证）+ netdev_inline_all 回退钮；单 CQ 共享 SQ/RQ + 专用 comp EQ；carrier 从 PAOS 单读起（后实证为竞态改有界等待）；10ms NAPI 看门狗兜底事件模型
+- **遇到的问题与解决**（二十七趟判决链，修正史逐条在 t15_verify.sh 头部，黑匣子 /var/tmp/t15_live.log 在案）：
+  1. **1-4 趟（对象链点亮）**：TIR 位号早 8 位（agent 转抄未走标签算术，fmt_equiv 自洽陷阱第二例——期望值必须 ifc 独立推导，tirc+28/+36 落点断言锁死）；DESTROY_FLOW_GROUP 拒活 FTE（0x9）→ DELETE_FTE(0x938) 前置；stage1/2/3 分级点火
+  2. **5-16 趟（事件链）**：arm write64 两字反（LE 低字=arm 值）；BIT(COMP) 掩码理论证伪（0x3/0x008fef 全梯拒）→ 专用 comp EQ（vector 0+零掩码）；sn 模型定案（期望 sn 从 0 起 mod-4 循环含 0、全零 VALUE 仅推进序号 → 零值同步臂+真臂开局）；arm 一次性（验证 NOP 消耗臂 → armed 尾部重武装）；poll 的 CQE owner 判定写反（从 EQ 消费者 XOR 形移植翻了面——修复后事件→硬中断→dispatch→NAPI→消费全链首亮）
+  3. **17-21 趟（数据面实证 + 看门狗）**：帧真实过线（opcode=2 CQE byte_cnt=90/86）但栈因无人交付 ARP 不完成；arm-on-xmit 使 TX 全消费（tx=9）；sn 自然循环修复；看门狗判决（trip-21 深读：静默口 11 个 TX 完成+RX CQE 全部 fresh 躺环而验证/探针事件每次必中 → 事件只认 arm→doorbell→µs 级完成三元组，空闲 CQ 到达从不通知，tick 重武装无效）→ 10ms delayed_work napi_schedule 兜底
+  4. **22-27 趟（帧比对 + 根因收官）**：rx=9=tx 严丝合缝、AF_PACKET 字节比对首过、PPCNT 线缆级对账（clear-on-read 反用作窗口增量）；嗅探器逐帧判决（ARP 应答从未发出、tap 可见=已过栈入口）；栈四件套全净（addr/sysctl/nft/route）；kretprobe ip_route_input_noref 按参数配对（-EINVAL×3 @1.02s=我们的重传，0×2=wifi）；读码命中 __fib_validate_source：对端地址≡本机另一口本地地址 → RTN_LOCAL+!accept_local 判 martian——单机双口对拉拓扑税，驱动数据面五趟判别全部无罪；双口 accept_local=1 后 ping exit 0 首真，25/0 全绿（嗅探器留下 ARP 请求/应答/ICMP echo 完整逐帧记录，ip neigh 双向 REACHABLE）
+- **与设计的偏差**: carrier 事件跟踪不做（无 port async EQE 处理，改 open 有界等待，骨架限制记档）；PPNT/wire 帧比对判据扩展为 AF_PACKET 双向单播（trip-23 起）；eq_event 判据从 ping 窗口 trace 改判黑匣子 dispatch 计数（trip-22 预登记——看门狗消费模式下窗口零 EQE 是怪癖 #5 的预期推论）
+- **exit_criteria 验证结果**: compile=make 0 警告/checkpatch 0/0/0/fmt_equiv ALL EQUIVALENT（T15 节 21 字段+RQ/TIR/FT 链打包几何）；load=prism0/prism1 存在 DOWN；functional=up/down×5 干净、ping exit 0、trace sq_xmit/rx_cqe/eq dispatch 全亮、AF_PACKET 0x88b5 双向逐字节比对 PASS；stress=20×up/down+20×模块循环零投诉、teardown 2305/2305；收官=rebaseline 68 行/口（+comp eq/comp EQ up/netdev registered/DESTROY_EQ eqn=5 四行族，mac/eqn 归一）+ r0_gate 8 passed 0 failed
+- **学习心得**: ①"事件引擎不通知静默到达"这类行为只能靠黑匣子深读+判别式阶梯收敛，每趟一个因子；②用户态证据耗尽时 kprobe 按参数配对（返回值×调用者×节奏）能钉死内核层归属；③全局探针的宿主机流量混入要显式排除（wifi ARP 教训）；④仪表的 2>/dev/null 会吞掉探针注册失败——报错本身是数据
+- **reflection_questions 答案**:
+  - **Q: NAPI 为什么能减少中断？** A: 一次 napi_schedule 后轮询批量收帧，预算内不重武装；高 pps 下硬中断次数被摊薄为 O(N/budget)。prism 里事件只负责唤起 poll——本 fw 连"到达即通知"都不保证（DESIGN §6.4 µs 三元组），看门狗把兜底时延钉在 10ms
+  - **Q: NETDEV_TX_BUSY 何时触发？** A: 驱动无资源（环满）时；prism 用 stop_room 主动 netif_tx_stop_queue、poll 回收后 wake——比 BUSY 更友好（栈可见队列状态）
+  - **Q: skb 什么时候 kfree？** A: 完成路径——TX 在 CQE 回收时（error→dev_kfree_skb_any，成功→napi_consume_skb）；立即 kfree 会释放 DMA 仍在读的内存
+  - **Q: 为什么只做单包单队列？** A: 骨架目标是 API 链路证明（register/ndo/NAPI/SKB/WQE 桥接）；multiqueue/RSS 是通道复制无新协议知识，ROI 低（DESIGN §1.6）
 
 ---
 
@@ -660,6 +669,7 @@
   - **Q: arm doorbell 写入但不 enable_irq，固件侧状态如何？**
     A: EQ 的 ARMED/FIRED 是 fw 内部状态机（PRM Figure 24），arm 请求它进入 ARMED；Linux 的 enable/disable_irq 是主机侧向量屏蔽，两者正交。实测本卡在 enable_irq 后事件仍按纯轮询语义投递（/proc/interrupts 全零）——投递与中断解耦比 PRM 描述更彻底，也说明 T10 点亮硬中断时要防"中断不来"的分支而不是只防风暴
 ## 历史问题归档
+
 
 > 跨 task 的反复出现的问题、踩过的硬件坑、与 PRM 文档不一致的地方，集中记录在这里方便回溯。
 
@@ -906,6 +916,7 @@
 
 > CLAUDE.md 要求：设计与实际硬件行为不一致时必须修正 DESIGN.md，在这里登记。
 
+- **v2.5（2026-10-01，T15）**：§5.8 netdev 数据面新增（完整对象链含 RX 引导 RQ/TIR/FT/FTE/ROOT、ndo_open 验证-重试环、TX hdr-inline+指针形态首证、RX dbr-only 投递、NAPI 双路调度=事件+看门狗）+ §6.4 netdev 数据面怪癖新增 11 条（专用 comp EQ/sn 模型 mod-4 含零/一次性 arm/µs 三元组事件模型/write64 字序/owner 判定/DELETE_FTE 前置/PAOS 重同步延迟/PPCNT clear-on-read/短帧补齐/accept_local 拓扑税）。依据：T15 二十七趟上机（/var/tmp/t15_run.log、t15_live.log、rebaseline_run.log）。
 - **v2.4（2026-09-27，T14）**：§2.2 smoke.c 定稿行 + §5.6 send doorbell 硬件实证（ctrl 前 8B 裸写 BAR0+uar×4K+0x800、mlx5e_notify_hw 屏障序）+ §5.7 数据面冒烟服务新增（对象链/三档梯/L2-inline WQE 形态/byte_cnt 判决口径）+ §6.2 caps 补丁 no-op 勘定（c[82..83]=max_wqe_sz_sq 低字节，门闩语义）+ §6.3 数据面怪癖新增（QP 范畴封锁、SQ 三因子、TX byte_cnt=0、err_cqe 布局、零 id 对象等十六趟判决）。依据：T14 上机（/var/tmp/t14_run.log、t14_live.log、rebaseline_run.log）。
 - **v2.3（2026-09-27，T13）**：§8.1 监控环重画（delayed_work 翻案 + 0x16/0x12/PAOS/MTMP 四读、0x0 退出监控环）+ PAOS/MTMP 上机判决回填（PAOS accepted/链路 up；MTMP accepted len=8/94°C——MCAM mtmp 位谎报第二例）；§8.2 字段表 v2.3（三分类 + misc 每 PF + is_visible 温度；symbol_error_rate/link_quality 删除）；§8.3 状态机细化（区间 BER、半阈值+K=5、PAOS 冻结、u64 倒数比较、100ms 量化注记）；§3.2 phy 行定稿（快照式 spinlock）。依据：health.c/hwmon.c/sysfs.rst/dw-xdata-pcie.c 功课 + T13 上机（/var/tmp/t13_run.log、/var/tmp/rebaseline_run.log）。
 - **v2.2（2026-09-26，T12）**：§8.1 pre_fec_ber 勘误（非硬件字段，BER 为 grp 0x16 推导量）+ 0x16 上机判决（FW 接受、计数器活跃，PCAM 能力位谎报缺失）+ tslc/rx_bits 现象学（引导期计数器时钟重启、链路 down 时 rx_bits 仍按线率累积）；§8.3 输入源改真分母优先；§10.1 C4 改计数器单调性口径。依据：mlx5_ifc.h v5.15/en_stats.c 全量核查 + T12 上机（/var/tmp/t12_run.log）。

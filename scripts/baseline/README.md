@@ -3,12 +3,13 @@
 ## 文件
 
 - `baseline_dmesg_0.txt` / `baseline_dmesg_1.txt` — 双口各自的归一化基线模板
-  （单口 47 行：probe 引导序列 + EQ 自检 + teardown 关键行）。
+  （单口 68 行：probe 引导序列 + EQ 自检 + netdev 引导 + teardown 关键行）。
   **两口不可互换**：caps hexdump 在 function 标识字节处有真实差异
   （.0 口与 .1 口各差 1 字节），但各自跨压测周期完全确定。
-  现行基线为 **T10-prep 重采版（2026-09-17，ALL GREEN 8/8）**：eqc ifc
-  编码后的行为——QUERY_EQ 回显 log12/4096 条目、11 条事件（含 QUERY_EQ
-  自身积压完成，eqe[1] 释放 slot 1 即其时序指纹）、DESTROY 计数 11。
+  现行基线为 **T15 重采版（2026-10-01，r0_gate 8 passed 0 failed）**：
+  T14 版 64 行 + netdev 四行族——`comp eq:`（专用完成 EQ 分配）、
+  `comp EQ up:`（eqn 归一）、`netdev prismN registered (mac X)`、
+  comp EQ 的 `DESTROY_EQ ok: eq_number=5` 拆除行。
 - `normalize.sh` — 归一化逻辑（唯一存放点，基线生成与对比共用）。
 - `diff_baseline.sh` — 对比门禁：取日志中最后一个完整周期（锚点 = 最后一次
   .0 口 BAR0 mapped），双口分别与基线 diff；临时文件走 mktemp 私有目录

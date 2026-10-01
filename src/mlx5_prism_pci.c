@@ -191,8 +191,18 @@ int mlx5_prism_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_eq_teardown;
 
+	/*
+	 * T15: netdev skeleton — registered DOWN; the datapath objects are
+	 * created only by ndo_open (ip link set up).
+	 */
+	err = mlx5_prism_net_register(dev);
+	if (err)
+		goto err_monitor_stop;
+
 	return 0;
 
+err_monitor_stop:
+	mlx5_prism_phy_monitor_stop(dev);
 err_eq_teardown:
 	mlx5_prism_teardown(dev, PRISM_TD_ALL);
 	return err;
@@ -222,6 +232,12 @@ void mlx5_prism_pci_remove(struct pci_dev *pdev)
 		 mlx5_prism_fw_rev_major(dev),
 		 mlx5_prism_fw_rev_minor(dev),
 		 mlx5_prism_fw_rev_sub(dev));
+
+	/*
+	 * T15: tear the netdev down first — unregister runs ndo_stop while
+	 * the completion path it sleeps on (EQ/CMDQ) is still alive.
+	 */
+	mlx5_prism_net_unregister(dev);
 
 	/*
 	 * T13: stop the monitor before anything else — the cancel waits out

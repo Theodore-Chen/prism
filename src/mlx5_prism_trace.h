@@ -88,6 +88,41 @@ TRACE_EVENT(prism_eq_event,
 		  __entry->cons_index)
 );
 
+TRACE_EVENT(prism_sq_xmit,
+	TP_PROTO(u32 len, u16 ihs, u8 inline_all, u32 pc),
+	TP_ARGS(len, ihs, inline_all, pc),
+	TP_STRUCT__entry(
+		__field(u32, len)
+		__field(u16, ihs)
+		__field(u8, inline_all)
+		__field(u32, pc)
+	),
+	TP_fast_assign(
+		__entry->len = len;
+		__entry->ihs = ihs;
+		__entry->inline_all = inline_all;
+		__entry->pc = pc;
+	),
+	TP_printk("len=%u ihs=%u form=%s pc=%u",
+		  __entry->len, __entry->ihs,
+		  __entry->inline_all ? "all-inline" : "hdr-inline+ptr",
+		  __entry->pc)
+);
+
+TRACE_EVENT(prism_rx_cqe,
+	TP_PROTO(u32 byte_cnt, u16 wqe_id),
+	TP_ARGS(byte_cnt, wqe_id),
+	TP_STRUCT__entry(
+		__field(u32, byte_cnt)
+		__field(u16, wqe_id)
+	),
+	TP_fast_assign(
+		__entry->byte_cnt = byte_cnt;
+		__entry->wqe_id = wqe_id;
+	),
+	TP_printk("byte_cnt=%u wqe_id=%u", __entry->byte_cnt, __entry->wqe_id)
+);
+
 #endif /* __MLX5_PRISM_TRACE_H */
 
 #undef TRACE_INCLUDE_PATH
