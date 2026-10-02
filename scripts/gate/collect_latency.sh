@@ -99,18 +99,30 @@ for n in $(seq 1 "$LOADS"); do
 	wait "$ARM"
 	ARM=""
 
-	# 等尾部耐心窗结束：三计数连续 3 秒不变且 issue>=60，75s 超时。
-	prev=""; same=0
-	for i in $(seq 75); do
-		cur=$( { grep -c 'prism_cmdq_issue:' "$TR/trace"; \
-			 grep -c 'prism_cmdq_complete:' "$TR/trace"; \
-			 grep -c 'prism_eq_event:' "$TR/trace"; } | tr '\n' '/' )
-		if [ "$cur" = "$prev" ]; then same=$((same + 1)); else same=0; fi
-		prev=$cur
-		[ "$same" -ge 3 ] && [ "${cur%%/*}" -ge 60 ] && break
-		sleep 1
+	# 测量侧静音（T16 trip-1d，verify.sh 同款）：monitor_interval_ms→
+	# 60000（公开 sysfs 旋钮，20-60000 合法域，applied next tick → 窗口
+	# 残余 ≤1 tick/口）。口 0 的 monitor 在口 1 引导期间并发打 ACCESS_REG
+	# 会把引导命令的 EQE 消费排队抬高（bp 档 p50 408µs vs T11 1.0µs），
+	# 静音后恢复 T11 测量条件。判据与驱动零改动。
+	( for n0 in 0 1; do
+		while [ ! -e /sys/class/misc/mlx5_prism$n0/monitor_interval_ms ]; do :; done
+		echo 60000 > /sys/class/misc/mlx5_prism$n0/monitor_interval_ms
+	  done ) &
+	SIL=$!
+
+	# 等窗口右界：双口 "netdev registered" 行 = probe 期结束。原三计数
+	# 3s 稳定判据写于 T11（monitor 尚不存在）；T13 起 PHY monitor 周期
+	# ACCESS_REG 使其失效。注意右界本身拦不干净——口 0 的 monitor 在口 1
+	# 引导期间已打点（trip-1b 实测 158-166 命令/载 vs 纯探针 ~125），窗口
+	# 内的零并发由上方静音器保证，右界只负责收窗。10s 兜底。（T16 trip-1
+	# 修正，判据 C 阈值零改动）
+	for i in $(seq 100); do
+		dmesg | grep -c "netdev prism[01] registered" | grep -q "^2$" && break
+		sleep 0.1
 	done
+	sleep 0.05
 	cp "$TR/trace" "$WORK/prism_load_$(printf '%02d' "$n").txt"
+	kill "$SIL" 2>/dev/null
 	disarm
 	rmmod mlx5_prism || abort "rmmod 失败于 load $n"
 	if dmesg | grep -E 'WARNING|Oops|BUG' >/dev/null; then

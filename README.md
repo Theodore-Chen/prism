@@ -15,6 +15,7 @@ sudo rmmod mlx5_prism
 sudo modprobe mlx5_core                 # 恢复生产驱动
 
 sudo bash scripts/gate/r0_gate.sh       # 硬件门禁一键跑（G0-G4）
+sudo ./verify.sh                        # M2 一键验收（T16：18 项 + 双层对比报告 docs/report.md）
 ```
 
 ## 目录地图

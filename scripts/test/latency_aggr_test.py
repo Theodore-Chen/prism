@@ -136,6 +136,92 @@ def test_verdict():
     check("无样本不裁决", "不裁决" in la.verdict_c([]), True)
 
 
+def test_pair_p2_tagged_bp():
+    """T16 trip-1c：配对样本带 opcode 标签，bp 档排除 ACCESS_REG
+    （T13 monitor 周期读与探针期 ACCESS_REG 同 opcode，一并排除）。"""
+    completes = [(1_000_000_000, 0, 100), (2_000_000_000, 1, 200),
+                 (3_000_000_000, 2, 300)]
+    eqs = [(1_500_000_000, 0x1, 4, 0x0a), (3_500_000_000, 0x6, 4, 0x0a)]
+    ops = ["INIT_HCA", "ACCESS_REG", "QUERY_PAGES"]
+    tagged, unpaired, orphan = la.pair_p2_tagged(completes, eqs, ops)
+    # slot0↔EQE1（+0.5s，INIT_HCA）；slot1↔EQE2 bit1（+1.5s，ACCESS_REG）；
+    # slot2↔EQE2 bit2（3.5s−3.0s=+0.5s，QUERY_PAGES）
+    check("tagged 样本", sorted(tagged),
+          sorted([(500_000_000, "INIT_HCA"), (1_500_000_000, "ACCESS_REG"),
+                  (500_000_000, "QUERY_PAGES")]))
+    check("tagged unpaired", unpaired, 0)
+    bp = [d for d, op in tagged if op != "ACCESS_REG"]
+    check("bp 档排除 ACCESS_REG", sorted(bp),
+          sorted([500_000_000, 500_000_000]))
+    # 无 opcodes → 标签 None（pair_p2 垫片路径）
+    plain, _, _ = la.pair_p2_tagged(completes, eqs)
+    check("无标签路径", sorted(d for d, _ in plain),
+          sorted([500_000_000, 500_000_000, 1_500_000_000]))
+
+
+def test_pair_p2_ev():
+    """T16 trip-2：事件形态反向配对（EQE 消费→等待者观察的唤醒延迟）。
+    事件模式命令次序 = issue → EQE → 唤醒 → complete，complete 认领早于
+    自身的最新同槽未认领 EQE；排除集（无自身 CMD EQE 的命令）不参与。"""
+    us = 1_000_000
+    # 事件形态序列（单队列）：i1 e1 c1 i2 e2 c2 …
+    completes = [(10 * us, 0, 0), (20 * us, 0, 0), (30 * us, 1, 0)]
+    eqs = [(9 * us, 0x1, 4, 0x0a), (19 * us, 0x1, 4, 0x0a), (29 * us, 0x2, 4, 0x0a)]
+    ops = ["INIT_HCA", "ALLOC_UAR", "SET_HCA_CAP2"]
+    s, unp = la.pair_p2_ev(completes, eqs, ops)
+    check("ev 各配自身 EQE", sorted(d for d, _ in s),
+          sorted([1 * us, 1 * us, 1 * us]))
+    check("ev 标签", sorted(op for _, op in s),
+          sorted(["INIT_HCA", "ALLOC_UAR", "SET_HCA_CAP2"]))
+    check("ev unpaired", unp, 0)
+    # 排除集：ACCESS_REG/page_queue/EQ 生命周期/? 不参与配对
+    completes2 = [(10 * us, 0, 0), (20 * us, 0, 0), (30 * us, 0, 0)]
+    eqs2 = [(9 * us, 0x1, 4, 0x0a), (19 * us, 0x1, 4, 0x0a), (29 * us, 0x1, 4, 0x0a)]
+    ops2 = ["ACCESS_REG", "QUERY_PAGES", "INIT_HCA"]
+    s2, unp2 = la.pair_p2_ev(completes2, eqs2, ops2)
+    check("ev 排除集只剩 INIT_HCA", [(d // us, op) for d, op in sorted(s2)],
+          [(1, "INIT_HCA")])
+    check("ev 排除后无 unpaired", unp2, 0)
+    # 窗口截断：cut 之后的 complete 不配，cut 之后的 EQE 不可用
+    ops3 = ["INIT_HCA", "ALLOC_UAR", "SET_ISSI"]  # 均在排除集外
+    s3, unp3 = la.pair_p2_ev(completes2, eqs2, ops3, cut_ns=15 * us)
+    check("ev 窗口截断", [(d // us, op) for d, op in sorted(s3)],
+          [(1, "INIT_HCA")])  # ALLOC_UAR/SET_ISSI 在 cut 后被截除
+    # 无自身 EQE 的命令会认领**上一条命令**晚到的 EQE（陈旧认领伪影，
+    # 轮询时代形态——claim 到 9µs 假样本）：c@10 无早先 EQE → unpaired，
+    # c@20 认领 e@11、c@30 认领 e@21
+    eqs_after = [(11 * us, 0x1, 4, 0x0a), (21 * us, 0x1, 4, 0x0a),
+                 (31 * us, 0x1, 4, 0x0a)]
+    s4, unp4 = la.pair_p2_ev(completes2, eqs_after, ["INIT_HCA"] * 3)
+    check("ev EQE 晚到：陈旧认领形态", (len(s4), unp4,
+                                        sorted(d // us for d, _ in s4)),
+          (2, 1, [9, 9]))
+    # 全部 EQE 晚于全部 complete：全 unpaired（唤醒链不存在的诚实输出）
+    eqs_late = [(40 * us, 0x1, 4, 0x0a), (41 * us, 0x1, 4, 0x0a)]
+    s5, unp5 = la.pair_p2_ev(completes2, eqs_late, ["INIT_HCA"] * 3)
+    check("ev EQE 全在后 → 全 unpaired", (len(s5), unp5), (0, 3))
+
+
+def test_first_kworker_ts(tmp):
+    path = os.path.join(tmp, "kw.txt")
+    with open(path, "w") as f:
+        f.write(line(1.0, "prism_cmdq_issue: opcode=0x0104[ENABLE_HCA] op_mod=0x0 slot=0 token=1"))
+        f.write(line(2.0, "prism_cmdq_complete: opcode=0x0104[ENABLE_HCA] slot=0 delivery=0x0 status=0x0 syndrome=0x000000 lat=1 ns err=0"))
+        # kworker 上下文（monitor 首 tick）——窗口右界
+        f.write(line(3.0, "prism_cmdq_issue: opcode=0x0805[ACCESS_REG] op_mod=0x1 slot=0 token=2"))
+    # line() 的 comm 固定为 bash——手写一条 kworker 行
+    raw = open(path).read().splitlines()
+    with open(path, "w") as f:
+        f.write("\n".join(raw[:2]) + "\n")
+        f.write("  kworker/u48:0-123 [010] d.... 3.000000: prism_cmdq_issue: opcode=0x0805[ACCESS_REG] op_mod=0x1 slot=0 token=2\n")
+        f.write("\n".join(raw[2:]) + "\n")
+    check("first_kworker_ts", la.first_kworker_ts(path), 3_000_000_000)
+    none_path = os.path.join(tmp, "kw_none.txt")
+    with open(none_path, "w") as f:
+        f.write(line(1.0, "prism_cmdq_issue: opcode=0x0104[ENABLE_HCA] op_mod=0x0 slot=0 token=1"))
+    check("无 kworker 返回 None", la.first_kworker_ts(none_path), None)
+
+
 def test_main_smoke(tmp):
     """main() 全路径冒烟（run-2 教训：函数级全绿但 main 里 eqs 四元组
     解包漏改，只有跑过 main 才能抓到）。"""
@@ -168,6 +254,12 @@ def main():
         test_pair_p2()
         print("== pair_p2_streaming（run-1 回归）")
         test_pair_p2_streaming()
+        print("== pair_p2_tagged bp 档（T16 trip-1c）")
+        test_pair_p2_tagged_bp()
+        print("== pair_p2_ev 事件唤醒反向配对（T16 trip-2）")
+        test_pair_p2_ev()
+        print("== first_kworker_ts 窗口右界（T16 trip-2）")
+        test_first_kworker_ts(tmp)
         print("== main 冒烟（run-2 回归）")
         test_main_smoke(tmp)
         print("== pair_kprobes")

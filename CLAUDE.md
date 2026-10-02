@@ -115,8 +115,9 @@ T10 ftrace tracepoint
     → 插桩位置: cmdq_issue (doorbell 前) 和 cmdq_complete (响应回来)
 
 T11 verify.sh + 对比报告
-    → 用 bpftrace 采集 mlx5_core 运行时数据
-    → 脚本在 DESIGN.md 第七部分
+    → 采集用 tracefs 直采（kprobe/kretprobe 经 /sys/kernel/tracing——
+      本机无 perf/bpftrace，T11 裁决，勿引入外部依赖）
+    → 延迟口径与判据见 DESIGN.md §10（P1' bp 档 / P2'ev 反向配对）
 ```
 
 ### 可以忽略的 mlx5_core 代码
@@ -168,6 +169,10 @@ cat /sys/class/misc/mlx5_prism0/status  # PHY 状态
 # 恢复 mlx5_core
 sudo rmmod mlx5_prism
 sudo modprobe mlx5_core
+
+# M2 一键验收（T16）：18 项判据 + 双层对比报告（docs/report.md 由
+# scripts/gate/compare_report.sh 生成；--soak N 为稳定性快通道）
+sudo ./verify.sh
 ```
 
 ## 工作方式

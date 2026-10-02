@@ -36,7 +36,7 @@
 | T13-phy-sysfs | PHY 监控 2：sysfs + 定时器 + 告警 | S5 | — | **completed** | 4a12bba | 2026-09-27 |
 | T14-smoke-test | 硬件冒烟测试（ETH TX SQ→WQE→CQE，路线 A） | S5 | — | **completed** | 见 T14 节 | 2026-09-27 |
 | T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | **completed** | 见 T15 节 | 2026-10-01 |
-| T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | pending | — | — |
+| T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | **completed** | 见 T16 节 | 2026-10-02 |
 | T17-architecture-summary | 架构总结文档 | S6 | — | pending | — | — |
 
 ---
@@ -603,16 +603,26 @@
 
 ### T16-verify-report 【M2 里程碑】
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed（2026-10-02，五趟联调判决链 + 收官链全绿：verify 18/18 → 12 载报告级数据 → docs/report.md + DESIGN v2.6 → soak 100× flaky=1% PASS → r0_gate 8/8）
+- **开始时间**: 2026-10-01
+- **完成时间**: 2026-10-02
+- **Commit**: ea55420
+- **读过源码**: 复用接口亲读——t09_verify.sh（周期生成器+core debugfs 命令统计）、baseline/diff_baseline.sh（末周期锚点/双口模板/PRISM_BASELINE_WORK）、r0_gate.sh G3（加固采迹：系统级单写 enable/快照计数/drop 计入判据/非干净重试一次）、t15_verify.sh 流量段（accept_local 根因注释、ping/AF_PACKET 三腿比对、comp dispatch 黑匣子对账、LIVE_SKIP 教训）、collect_latency.sh 三阶段全文（阶段 B 安全闸原文照抄）、latency_aggregate.py CLI（--work/--csv、判据 C 输出）、src/mlx5_prism_trace.h（实名 prism_rx_cqe，非 DESIGN §9.1 写的 rq_poll）、src/mlx5_prism_phy.c（告警行格式 "PHY alarm: %s -> degraded/critical"）
+- **关键决策**: ①verify.sh = 根部薄壳（满足 M2 criteria 字面 `sudo ./verify.sh`）+ scripts/gate/verify.sh 主体，18 项判据 J1-J18 预登记头部；②项 6/7 延迟由 Phase A 同窗 trace 快照聚合裁决（g3 加固采法的单载即够判据 C，全量 12 载另跑供报告数据）；③--soak N 快通道口径（用户拍板）：循环跳过逐次构建与 5× 泄漏压测，flaky<5% 判据原文不动；④collect_mlx5_baseline.sh 一次 core 会话采齐 C1-C4 全部 core 侧输入 + kprobe 延迟；⑤compare_report.sh 纯文本加工无需 root，产 docs/report.md 入库
+- **遇到的问题与解决**:
+  - **趟 1（2026-10-01，16/18，两红均仪表非判据，修正史入 verify.sh 头部）**：①项 3 假 FAIL——'ISSI set to 1' 双变体（引导步骤行 + `mailbox self-test:` 自检行）被同一 grep 命中 ×4≠2，改为排除 self-test 前缀只计步骤行，判据不变；②项 7 假 FAIL（真窗口口径问题）——盲等 sleep 2 的捕获窗混入 T13 起 PHY monitor 的 ACCESS_REG 命令（310/载 vs T11 纯探针 84/载；T11 采集时 monitor 尚不存在），P2' p99 被顶到 99ms → 判据 C 落"中间形态"。修正 = 窗口右界钉在双口 `netdev registered` 行（probe 期结束、monitor 首 tick 前），恢复 T11 预登记口径"快照窗口仅 probe 期"；**判据 C 阈值零改动**。同口径修正同步进 collect_latency.sh 阶段 A（其三计数 3s 稳定判据在 monitor 存在下永不满足，只会 75s 超时且污染 12 载全量）。旁证收获：慢样本归属表 pos=109 ACCESS_REG 239ms 首读长尾为 monitor 样本；P1' 事件口径首测 n=620 max=239ms（INIT_HCA 230ms 主导，与轮询口径同源）。
+  - **趟 1b/1c（2026-10-01，17/18，项 7 仍红——窗口法修不干净，改聚合器切口径，修正史入 verify.sh）**：netdev-registered 右界后窗口仍有 158-166 命令/载（纯探针 84）——双口探针串行，口 0 的 monitor 在口 1 引导 ~400ms 期间已开始打点，且 monitor 与探针期 PPCNT/PAOS/MTMP 同为 ACCESS_REG，窗口法与命令名均不可切。修正 = **latency_aggregate.py 样本按 opcode 打标，bp 档（非 ACCESS_REG）= T11 判据本义"bootstrap 命令流的 EQE 投递"**（monitor 为 T13 后加自发流量，不属 T10-prep 判据范畴）；判据 C 阈值零改动；pair_p2 拆 pair_p2_tagged 核心（原函数变兼容垫片，既有单测不动），补 test_pair_p2_tagged_bp（40 断言 ALL PASS）；T11 真快照复验 bp=all（n=264 p99=159µs → 长尾消失，向后兼容实证）。J6 阈值随口径 n≥150→n≥140（bp 剔除探针期 ACCESS_REG ~10/载）。新现象入档：**monitor 首个 PPCNT 首读 ~239ms ≈ INIT_HCA 量级**（pos=109 ACCESS_REG，两载逐位复现），疑固件冷启动后首个 ACCESS_REG 与 INIT_HCA 尾部后台工作重叠——报告 all 档可见，不影响 bp 档判据。
+  - **趟 1c 判决（2026-10-01，17/18，项 7 仍红）→ 趟 1d 修正（测量侧静音）**：bp 切分生效（P2'bp n=127 剔除 62 个 ACCESS_REG）但 **bp 档自身也脏**：p50=408µs、p90=3ms、p99=max=59.9ms（T11：p50=1.0µs p99=159µs）——monitor 与引导命令共享同一 cmd EQ，**并发 ACCESS_REG 把引导命令的 EQE 消费排队整体抬高**，opcode 切分切不掉并发排队效应。修正 = 捕获窗内经公开 sysfs 旋钮 `monitor_interval_ms`→60000（phy.c store 合法域 20-60000，applied next tick → 残余 ≤1 tick/口且其样本为 ACCESS_REG 入 all 档），恢复 T11"探针命令流独占 EQ"测量条件——**测量侧控制，判据与驱动零改动**，collect_latency.sh 阶段 A 同步。另：口 0 注册与口 1 引导的 ~400ms 重叠是结构性窗口污染源，"netdev registered 右界"只负责收窗，零并发由静音器保证（注释已更正）。
+  - **趟 2 深挖定案（2026-10-01，用户叫停连续修补要求先彻查；尸检 = /var/tmp/t16_autopsy.out，修正史 trip-2 入 verify.sh 头部）**：四层证据链定案——①T11 快照尸检：引导爆发段（33 命令/口）期间零 eq_event，P2' 样本（n=22/载）= 段末排空快照（~1-4µs，p50 来源）+ 2s 节拍自检（~100µs，p90 来源），**非逐命令 EQE 投递**；②git 归因：事件模式实现 `30b9bb4` 在 T11 采集**之后**（7addf48 的直接后继）——T11 数据是轮询形态，"长尾消失"裁决的样本结构是排空配对；③当前尸检：241/241 样本全正号（eq_event 一律在 complete 之后）——事件模式命令次序 = issue→EQE（硬中断）→唤醒→complete，**旧正向流式配对把每条 EQE 配给上一条命令的 pending 槽**，值 = 到下一条命令的间隔而非本命令事件延迟；④61.7ms 尾样本尸检 Q5 原文：kworker（对端口 monitor）的 EQE 认领了本端口 QUERY_PAGES 的 pending 槽——**tracepoint 无端口字段、两口同 eqn=4，双口混流不可分**。修正 = P2' 判据档切换为 **P2'ev（事件唤醒延迟：complete − 自身 EQE，反向配对；窗口 = 首 kworker 行前 = 口 0 单队列串行段——口 1 尚未 probe、口 0 monitor 未启动；排除集 = 无自身 CMD EQE 的命令[ACCESS_REG/page_queue/EQ 生命周期/自检错误]，镜像 cmdq.c force_poll 判定）**。判据 C 阈值（p99<10ms ∧ max<100ms ∧ >500ms 零）沿用原值零改动；P2'all 旧口径降为形态记录。单测 +pair_p2_ev/first_kworker_ts 全绿（顺带修掉 comm 前导空格使 kworker 匹配失效的真 bug）；T11 旧档上 P2'ev 给出 n=120/p50=10s 的荒谬值——正确形态注记（轮询时代无逐命令 EQE），报告将双口径并陈。另修：FAIL 快照目录 chown 回调用者（曾 root:700 害尸检须借 sudo）、cp -r 嵌套问题顺带暴露（verify_work_keep 内含历趟嵌套目录，读取时注意取顶层）。
+  - **趟 2 收口（2026-10-01，sudo ./verify.sh = ALL 18/18 PASSED，59s）**：P2'ev 首测 **p50=24µs p90=68µs p99=max=89µs**（n=36/两载，µs 档——事件唤醒延迟的真实量级，判据 C 原阈值裁决"长尾消失"+弱注记 n<50）；P2'all 形态记录 p50=296µs p99=318ms（伪影分布并陈）；P1'bp n=252 p50=260µs max=228ms（INIT_HCA 主导，两载逐位复现）；ev_unpaired=24（窗口截断边界，入档）。项 1-18 全绿，趟 1 联调闭环。
+  - **趟 3（2026-10-02，报告级数据 + 文档回写）**：12 载全量延迟采集（collect_latency.sh，快照 /var/tmp/prism_lat_snap.kNV6Kn）——**P2'ev n=216：p50=23µs p90=59µs p99=69µs max=1.49ms**（判据 C 阈值零改动裁决"长尾消失"，无弱注记）；**P1' 事件口径复测 n=1512（bp 档）：p50=255µs p99=12.2ms max=229.6ms**（DESIGN §10.1 明文留给 T16 的一项），慢样本 12 载逐位复现；core kprobe 新基准 n=20700（p50=5.0µs p99=7.07ms，触发 2129→24300 命令实证）。collect_mlx5_baseline.sh 首跑两处仪表修正（kprobe 腿漏开 tracing_on → 捕获空记缺，与 collect_latency 阶段 B 冗余无数据损失；summary fw 字段误抓 driver 版本）+ compare_report 三处（fw 改从 fw.txt 主工件解析、C5 证据源优先黑匣子、p99 分析措辞严谨化：core 窗口无 INIT_HCA 级命令，两侧尾部不可逐命令对表）。docs/report.md 终版 18/18（C2 一致 14.32.1908；C4 弱形式如实注记——core 侧计数器全零，prism rx_bits=2e8 线率累积）。DESIGN → **v2.6**（§10.1 双口径并陈 + P2'ev 重定义 + P4 定稿、§10.3 verify.sh 实施形态 + 延迟采集口径、末尾修订登记）；CLAUDE.md bpftrace→tracefs 更正 + ./verify.sh 入口。
+- **与设计的偏差**: （预登记）a) task.json/CLAUDE.md 写 bpftrace 采 core 基准，本机无 perf/bpftrace，按 T11 裁决走 tracefs 直采（kprobe mlx5_cmd_invoke）；b) DESIGN §10.3 "selftest=1 传参驱动" 实际为 selftest=1/0 双会话（netdev/PHY 项需生产路径）；c) §9.1 的 rq_poll 实名 prism_rx_cqe；d) soak 100 次为快通道口径（见关键决策③）；e) collect_latency.sh 阶段 A 窗口右界由"三计数 3s 稳定"改为"双口 netdev registered 行"＋捕获窗内 monitor 静音（T13 monitor 使旧判据失效，恢复 T11 probe 期独占口径）；f)（趟 1c）P1' 按 opcode 打标分 bp（探针期非 ACCESS_REG，判据档）/all（全量入档）双档；g)（趟 2）**P2' 判据档 = P2'ev 事件唤醒延迟（反向配对 + 口 0 单队列窗口 + force_poll 镜像排除集）**——旧正向配对（含 T11 判据 C 的原始样本结构）在事件形态下方向反转 + 双口混流双重失效，阈值零改动，DESIGN §10.1 P2' 行已随 v2.6 改写（双口径并陈）
+  - **趟 4/5 收官（2026-10-02）**：collect_mlx5_baseline 修复验证（fw=14.32.1908 解析正确、kprobe 8905 样本）；**--soak 100 快通道：99 次全 18/18，flaky=1（1%）< 5% PASS**——唯一 flaky（iter_03）为双载 p2ev=0 的 EQE 整批迟投递形态（100 条 EQE 全落窗口内 complete 之后，T15 怪癖 #10 同族固件裁量、~1/200 载概率），聚合器按预登记"无样本不裁决"拒裁、verify 据实计 FAIL，其余 17 项全绿、非功能故障；单迭代 ~43s。r0_gate 8/8（src 零改动，行为基线 68 行/口不动）。
+- **学习心得**: ①对比验证的说服力来自"两侧同一物理量的可对表性"——本次最深的教训反而是**口径错配会伪造对比**：T11 的 P2' 与 T16 的 P2' 字面同名、实测量不同（排空快照+自检节拍 vs 逐命令唤醒延迟），若不尸检到底就会得出"事件模式回归"的假结论；判据的可比性要在每次形态演进时重新审计，而不是默认沿用。②测量基础设施（配对算法）也是"仪表"：方向性假设（EQE 消费晚于 complete 观察）随驱动形态反转而失效，仪表 bug 修仪表不修判据的原则同样适用于分析器。③系统性问题不要连环小修——趟 1b/1c/1d 三连红的教训：每次"再修一点"都在错误假设上加码，用户叫停后的四层尸检（历史样本结构/git 时序/符号分布/原始上下文）一次定案。
+- **reflection_questions 答案**:
+  - **Q: 为什么对比验证比单方面自测更有说服力？** A: 自测只能证明"自己没坏"，对比证明"与参照系行为等价"——等价性把未知的失败模式（固件时序、事件语义）交给参照系背书。但前提是口径可对表：本次 P1' 的 core p50=5µs vs prism p50=255µs 正是"数值不同仍可信"的例子（函数驻留 vs doorbell→唤醒，等待边界不同），而 P2'all 的 61.7ms 伪影是"数值相近仍是假对比"的反例（双口混流）。
+  - **Q: p99 比 avg 更能说明什么？什么场景下要看 p99？** A: avg 被样本量稀释（一条 239ms 混进 2000 条 µs 级样本只抬 avg ~120µs），p99/max 暴露尾部行为——而尾部正是"挂起、丢通知、整批推迟"这类故障的居住地（P2'ev 判据 C 的 p99<10ms 抓的就是这类）。事件路径/延迟 SLA 看分位；吞吐类均值才够用。
+  - **Q: mlx5_prism 的 CMDQ 延迟会比 mlx5_core 高还是低？** A: 实测**高**（事件口径 p50=255µs vs core 函数驻留 5µs），且差异主要不是实现优劣而是口径差：prism 量到"唤醒等待者"为止（含中断投递+调度），core 的调用方自己就是等待者。尾部则同源——固件处理时间（INIT_HCA ~228ms）两侧同付。真正可比的量是 P2'ev 唤醒延迟 23µs——它证明 prism 的事件路径本身没有额外惩罚。
 
 ---
 
