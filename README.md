@@ -2,7 +2,7 @@
 
 从零实现的 Mellanox ConnectX-4 Lx 控制面内核驱动 + 固件行为档案：PCIe 探测、CMDQ 命令引擎、9 步固件引导、EQ 事件与 MSI-X 中断、PHY 诊断（进行中）。定位是 mlx5_core 底三层的**最小可读重写**——每个结论都经硬件实证、与 mlx5_core 对照验证，固件的真实行为（而非文档宣称的行为）作为一等公民记录在代码里。
 
-状态：T01-T09 与 R0 重构冲刺完成；EQ 事件与中断已点亮（eqc 编码翻案，见 progress.md T10-prep）。路线图与任务库见 `task.json`。
+状态：T01-T17 全部任务完成（M0/M1/M2 达成，`./verify.sh` 18/18 全绿，soak 100× flaky 1%）。五大机制架构总结见 `docs/SUMMARY.md`；任务库见 `task.json`。
 
 ## 快速开始
 
@@ -23,7 +23,7 @@ sudo ./verify.sh                        # M2 一键验收（T16：18 项 + 双�
 | 位置 | 内容 |
 |------|------|
 | `src/` | 模块源码（7 .c + 4 .h）与 obj-m 清单；构建产物也只落在这里 |
-| `docs/` | `DESIGN.md`（设计 v2.1：四层架构/状态机/怪癖档案/EQ 设计）、`READING.md`（~600 行协议脊柱深读指南） |
+| `docs/` | `DESIGN.md`（设计 v2.6：四层架构/状态机/怪癖档案/EQ/netdev 数据面）、`READING.md`（~600 行协议脊柱深读指南）、`SUMMARY.md`（T17 架构总结：五大机制+面试话术）、`report.md`（T16 双层对比报告） |
 | `scripts/gate/` | 活跃硬件门禁（r0_gate / rebaseline / collect_latency / t09_verify / r0_trace_check） |
 | `scripts/baseline/` | 行为基线：dmesg 模板 + 归一化 + 对比门禁 |
 | `scripts/test/`、`scripts/archive/` | 宿主机测试；已完成任务的一次性脚本（见 `scripts/README.md`） |
@@ -32,6 +32,7 @@ sudo ./verify.sh                        # M2 一键验收（T16：18 项 + 双�
 ## 深入阅读
 
 - **第一次读这个仓库** → `docs/READING.md`：沿 ~600 行协议脊柱读完就能复述主机如何命令一块 ConnectX-4 Lx。
+- **五大机制总结（面试弹药）** → `docs/SUMMARY.md`：CMDQ/引导/数据面/DMA/doorbell-UAR，每主题图+代码引用+话术，末尾 12 问自检清单。
 - **设计与架构决策** → `docs/DESIGN.md`。
 - **踩坑史与翻案记录**（eqc 编码翻案、两次死机复盘、基线重采事故……）→ `progress.md` 历史问题归档。
 

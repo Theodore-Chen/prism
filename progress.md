@@ -37,7 +37,7 @@
 | T14-smoke-test | 硬件冒烟测试（ETH TX SQ→WQE→CQE，路线 A） | S5 | — | **completed** | 见 T14 节 | 2026-09-27 |
 | T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | **completed** | 见 T15 节 | 2026-10-01 |
 | T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | **completed** | 见 T16 节 | 2026-10-02 |
-| T17-architecture-summary | 架构总结文档 | S6 | — | pending | — | — |
+| T17-architecture-summary | 架构总结文档 | S6 | — | **completed** | 见 T17 节 | 2026-10-09 |
 
 ---
 
@@ -628,16 +628,16 @@
 
 ### T17-architecture-summary
 
-- **状态**: pending
-- **开始时间**: —
-- **完成时间**: —
-- **Commit**: —
-- **读过源码**: —
-- **关键决策**: —
-- **遇到的问题与解决**: —
-- **与设计的偏差**: —
-- **学习心得**: —
-- **reflection_questions 答案**: —
+- **状态**: completed（2026-10-09，纯文档任务零上机：大纲先审批后动笔，成稿交用户复述验收通过）
+- **开始时间**: 2026-10-09
+- **完成时间**: 2026-10-09
+- **Commit**: 见本 commit
+- **功课来源**: task.json T17 条目（5 大主题 + 每主题图/代码引用/面试话术，验收=读者能复述控制面架构）/ CLAUDE.md 工作方式第 6 条（CMDQ 协议、固件引导、QP-CQ 数据结构、DMA 一致性、doorbell-UAR 机制，知识沉淀+面试弹药）/ DESIGN v2.6 十二章结构 / READING.md 脊柱读法 / progress.md T01-T16+R0 全部收官记录（实证素材源）
+- **交付物**: docs/SUMMARY.md（537 行）——§0 三十秒电梯演讲 + insmod→ping 全景图；§1 CMDQ（SPSC 环模型、64B 描述符逐字段表、单写者/OWNER 三态/token/超时泄露五不变量、wmb vs smp_wmb、owner 门卫、T16 双口径延迟表）；§2 九步引导（fw_state 门禁、页所有权经济学 boot 6/init 2299 对照、SET_HCA_CAP 门闩、两形态 teardown）；§3 数据面（QP 退场→SQ 对象链、WQE/CQE 布局、发送三屏障序列、T15 netdev 形态）；§4 DMA（两地址两世界、coherent/streaming 分工清单、屏障选型表）；§5 doorbell-UAR（BAR0 布局、三种 doorbell 几何对比、E810 对照）；§6 怪癖档案三案例 + 12 问复述自检清单 + 深读指针
+- **写作纪律兑现**: ①22 处 file:line 引用动笔前逐一 grep 对当前 src/ 树核对（progress 历史行号会漂移，不照抄）；②延迟数字全部 T16 终值双口径并陈（P2'ev n=216 p50=23µs / P1' 事件口径 n=1512 p50=255µs / core kprobe n=20700 p50=5.0µs）；③自查修正两处——引导顺序初稿误把字节序画在 boot 页之前（fw.c:539-594 实证：ISSI→boot 页→字节序→caps→SET→init 页→INIT_HCA），行数 ~7300→~7200（wc 总量含 171 行构建生成的 .mod.c）
+- **与设计的偏差**: 无（纯新增文档，零代码/判据/基线影响）
+- **验收方式**: §6.2 十二问复述自检清单（不看正文能答十之八九），用户阅读点头（2026-10-09）
+- **任务总结**: 17 个 task 的学习成果系统化为可复述知识；SUMMARY（学到了什么）与 READING（怎么读代码）分工互补。README 深读指针与过时状态行、READING 知识索引同步更新；task.json T17 → completed——任务库清零，T01-T17 全部收官
 
 ---
 

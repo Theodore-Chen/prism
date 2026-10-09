@@ -1564,7 +1564,7 @@
       "title": "mlx5 架构总结文档（知识沉淀）",
       "phase": "S6",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T16-verify-report"
       ],
@@ -1596,7 +1596,7 @@
         ]
       },
       "goal": "产出 SUMMARY.md，覆盖 5 大主题",
-      "context": "CLAUDE.md 工作方式第 6 条要求：全部完成后写架构总结。这是把 17 个 task 的学习成果系统化、可复述的关键步骤。",
+      "context": "CLAUDE.md 工作方式第 6 条要求：全部完成后写架构总结。这是把 17 个 task 的学习成果系统化、可复述的关键步骤。\n\n收官更新（2026-10-09）：docs/SUMMARY.md 537 行交付（大纲先审批后动笔）。六大节 = 三十秒电梯演讲+全景图 / CMDQ 协议 / 九步引导状态机 / 数据面对象链 / DMA 一致性分工 / doorbell-UAR 与 VFIO 对比，每主题 ASCII 图 + 22 处对当前 src/ 树逐一核对的 file:line 引用 + T16 终值口径实测数据 + 面试话术；§6 十二问复述自检清单为验收抓手（用户阅读点头通过）。自查修正两处：引导顺序初稿误置字节序于 boot 页前（fw.c:539-594 实证修正）、行数 ~7300→~7200。纯文档零上机，README/READING 指针同步更新。任务库至此清零：T01-T17 全部 completed，M0/M1/M2 达成。",
       "steps": [
         "1. CMDQ 协议（mailbox + doorbell + EQ）",
         "2. 固件引导 7 步状态机",
