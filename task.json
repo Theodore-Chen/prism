@@ -40,6 +40,16 @@
       "name": "完整交付",
       "task": "T16-verify-report",
       "criteria": "sudo ./verify.sh 显示 ALL 18/18 PASSED；产出双层对比报告"
+    },
+    "M3": {
+      "name": "性能可测量（地基）",
+      "task": "T20-perf-gate",
+      "criteria": "perf_gate.sh 全绿：数据面四臂基准（prism 基线 / core 钉同几何 / 线速锚 / RX 时延分布）入档 + 控制面同口径对齐表入 report.md + 性能回归门禁预登记生效"
+    },
+    "M4": {
+      "name": "单队列数据面性能达产",
+      "task": "T27-tx-scatter-gather",
+      "criteria": "快赢三项（T21-T23）提升入档；判别实验（T24-T26）各有明确判决（转正或判死归档）；受控同几何 core 对照百分比落表；全程 verify.sh 18/18 与 r0_gate 8/8 无回归"
     }
   },
   "workflow": {
@@ -1613,6 +1623,864 @@
         ],
         "manual_checks": [
           "可以让另一个人（或 AI）读完后能复述 mlx5 控制面架构"
+        ]
+      }
+    },
+    {
+      "id": "T18-datapath-benchmark",
+      "title": "数据面基准底座：四臂 pps/带宽/时延/CPU 采集（性能事实层）",
+      "phase": "S7",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T16-verify-report"
+      ],
+      "estimated_loc": 250,
+      "learning": {
+        "objective": "掌握内核网络性能测量方法论——pktgen 负载生成、受控对照实验设计、tracepoint 时延配对、线速换算",
+        "concepts": [
+          "pktgen 内核发包器：kpktgend 线程 / clone / delay 档（Documentation/networking/pktgen.rst），单流走 ndo_start_xmit 逐包路径——测的是驱动每包成本而非协议栈整机性能",
+          "受控同几何对照原则：对照实验唯一变量——core 侧 ethtool -L combined 1 + ethtool -K tso/gso/gro/sg/tx/rx 全关，钉到 prism 几何后差距才可归因驱动每包路径；core 默认形态数字只做背景不入表",
+          "线速锚：25GbE 64B 帧在线 84B（8 前导 + 64 帧 + 12 IFG）≈ 37.2Mpps、1514B ≈ 2.0Mpps——裸 pps 必须换算线速百分比才有语义",
+          "ip -s link 统计语义：tx_dropped（驱动丢）/ tx_errors（xmit 异常）与队列饱和的对应关系",
+          "tracepoint 时间戳配对测端到端时延：prism_sq_xmit → prism_rx_cqe 按时间窗+长度配对，trace_clock=global（T11 惯例）",
+          "CPU 占用测量：mpstat -P ALL 软中断 si 列差分 / /proc/softirqs NET_TX/NET_RX 差分",
+          "T15 拓扑税背景：accept_local 单机双口对拉，协议栈路径计入两端——绝对数与裸口有差异，口径必须写死在脚本头"
+        ],
+        "keywords": [
+          "pktgen",
+          "pps",
+          "线速",
+          "受控对照",
+          "时延分布",
+          "CPU 占用"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "Documentation/networking/pktgen.rst",
+            "focus": "kpktgend 配置语法、clone 发包、计数读取；本机无 perf/bpftrace，采集走 tracefs + sysfs 直读（T11 裁决惯例）"
+          },
+          {
+            "file": "en/params.c",
+            "focus": "mlx5e 默认环尺寸与 cq moderation 的量级——对照 prism 骨架尺寸（SQ 256 BB / RQ 16 / CQ 64）小 1-2 个数量级的背景"
+          }
+        ],
+        "reflection_questions": [
+          "为什么对照组必须钉同几何（单队列/关 offload）而不是直接比默认形态？混淆变量分别是什么？",
+          "pktgen pps 与 iperf3 TCP 吞吐分别反映驱动路径的哪一段？哪个更适合做可引用主数字？",
+          "10ms 看门狗对吞吐基准和对时延基准的影响分别是什么？（高负载 NAPI 连续轮询 vs 低负载事件缺失兜底）"
+        ]
+      },
+      "goal": "scripts/gate/collect_datapath.sh 产出四臂基准数据（prism 基线 / core 钉同几何 / 线速换算 / RX 端到端时延分布），64B 与 1514B 双包长档，数值入档不设阈值",
+      "context": "T16 复盘定案：数据面性能从未被测量是判据体系最大盲区（J9b/9c 只验功能）。v1 教训（目标立在假设基线 ~8µs 上）制度化：本任务只建事实底座，阈值留给 T20 按实测分布预登记。基准三件套定义（性能计划 2026-10-09 批准）：① 自身前后对比——本任务首测即 T21+ 全部优化任务的对照基线；② core 钉同几何对照（ethtool -L/-K 后差距 = 纯每包驱动效率）；③ 线速锚（64B≈37.2Mpps / 1514B≈2.0Mpps）。RX 时延用既有 prism_sq_xmit/prism_rx_cqe tracepoint 配对，量化 10ms 看门狗地板（DESIGN §6.4 怪癖）对低负载时延的实际影响；高负载下 NAPI 连续轮询不受看门狗影响，高低负载两形态分开报告。拓扑沿用 T15 判决：accept_local 单机双口对拉（拓扑税写入口径声明）。上机惯例：sudo 归用户、/var/tmp 单文件 + mktemp 私有目录、黑匣子在案。零驱动改动，r0_gate/verify 不受影响。",
+      "steps": [
+        "1. 脚本骨架 scripts/gate/collect_datapath.sh：三阶段（A 拓扑准备 accept_local+双口 up；B 负载生成；C 采集聚合报告），口径声明写头部（包长档/时长/流数/拓扑税/CPU 亲和）",
+        "2. 负载生成器：pktgen 主档（kpktgend 绑定发送 CPU、clone 数、64B/1514 双档、时长档）+ iperf3/UDP 回退档（TCP 吞吐背景数字）",
+        "3. 臂 1（prism 基线）：pktgen 单口灌另一口，采集 TX/RX pps（pktgen 计数 + ip -s link 交叉）、si CPU（mpstat 差分）、tx_dropped/tx_errors",
+        "4. 臂 2（core 钉同几何）：modprobe mlx5_core → ethtool -L combined 1 + ethtool -K 全关（回读存档）→ 同 pktgen 脚本同拓扑同亲和 → 同组采集",
+        "5. 臂 3（线速换算）：两臂 pps ÷ 37.2M / 2.0M 换算线速百分比表",
+        "6. 臂 4（RX 时延分布）：低速率档（1-1000pps）tracefs 采 sq_xmit→rx_cqe 配对，输出 p50/p99/max 分布 + 10ms 地板可见性注记",
+        "7. 报告落 /var/tmp/datapath_report.txt + docs/report.md 性能附录表（指标/口径/对照/样本数四要素）"
+      ],
+      "exit_criteria": {
+        "compile": "bash -n 通过；脚本头部口径声明齐全",
+        "load": "脚本在 prism 会话与 core 会话各完整运行一轮（互斥加载切换按 J15 惯例）",
+        "functional": [
+          "四臂数据齐：prism 基线 pps（64B/1514 双档）、core 同几何 pps、线速百分比表、RX 时延分布（n≥500 样本）",
+          "core 钉几何确认在案：ethtool -l / -k 回读输出存档（combined=1、offload 全 off）",
+          "高负载与低负载两形态分开报告；10ms 看门狗地板在低负载时延分布中可见或有注记"
+        ],
+        "manual_checks": [
+          "数值入档不设阈值（T20 才立门禁）——此原则预登记于脚本头部",
+          "r0_gate 8/8 复跑不受影响（零驱动改动）",
+          "口径声明含拓扑税注记（accept_local 单机双口，参照 T15 判决）"
+        ]
+      }
+    },
+    {
+      "id": "T19-caliber-alignment",
+      "title": "控制面同口径对齐：P1'' 双侧函数驻留 + core 侧事件唤醒对照",
+      "phase": "S7",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T16-verify-report"
+      ],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "掌握性能对比的口径对齐方法论——同触发同 opcode 消除命令组合混淆、kretprobe 函数驻留配对",
+        "concepts": [
+          "口径对齐三要素：同触发（相同用户操作）、同 opcode（相同命令混合）、同测量点（kretprobe 入口/返回）——缺一即有混淆变量",
+          "T16 已知口径陷阱回顾：P1'（doorbell→唤醒）与 core kretprobe（函数驻留）等待边界不同；命令组合差异（prism 引导命令固件慢 vs core 链路翻转命令快）——PPCNT 类寄存器读固件本身就慢，跨混合对表必错",
+          "kretprobe 入口/返回配对：prism 侧挂 cmdq invoke 入口函数、core 侧挂 mlx5_cmd_invoke（collect_mlx5_baseline.sh 阶段 B 先例扩展），同一 kprobe 语法",
+          "core 侧事件唤醒口径：kprobe 挂 core 的 EQE 消费点与 complete() 调用点，产出与 prism P2'ev 同构的「EQE 消费→等待者唤醒」对照",
+          "稳态命令风暴：ethtool -S 循环（→ ACCESS_REG PPCNT）、ip link up/down（→ PAOS/SET_PORT/MODIFY 类）——双侧可同触发跑的两组风暴",
+          "驱动侧份额分解：P1'' ≈ 固件往返 + EQE 投递 + 唤醒路径；P1'' − P2'ev（或 core 同构差）即驱动事件路径份额"
+        ],
+        "keywords": [
+          "口径对齐",
+          "kretprobe",
+          "函数驻留",
+          "事件唤醒延迟",
+          "命令组合混淆"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "cmd.c",
+            "focus": "mlx5_cmd_invoke 的等待结构（调用方同步等完成返回）——函数驻留口径的边界在哪"
+          },
+          {
+            "file": "eq.c + cmd.c",
+            "focus": "core 事件路径：EQE 消费 → mlx5_cmd_comp_handler → complete() 的可挂 kprobe 点位识别"
+          }
+        ],
+        "reflection_questions": [
+          "为什么「同触发」比「同 opcode」更强？两者分别消除什么混淆？",
+          "若对齐后 prism P1'' 仍显著高于 core（如 3-5 倍），下一步怎么分解？（提示：doorbell→EQE 段 vs EQE→唤醒段的差分）",
+          "core 的 5µs p50 为什么可能不含睡眠唤醒开销？（complete() 先于 waiter 入睡的窗口）"
+        ]
+      },
+      "goal": "report.md P 表新增同口径两行：P1''（双侧函数驻留、同触发同 opcode）对表 core 5.0µs；P2''ev（core 侧 EQE 消费→唤醒）对表 prism P2'ev 23µs——驱动侧份额定量闭合",
+      "context": "T16 复盘：P1' 255µs vs core 5µs 归因「口径差」目前是推断不是测量；「prism 事件路径无额外惩罚」结论缺 core 对照组。本任务补两把尺子各自的对照，命令组合混淆用同触发同 opcode 消除（不能用 prism 引导混合 vs core 链路翻转混合对表）。三种结局都有价值：a) 对齐后同数量级 → 「命令引擎与生产驱动同数量级」成立可引用；b) 有差距且分解到唤醒路径 → 为后续优化任务立证；c) 差距在固件往返段 → 怪癖档案 + 口径注记收案。纯采集扩展，零驱动改动。上机惯例同 T18。可与 T18 并行。",
+      "steps": [
+        "1. collect_latency.sh 扩展阶段 D（prism P1''）：kretprobe 挂 prism invoke 入口/返回，稳态风暴窗口（ethtool -S 循环 + link 翻转）采集，与引导窗分开",
+        "2. 阶段 E（core P1''）：同触发同风暴跑 core 会话，kretprobe 挂 mlx5_cmd_invoke，双侧 opcode 混合核对（tracefs opcode 字段对表）",
+        "3. core P2''ev：kprobe 挂 core EQE 消费与 complete 点，按 P2'ev 同构配对规则聚合",
+        "4. latency_aggregate.py 扩展双口径输出；判据预登记：数值入档不设阈值（同 T18 原则）",
+        "5. report.md P 表加两行（指标/口径/对照/样本数四要素）+ 归因段落定量重写（驱动侧份额数字）",
+        "6. DESIGN §10.1 修订登记 v2.7（P1''/P2''ev 口径条目）"
+      ],
+      "exit_criteria": {
+        "compile": "bash -n 通过；聚合器合成 trace 单测（T11 惯例）通过",
+        "load": "prism / core 双会话各完整采集一轮",
+        "functional": [
+          "P1'' 双侧数据各 n≥500/风暴、opcode 混合双侧一致（对表在案）",
+          "P2''ev core 侧数据产出（n≥200）",
+          "report.md 新增两行 + 归因段落含驱动侧份额定量数字"
+        ],
+        "manual_checks": [
+          "口径注记：同触发同 opcode 声明、kretprobe 挂点、等待边界差异说明写入脚本头与 report",
+          "verify.sh 18/18 不受影响（零驱动改动）"
+        ]
+      }
+    },
+    {
+      "id": "T20-perf-gate",
+      "title": "性能回归门禁 perf_gate.sh：预登记阈值 + report 联动（M3）",
+      "phase": "S7",
+      "milestone": "M3",
+      "status": "pending",
+      "prerequisites": [
+        "T18-datapath-benchmark",
+        "T19-caliber-alignment"
+      ],
+      "estimated_loc": 200,
+      "learning": {
+        "objective": "掌握性能回归门禁设计——绝对阈值 vs 回归阈值、性能判据的 flaky 特性、门禁与快通道的分层",
+        "concepts": [
+          "回归型门禁 vs 绝对阈值：以首测分布为基线（p50/p99/pps 劣于基线 ×N 即 FAIL 形态），杜绝 v1「目标先于基线」错误；倍数 N 按 T18/T19 实测散布特性选取并预登记",
+          "独立 perf_gate.sh 而非并入 verify.sh 的理由：18 项快通道 59s + soak 稳定性不被慢基准拖累；性能门禁按需运行（每优化任务 A/B 时）",
+          "性能判据 flaky：环境噪声（CPU 亲和/频率/缓存）治理——固定亲和、多轮取中位、复核重跑一次区分真回归与噪声（T16 soak flaky<5% 先例）",
+          "A/B 采样纪律：改动前后同脚本同拓扑同包长档，一次只变一个因子（判别式阶梯在门禁层的延伸）",
+          "report 联动：compare_report.sh 汇总 perf_gate 工件为性能附录表（指标/口径/对照/样本数四要素）"
+        ],
+        "keywords": [
+          "回归门禁",
+          "预登记",
+          "flaky",
+          "A/B",
+          "perf_gate"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "—（脚本任务，无对照源码）",
+            "focus": "—"
+          }
+        ],
+        "reflection_questions": [
+          "为什么回归阈值比绝对阈值更适合当前阶段？什么条件下才值得立绝对阈值？",
+          "性能门禁的 flaky 来源与功能门禁有何不同？多轮取中位为什么比单轮稳？",
+          "门禁失败时如何区分「真回归」与「环境噪声」？（重跑纪律/分布形态对比）"
+        ]
+      },
+      "goal": "scripts/gate/perf_gate.sh 以 T18/T19 首测为基线立回归型硬门禁并全绿，阈值预登记于脚本头部，report.md 性能附录联动",
+      "context": "M3 收口任务。T16 复盘三短板之二的制度化补齐：P1' 无量化门禁（只剩 max<500ms 挂起哨兵）+ 数据面零性能判据。设计决策（性能计划 2026-10-09 批准）：不动 verify.sh J1-J18（阈值零改动纪律延伸到性能层），独立 perf_gate.sh；J19/J20 编号预登记于 perf_gate.sh 头部修正史。上机惯例同 T18。",
+      "steps": [
+        "1. perf_gate.sh 骨架：判据预登记头部——J19 数据面回归（TX/RX pps、RX p99 时延、tx_dropped 归零性）、J20 控制面回归（P1'' p50/p99、P2'ev p99），各配「劣于基线 ×N 即 FAIL」阈值，N 按首测散布预登记",
+        "2. 基线固化：T18/T19 首测分布落 scripts/gate/perf_baseline.json，含样本数与采集口径指纹（防脚本改动后基线失配）",
+        "3. 采集执行体复用 collect_datapath.sh / collect_latency.sh（单一事实源，gate 只做采集+对账）",
+        "4. 多轮取中位 + 固定 CPU 亲和 + 重跑复核纪律（噪声与真回归区分）",
+        "5. compare_report.sh 联动：性能附录表自动生成",
+        "6. DESIGN v2.7 修订登记（§10 新增 perf_gate 条目）；README/CLAUDE.md 指针更新"
+      ],
+      "exit_criteria": {
+        "compile": "bash -n 通过；阈值预登记原文在脚本头部（含登记时间戳）",
+        "load": "perf_gate.sh 完整运行一轮全绿（基于 T18/T19 基线）",
+        "functional": [
+          "J19/J20 各判据有基线值/阈值倍数/实测值三列对账",
+          "人为注入劣化（如临时切 netdev_arm_ms 大值档）能触发 FAIL——门禁灵敏度自证",
+          "verify.sh 18/18 复跑不受影响"
+        ],
+        "manual_checks": [
+          "M3 criteria 对号：四臂基准入档 + 同口径对齐表入 report + 门禁生效",
+          "基线文件与采集脚本口径指纹绑定"
+        ]
+      }
+    },
+    {
+      "id": "T21-hotpath-decho",
+      "title": "热路径观测去 print 化：printk 退位 tracepoint",
+      "phase": "S8",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T20-perf-gate"
+      ],
+      "estimated_loc": 30,
+      "learning": {
+        "objective": "理解热路径 printk 的真实成本与「printk 不进热路径」的内核惯例；static_key 零开销观测",
+        "concepts": [
+          "ratelimited printk 并非免费：ratelimit 状态维护 + console 串行化 + 时间戳，在每 poll / 每事件粒度上是可测开销",
+          "dev_info_ratelimited vs tracepoint：static_key/jump_label 关闭态零开销、开启态 ringbuffer 写（R0.6 功课延伸）",
+          "热路径三处清单：net.c:864（NAPI poll 出口）、net.c:1613/1618（comp event 调度点）、eq.c:212（hardirq 每条 comp EQE 一打）",
+          "err 级保留原则：热路径只清 info 级诊断行，错误路径 printk 保留（排障价值 > 开销）",
+          "观测诉求迁移：诊断语义由既有 tracepoint（sq_xmit/rx_cqe/eq_event）承载；黑匣子记录器不受影响"
+        ],
+        "keywords": [
+          "热路径",
+          "printk",
+          "ratelimited",
+          "tracepoint",
+          "static_key"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/tx.c",
+            "focus": "mlx5e 热路径形态：无 printk，观测全靠 tracepoint——对照确认 prism 三处属残留"
+          },
+          {
+            "file": "diag/（tracepoint 组织，按参考树实际结构核对）",
+            "focus": "core 的事件路径 tracepoint 组织方式"
+          }
+        ],
+        "reflection_questions": [
+          "printk 的成本主要在哪几段？（格式化/console 锁/串口慢路径）什么场景被放大？",
+          "tracepoint 关闭态为什么零开销？jump_label 原理？",
+          "热路径保留哪一级 printk 是可接受的？判据是什么？"
+        ]
+      },
+      "goal": "热路径三处 info 级 printk 清除，观测语义由 tracepoint 承载；perf_gate A/B pps 提升或不降入档",
+      "context": "S8 快赢第一项（零风险）。T16 复盘快赢清单首位：poll 出口每轮、hardirq 每 EQE 的 dev_info_ratelimited 是遗留诊断残留。行为面：dmesg 运行期行减少但均非 probe 基线行（ratelimited runtime 行不在 68 行/口基线内）——预期 diff_baseline 零变化；若意外入基线走 rebaseline 登记。A/B 用 T18 臂 1 同口径。上机惯例同前。",
+      "steps": [
+        "1. 清单核对：grep net.c/eq.c 热路径函数体（xmit/poll/comp event/hardirq 消费）内全部 dev_info/pr_info 调用点",
+        "2. 三处目标移除；err 级保留；若诊断语义 tracepoint 未覆盖则在既有事件里补字段（不加新事件）",
+        "3. 编译 + checkpatch；diff_baseline 零变化验证；黑匣子对照（运行期 dmesg 净减行数在案）",
+        "4. perf_gate A/B：基线档 vs HEAD 档同口径双跑，J19 对账",
+        "5. commit（性能数字入 message）"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口 probe 正常，J9b/J9c（ping + AF_PACKET 字节比对）全过",
+        "functional": [
+          "grep 热路径函数体内无 info 级 printk（err 级保留清单在案）",
+          "diff_baseline.sh 零差异（或 rebaseline 登记有意变更）",
+          "perf_gate J19：pps 不降、提升幅度入档（指标/口径/对照/样本数四要素）"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8",
+          "20 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T22-ring-geometry",
+      "title": "环形几何扩容 + TX 饱和处理规范化",
+      "phase": "S8",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T20-perf-gate"
+      ],
+      "estimated_loc": 80,
+      "learning": {
+        "objective": "掌握环形尺寸与突发吸收的权衡、netdev 流控协议（stop/wake/BUSY）的规范形态",
+        "concepts": [
+          "prism 骨架现状：NET_LOG_SQ_SZ=8（256 WQEBB/16KiB）、stop_room=128+32 BB、CQ 64 entry、RQ 16 WQE×2KiB——比 en/params.c 默认小 1-2 个数量级",
+          "stop/wake 协议：余量不足 → netif_stop_queue + 返回 NETDEV_TX_BUSY 由栈重发，CQE 回收路径 netif_wake_queue；对比现状 dev_kfree_skb_any 丢包计 tx_errors（net.c:924-931）的语义差异",
+          "stop_room 语义（en/tx.c 先例）：为 NOP 填充/跨 BB WQE 预留的安全余量",
+          "尺寸上限来源：caps 深度字段（log_max_sq_size 等，ifc 机械推导——T14 位号教训）+ QUERY_HCA_CAP 实读钳位",
+          "模块参数形态：log_sq_sz/log_rq_sz/log_cq_sz（默认提一档：SQ 1024 BB / RQ 64 / CQ 256；0=旧值兼容）",
+          "BQL 不做（范围注记：单队列骨架收益有限，mlx5e 对照留给后续）"
+        ],
+        "keywords": [
+          "环形尺寸",
+          "stop_room",
+          "netif_stop_queue",
+          "饱和处理",
+          "钳位"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/params.c",
+            "focus": "mlx5e 环尺寸默认值与 max 钳位（log 尺寸参数模型）"
+          },
+          {
+            "file": "en/tx.c",
+            "focus": "mlx5e_sq_stop/wake 与 stop_room 判定（netif_tx_stop_queue 调用形态）"
+          }
+        ],
+        "reflection_questions": [
+          "环大→突发吸收强/内存占用高；环小反之——25G 突发下 256 BB 为什么必然丢？",
+          "返回 NETDEV_TX_BUSY 与自行 free 丢包，对上层协议（TCP vs UDP）的影响差异？",
+          "为什么尺寸参数用 log2 形态？（对齐约束 + 固件协商）"
+        ]
+      },
+      "goal": "环几何三参数模块化并默认提档（caps 钳位）；TX 余量不足路径改 stop/wake 协议；pktgen 灌包 tx_dropped/tx_errors 归零、pps 提升入档",
+      "context": "S8 快赢第二项。现状满速突发下 SQ 256 BB + 丢包路径 = 饱和即丢（tx_errors 计数），既损吞吐也不符合 netdev 契约。行为变化点：① probe 若打印环尺寸则基线行变（rebaseline 登记）；② xmit 返回值路径变（BUSY/stop 形态）。caps 钳位注意 T14 实证背景：本固件 max_wqe_sz_sq 被历史清位补丁钳（c[82..83] 读回 0x0400）——SQ 深度相关 caps 字段先实读再定上限。A/B 同 T18 臂 1 口径。",
+      "steps": [
+        "1. 功课：caps 中 SQ/RQ/CQ 深度上限字段识别（ifc 推导）+ 引导时实读缓存（caps 缓存惯例 R0.5）",
+        "2. 三参数模块化 + 默认提档 + 钳位；probe 打印实际档位（入基线则 rebaseline）",
+        "3. xmit 余量不足路径：netif_stop_queue + 返回 NETDEV_TX_BUSY；CQE 回收路径 wake 判定（余量回补阈值）",
+        "4. pktgen 饱和档 A/B：基线档（tx_dropped/tx_errors >0 可见）vs 提档后（=0）+ pps 对比",
+        "5. 100 装卸 + verify.sh 18/18 + r0_gate 8/8"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "默认加载新档位生效，dmesg 档位行在案",
+        "functional": [
+          "pktgen 饱和灌包：tx_dropped=0、tx_errors=0（基线档两者 >0 的对照数字入档）",
+          "perf_gate J19：pps 提升或不降，A/B 四要素入档",
+          "stop/wake 配对无死锁：灌包→停→恢复流量序列验证队列复活"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8（基线变更走 rebaseline 登记）",
+          "100 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T23-arm-lock-fix",
+      "title": "arm_lock 三写者上下文修正",
+      "phase": "S8",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T20-perf-gate"
+      ],
+      "estimated_loc": 60,
+      "learning": {
+        "objective": "掌握 spinlock 变体的上下文矩阵——软中断 vs 进程上下文共享锁的正确形态",
+        "concepts": [
+          "现状：net->arm_lock 普通 spin_lock（net.c:701/729），三写者 = ndo_start_xmit（softirq，持 __netdev_tx_lock）、NAPI poll 出口（softirq）、10ms delayed_work 看门狗（进程上下文）",
+          "上下文矩阵：softirq vs 进程共享 → spin_lock_bh 或 spin_lock_irqsave；local_bh_disable 语义；为什么普通 spin_lock 在此是隐患（进程侧被软中断打断的死锁方向分析）",
+          "修正形态抉择：bh 形态（最小改动）vs 消除共享（arm 决策收敛到单一上下文/原子化）——工程权衡题，decision 记 progress",
+          "lockdep 验证法：CONFIG_PROVE_LOCKING 下压测触发路径；无 lockdep 内核的盲区注记 + 代码审查论证"
+        ],
+        "keywords": [
+          "spin_lock_bh",
+          "软中断",
+          "上下文矩阵",
+          "lockdep",
+          "死锁"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/tx.c",
+            "focus": "mlx5e TX doorbell 路径为什么无锁（per-CPU bfreg）——消除共享的对照思路"
+          },
+          {
+            "file": "lib/cq.h",
+            "focus": "mlx5_cq_arm 调用点上下文（hardirq vs NAPI 出口）"
+          }
+        ],
+        "reflection_questions": [
+          "softirq 抢占进程上下文的条件？反过来（进程打断软中断）可能吗？",
+          "spin_lock_bh 关的是本 CPU bottom half——为什么足以保护 softirq/进程共享？",
+          "如果把 arm 决策改成单一写者，三个写点分别怎么改造？代价是什么？"
+        ]
+      },
+      "goal": "arm_lock 上下文修正（bh 或单写者形态，按功课抉择），lockdep 全程干净，perf_gate 不降",
+      "context": "S8 快赢第三项——正确性优先的性能任务，也是 T24 arm 节流实验的前置（实验要在无锁疑云的基线上做，否则判据连红分不清是锁还是策略）。风险分级上机惯例：本任务不动 MMIO 语义（arm 值/时序不变），只动锁形态；黑匣子在案。",
+      "steps": [
+        "1. 功课：三写者上下文实证（xmit 实际持锁态与 local_bh 状态）+ 参考形态定夺",
+        "2. 修正实施（bh / 单写者二选一，decision 记 progress.md）",
+        "3. lockdep 开启态压测（灌包 + 看门狗并发路径）；无 lockdep 内核则注记盲区 + 论证在案",
+        "4. perf_gate A/B 不降对账；100 装卸"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口正常，J9b/J9c 全过",
+        "functional": [
+          "lockdep 压测零警告（或盲区注记 + 论证在案）",
+          "diff_baseline.sh 零差异（纯锁形态，dmesg 无变化）",
+          "perf_gate J19 不降"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8",
+          "100 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T24-arm-throttle",
+      "title": "arm-on-xmit 节流判别阶梯（每包双 MMIO → 单 MMIO?）",
+      "phase": "S9",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T22-ring-geometry",
+        "T23-arm-lock-fix"
+      ],
+      "estimated_loc": 120,
+      "learning": {
+        "objective": "掌握受固件怪癖约束的优化判别实验设计——阶梯一次杀一个假设，判死也是合法判决",
+        "concepts": [
+          "现状成本模型：每包两次 MMIO write64（arm CQ + SQ bf）+ 2 次 dbr record 写（net.c:1006 arm-on-xmit 前置 + net_sq_notify）；MMIO 是 uncached store——每包成本主项之一",
+          "约束：µs 三元组怪癖（DESIGN §6.4 最重条目）——事件只在 arm 后 µs 级窗口内完成时通知；空闲 CQ 到达从不通知 → 看门狗兜底 10ms",
+          "节流阶梯设计：档 0 现状（每包 arm）/ 档 1 arm-on-idle（SQ 空转时 arm）/ 档 2 每 N 包（N=4/16 参数化）/ 档 3 arm-on-drain（poll 出口 arm，事件模型改混合轮询）",
+          "判别指标对：TX pps 提升 vs 完成/comp 事件到达率与完成 p99 时延——节流省 MMIO 但可能退化事件及时性，10ms 看门狗是兜底上界",
+          "判死出口：若所有节流档事件到达率崩塌或完成时延恶化超过收益 → 判死归档（怪癖档案 +1，现状保留）——判决链方法论"
+        ],
+        "keywords": [
+          "判别阶梯",
+          "MMIO",
+          "arm 节流",
+          "事件到达率",
+          "判死"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/tx.c",
+            "focus": "mlx5e 为什么无需 arm-on-xmit（事件模型不同）——对照理解本固件怪癖的约束本质"
+          },
+          {
+            "file": "lib/cq.h",
+            "focus": "mlx5_cq_arm 的标准时机（napi_complete 出口 arm 一次）"
+          }
+        ],
+        "reflection_questions": [
+          "每包省一次 MMIO 写的理论收益怎么估算？（uncached store 延迟 × pps）",
+          "什么负载形态下节流必然劣化？（低速率交互流为什么依赖事件及时性）",
+          "判死判决怎么写才有价值？（约束条件 + 量化边界 + 怪癖档案条目）"
+        ]
+      },
+      "goal": "arm 节流四档判别实验出明确判决：胜者档转正（pps 提升入档）或判死归档（怪癖档案 + 现状保留）",
+      "context": "S9 判别实验第一项。前置 T22（环几何稳定，避免环满噪声混入完成时延）+ T23（锁形态干净）。判据预登记于实验脚本头（各档通过/劣化阈值先登记后上机）；一次实验只杀一个假设（每趟只切一档）；同一判据连红两次 → 四层尸检纪律适用（T16 惯例）。上机 sudo 归用户、黑匣子在案。",
+      "steps": [
+        "1. 判据预登记：各档通过条件（TX pps 提升 ≥X% 且完成 p99 ≤ 基线×1.5 且事件到达率 ≥Y%）/ 劣化条件 / 判死条件（全档劣化）",
+        "2. 旋钮实现：netdev_arm_mode（0=每包现状 / 1=on-idle / 2=every-N 带 N 参数 / 3=on-drain），默认 0（行为不变）",
+        "3. 四档 × 双包长档跑 T18 臂 1 口径 A/B；事件到达率用 comp EQE 计数/包",
+        "4. 判决汇总：胜者档设默认或判死归档（DESIGN §6.4 怪癖档案条目 + progress 判决链）",
+        "5. verify.sh 18/18 + r0_gate 8/8（默认档行为不变则基线不动）"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "默认档（0）加载行为与现状一致（diff_baseline 零差异）",
+        "functional": [
+          "四档数据齐（各档 pps / 完成 p99 / 事件到达率三列对账）",
+          "判决明确入档：胜者档（默认切换 + 提升数字）或判死（约束 + 边界量化）",
+          "判据预登记原文在脚本头（登记时间戳先于数据）"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8",
+          "黑匣子全程在案",
+          "如判死则 DESIGN §6.4 怪癖档案增条目"
+        ]
+      }
+    },
+    {
+      "id": "T25-cq-moderation",
+      "title": "CQE/中断聚合判别实验（ces 位阶梯 + CQ moderation 双路径）",
+      "phase": "S9",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T22-ring-geometry"
+      ],
+      "estimated_loc": 100,
+      "learning": {
+        "objective": "理解完成事件聚合的两条正典路径（WQE ces 位 / CQ moderation 字段）与其在本固件上的可实证性",
+        "concepts": [
+          "现状：每 WQE ctrl 置 CQ_UPDATE（net.c:958）→ 每包一 CQE 一事件——高频事件是 pps 与 CPU 天花板之一",
+          "路径 A：ces 完成事件位阶梯——每包（现状）→ 每 N 包置位（驱动侧可控，无需固件新特性）；CQE 数不变、事件数降",
+          "路径 B：CREATE_CQ moderation 字段（cq_period/cq_max_count，ifc 功课）——固件侧聚合正典形态；但本固件 byte_cnt=0 怪癖（T14）预警：报文语义字段已证不走寻常路，moderation 生效性必须实验定案",
+          "指标对：事件率（EQE/包）↓ vs 完成时延 p99 ↑ 的权衡曲线；CPU（si）占比变化",
+          "判死出口同 T24 惯例：双路径全劣化 → 判死归档怪癖档案"
+        ],
+        "keywords": [
+          "完成聚合",
+          "ces",
+          "cq_period",
+          "moderation",
+          "中断频率"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "lib/cq.h + en/params.c",
+            "focus": "cq moderation 默认参数与修改接口（mlx5_core_modify_cq_moderation 形态）"
+          },
+          {
+            "file": "en/tx.c",
+            "focus": "WQE ces 位置位策略（何时每包、何时依赖 moderation）"
+          }
+        ],
+        "reflection_questions": [
+          "聚合降低事件率为什么必然抬高单包完成时延？N 的最优值由什么负载特征决定？",
+          "路径 A 与 B 分别在哪一层省成本？可以叠加吗？",
+          "byte_cnt=0 怪癖为什么让 moderation 生效性存疑？怎么设计最小实验定案？"
+        ]
+      },
+      "goal": "双路径聚合判别实验出明确判决：胜者（事件率下降且完成时延可接受）转正或判死归档",
+      "context": "S9 判别实验第二项。与 T24 正交（arm 节流管「arm 频率」，本任务管「完成通知生成本身」），共享事件率指标口径。判据预登记 / 连红两次尸检 / 黑匣子惯例同 T24。CREATE_CQ 字段改动属首次触碰 cq_period 位号——T14 教训适用：偏移从 ifc 机械推导，fmt_equiv 断言先行。",
+      "steps": [
+        "1. 功课：ifc 推导 cq_period/cq_max_count 位号 + ces 位在 WQE ctrl 的编码；fmt_equiv 断言先行",
+        "2. 路径 A 阶梯：ces 置位策略参数化（every-N，默认 1=现状）",
+        "3. 路径 B 实验：CREATE_CQ 带 moderation 字段读回验证（接受性探针）→ 生效性实验（事件率变化）",
+        "4. 判据预登记 → 双路径 × 双包长档 A/B（事件率 / 完成 p99 / si CPU 三列）",
+        "5. 判决：胜者转正或判死归档；verify + r0_gate"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0；fmt_equiv 断言过",
+        "load": "默认参数（every-1 / 无 moderation）行为与现状一致",
+        "functional": [
+          "双路径数据齐（事件率 / 完成 p99 / CPU 三列 × 档位）",
+          "moderation 接受性读回定案（接受 / 拒绝 / 读回不一致三种结局各自成档）",
+          "判决明确（转正带默认值切换依据，或判死带边界量化）"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8",
+          "如判死则怪癖档案增条目",
+          "黑匣子在案"
+        ]
+      }
+    },
+    {
+      "id": "T26-rx-zerocopy",
+      "title": "RX 零拷贝：预投递缓冲 build_skb 化",
+      "phase": "S9",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T22-ring-geometry"
+      ],
+      "estimated_loc": 200,
+      "learning": {
+        "objective": "掌握 RX 零拷贝的 buffer 布局工程——build_skb/headroom/对齐，以及「分配 + 拷贝省一」的量化",
+        "concepts": [
+          "现状：coherent 大缓冲预投递 + CQE 后 napi_alloc_skb + skb_put_data 拷贝构造（net.c:793）——每包一次分配 + 一次 memcpy",
+          "build_skb 形态：数据已在 DMA 一致内存 → 直接以缓冲为 skb head 构造（en/rx.c v5.15 先例；page_pool 形态对照）",
+          "布局约束：headroom（回填保留空间）、NET_SKB_PAD/NET_IP_ALIGN 对齐；缓冲回收路径（重投递必须等 skb 释放后，回收协议是本任务难点）",
+          "缓冲所有权协议：现状缓冲常驻循环使用；build_skb 后缓冲随 skb 走——需要「借出/归还」状态机（skb destructor 归还钩子）；或双池过渡（一半常驻投递、一半可借出）",
+          "量化口径：RX pps、每包 CPU（si）、memcpy 消除量；AF_PACKET 字节比对保持全过（功能不回归铁律）",
+          "coherent 池 vs page_pool+dma_sync 取舍（SUMMARY §4 判据：高吞吐大数据走 streaming——本任务守住 coherent 最小改还是迁移，decision 记 progress）"
+        ],
+        "keywords": [
+          "build_skb",
+          "零拷贝",
+          "headroom",
+          "缓冲所有权",
+          "page_pool"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/rx.c",
+            "focus": "v5.15 build_skb 形态（mlx5e_handle_rx_cqe 数据到 skb 的构造路径）"
+          },
+          {
+            "file": "en/（page_pool 相关，按参考树实际结构核对）",
+            "focus": "page_pool 缓冲生命周期对照——prism 用 coherent 池的最小可行差异"
+          }
+        ],
+        "reflection_questions": [
+          "「省一次拷贝」的收益在什么包长下最大？为什么大包收益高？",
+          "缓冲随 skb 借出的生命周期怎么闭环？（skb->destructor 回调形态）漏归还的后果是什么？",
+          "coherent 池 vs page_pool+dma_sync 的取舍维度？"
+        ]
+      },
+      "goal": "RX 路径 build_skb 化（借出/归还协议闭环），RX pps 与每包 CPU 提升入档，AF_PACKET 字节比对与 J9c 全过",
+      "context": "S9 第三项——快赢与判别之间的实打实重构（RX 路径核心改造）。回收协议是最大风险点：缓冲泄漏 = RX 环枯竭（T22 提档后 RQ 64 缓解枯竭窗口）；设计上先双池过渡再考虑合并。字节比对（J9b 双向）是功能铁律，每趟上机必跑。",
+      "steps": [
+        "1. 功课：en/rx.c build_skb 形态 + 缓冲布局常量（headroom/align）",
+        "2. 借出/归还状态机设计（buf_state 环形账本 + skb destructor 归还钩子），双池过渡形态先行",
+        "3. net_cqe_rx 改造：build_skb + eth_type_trans + CHECKSUM_NONE 语义不变",
+        "4. A/B：RX pps / 每包 CPU / memcpy 消除量；AF_PACKET 双向字节比对 + J9c",
+        "5. kmemleak / 100 装卸 / 灌包 10 分钟稳定性（归还泄漏检查：RQ 可用缓冲数单调性断言）"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口正常",
+        "functional": [
+          "J9b AF_PACKET 双向字节比对全过 + J9c rx_packets≥1（每趟上机）",
+          "perf_gate J19：RX pps / 每包 CPU 提升入档（四要素）",
+          "归还协议无泄漏：灌包 10 分钟 RQ 可用缓冲数稳定（无单调下降）+ kmemleak 干净"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8（如涉及 dmesg 基线行走 rebaseline）",
+          "100 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T27-tx-scatter-gather",
+      "title": "TX scatter-gather：去 skb_linearize（头 inline + 多 dseg）",
+      "phase": "S9",
+      "milestone": "M4",
+      "status": "pending",
+      "prerequisites": [
+        "T22-ring-geometry"
+      ],
+      "estimated_loc": 150,
+      "learning": {
+        "objective": "掌握非线性 skb 的 frags 几何与多 data segment 的 WQE 构造",
+        "concepts": [
+          "现状：skb_linearize（net.c:898）把非线性 skb 全量拷贝成线性——大包/分页 skb 的每包拷贝成本",
+          "skb_shinfo(frags) 几何：nr_frags / page 引用 / skb_frag_size；dma_map_page per frag vs 单次 dma_map_single",
+          "WQE 构造：头段（满足 vport min_wqe_inline_mode 的 L2 inline 地板）+ 前 N（2-3）frag 指针 dseg + 余量兜底 linearize（frags>N 降级——分档而非全有全无）",
+          "WQEBB 预算：多 dseg 撑大 WQE 跨 BB 数，stop_room 与 max_wqe_sz_sq 上限核算（T14 实证背景：本固件该 caps 被历史清位补丁钳制，c[82..83] 实读复核）——上限实证是前置",
+          "语义保持：byte_cnt 聚合 = dseg 求和；完成回收 num_wqebbs 对账扩展"
+        ],
+        "keywords": [
+          "scatter-gather",
+          "frags",
+          "多 dseg",
+          "linearize",
+          "WQEBB 预算"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/tx.c",
+            "focus": "mlx5e_sq_xmit 的 frags→dseg 循环（dma_map 单元 / DS 计数 / 尾部处理）——多段构造正典"
+          },
+          {
+            "file": "en/params.c",
+            "focus": "max_sq_wqe 尺寸与 sg 上限的参数关系"
+          }
+        ],
+        "reflection_questions": [
+          "哪些真实流量形态产生非线性 skb？（GRO 聚合页 / 用户态 zerocopy send）省的拷贝量怎么估算？",
+          "frag 数上限 N 怎么定？（WQE 尺寸 × stop_room × 固件上限三重约束的 min）",
+          "为什么兜底路径必须保留 linearize？（超大 frags 的长尾正确性）"
+        ]
+      },
+      "goal": "ndo_start_xmit 支持头 inline + 2-3 frag 指针 dseg（余量兜底），消除常规包强制拷贝；TX pps/CPU 提升入档，M4 收口",
+      "context": "M4 收口任务（S9 判别优化收官）。前置功课关键点：max_wqe_sz_sq 实际可用上限（T14 实证背景）决定 N 与环几何核算；若上限过小则任务降级为「实证上限 + 最小 N」判决形态（合法结局）。A/B 口径同 T18 臂 1；功能铁律 J9b 字节比对。M4 criteria 对号收口：快赢三项提升在档（T21/22/23）+ 判别实验判决在档（T24/25/26）+ 本任务提升在档 + 受控同几何 core 百分比终表落 report.md。",
+      "steps": [
+        "1. 前置实证：caps max_wqe_sz_sq 实读 + 单 WQE 多 dseg 接受性探针（NOP/小 SEND 阶梯）",
+        "2. frags→dseg 循环实现（头 inline 语义不变 + N 段指针 + 兜底 linearize 分档）",
+        "3. 完成回收对账扩展（多段 WQE 的 num_wqebbs）+ dbr 游标正确性",
+        "4. A/B：TX pps / 每包 CPU（大包档收益显著预期）；J9b 字节比对全过",
+        "5. M4 收口：report.md 性能附录终表（含受控同几何 core 对照百分比）+ M4 criteria 对号"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "双口正常，J9b/J9c 全过",
+        "functional": [
+          "多段 WQE 发送字节数 = skb->len 对账（AF_PACKET 侧逐包验证）",
+          "perf_gate J19：TX pps/CPU 提升入档（四要素），1514B 档提升显著",
+          "M4 criteria 全项对号：快赢三项 + 判别三项 + 本任务提升 + 受控同几何 core 百分比终表"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8",
+          "100 次装卸零告警",
+          "M4 收口记录入 progress.md（含判死项汇总如适用）"
+        ]
+      }
+    },
+    {
+      "id": "T28-msix-vectors",
+      "title": "MSI-X 向量扩展 + IRQ affinity + per-EQ 独立 UAR（并行化前置）",
+      "phase": "S10",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T20-perf-gate"
+      ],
+      "estimated_loc": 250,
+      "learning": {
+        "objective": "掌握生产驱动的中断向量池模型——向量协商、affinity hint、多 EQ 实例化",
+        "concepts": [
+          "现状：MLX5_PRISM_IRQ_VECS=2（cmd EQ + comp EQ 各一），无 affinity，全部 doorbell 共享单 UAR 页（eq.c:505）",
+          "向量数协商：caps 字段（log_max_eq 等，ifc 推导）+ pci_alloc_irq_vectors 上限；CX4 Lx 实际可用向量数实读定案",
+          "pci_irq.c 对照：core 的 per-channel 向量池 + cpu_hint/affinity 模型（学语义不抄规模）",
+          "per-EQ 独立 UAR：ALLOC_UAR 多实例；MMIO 争用消除（SUMMARY §5 对照：mlx5e per-CPU bfreg 思路）",
+          "多 EQ 事件对账：T16 双口混流教训（tracepoint 无端口字段 + 同 eqn 混流）的实例化对策——per-EQ eqn 分账或 trace 字段扩展",
+          "拍板门：启动前需用户正式推翻 CLAUDE.md「multiqueue/RSS 重写无 ROI」范围决策（本任务只扩向量与 UAR，单队列形态下先验证多 EQ 无回归）"
+        ],
+        "keywords": [
+          "MSI-X",
+          "向量池",
+          "affinity",
+          "UAR",
+          "多 EQ"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "pci_irq.c",
+            "focus": "mlx5_irqs_alloc / 向量池 / cpu_hint 语义（prism 最小版）"
+          },
+          {
+            "file": "eq.c",
+            "focus": "多 EQ 实例生命周期（create/destroy 批量化）"
+          }
+        ],
+        "reflection_questions": [
+          "向量数是越多越好吗？上下限由什么决定？（caps / 在线 CPU / MSI-X 表容量）",
+          "affinity hint 与 irqbalance 的交互？为什么生产驱动用 hint 不硬绑？",
+          "共享 UAR 页在多队列下的争用本质？（同一 cacheline 的 MMIO 提交串行化）"
+        ]
+      },
+      "goal": "向量 2→N（caps 钳位实测）+ comp EQ 多实例化 + per-EQ 独立 UAR + affinity hint；单队列形态下事件对账无混流、无回归",
+      "context": "S10 并行化第一项【拍板门：需用户拍板推翻 CLAUDE.md 忽略清单对应条目后方可启动】。设计为「单队列形态下先验证基础设施」——本任务不改数据面队列数，T29/T30 才消费多向量。多 EQ 对账判据是 T16 教训的制度化。上机惯例同前。",
+      "steps": [
+        "1. 功课：caps 向量上限字段实读 + pci_irq.c 语义；向量数 = min(caps, num_online_cpus, 计划队列数)",
+        "2. 向量扩展 + comp EQ 多实例骨架（本任务先 1 数据面 EQ + 预留向量）+ 独立 UAR 分配",
+        "3. affinity hint 设置；/proc/interrupts 多向量可见性",
+        "4. 事件对账：per-EQ 分账无混流判据（每 EQ 独立 ci/EQE 计数配对）",
+        "5. verify 18/18 + r0_gate 8/8 + 100 装卸"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "/proc/interrupts 显示 N 向量且 affinity 生效",
+        "functional": [
+          "多 EQ 事件对账零混流（per-EQ 计数配对全绿）",
+          "verify.sh 18/18 与 r0_gate 8/8 无回归",
+          "向量数与 caps 钳位实测值入档"
+        ],
+        "manual_checks": [
+          "拍板记录在案（推翻范围决策的日期与范围）",
+          "100 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T29-tx-multiqueue",
+      "title": "channel 模型 + TX 多队列（ndo_select_queue / 每 CPU SQ）",
+      "phase": "S10",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T28-msix-vectors"
+      ],
+      "estimated_loc": 400,
+      "learning": {
+        "objective": "掌握 mlx5e channel 模型与内核多队列 TX——queue_mapping/XPS/per-CPU 资源",
+        "concepts": [
+          "channel 模型（en/main.c open_channels）：CPU ↔ (SQ,RQ,CQ,EQ,IRQ) 绑定单元——prism 最小版数据结构设计",
+          "alloc_etherdev_mqs(N) / netif_set_real_num_tx_queues；skb_get_queue_mapping → ndo_select_queue 默认哈希",
+          "XPS（transmit packet steering）：cpumask↔queue 映射；与 select_queue 的分工",
+          "per-CPU SQ 无锁化：每队列独立 dbr/UAR（T28 已备）→ xmit 路径锁边界消失（对照 T23 arm_lock 的单写者终局形态）",
+          "观测：ip -s link 分队列统计 / ethtool -S per-queue 计数（get_channels 可选档）"
+        ],
+        "keywords": [
+          "channel",
+          "multiqueue",
+          "XPS",
+          "select_queue",
+          "per-CPU"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/main.c",
+            "focus": "mlx5e_open_channels / close_channels 的 channel 数组生命周期"
+          },
+          {
+            "file": "en/tx.c",
+            "focus": "queue_index 选择与 per-queue stats 形态"
+          }
+        ],
+        "reflection_questions": [
+          "单流多队列为什么不能提速？（flow 按 hash 钉一个队列）多流才并行——基准为什么必须多流设计",
+          "channel 数 = CPU 数是全局最优吗？NUMA/超线程的影响？",
+          "队列 destroy 时在飞 skb 的排水怎么闭环？"
+        ]
+      },
+      "goal": "TX 侧 N 队列化（每 CPU SQ/CQ，挂 T28 向量），单 RQ 暂保持；多流 pktgen TX pps 并行扩展 A/B 入档",
+      "context": "S10 第二项（拍板门同 T28）。多流基准设计：≥4 流 pktgen（flow hash 分散）+ 单流对照（钉单队列，应无回归）——「pps vs 队列数曲线」是并行扩展性的可引用数字；对照组 core 钉同值队列数（ethtool -L combined N）。风险点：open/close 的队列排水与 teardown 栈式顺序扩展；基线行随队列数变化走 rebaseline。",
+      "steps": [
+        "1. channel 数据结构（prism 最小版）+ netdev 多 TX 队列注册",
+        "2. xmit 路径 per-queue 化（独立 dbr/bf/UAR/统计）；select_queue 默认哈希 + XPS 设置",
+        "3. open/close 生命周期（排水 / teardown 顺序）+ 100 装卸",
+        "4. 基准：1/2/4/8 队列 × 多流 pktgen pps 曲线；core 同值队列对照",
+        "5. verify 18/18 + r0_gate 8/8"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0",
+        "load": "ip -d link 显示 N txq（get_channels 实现则 ethtool -l 可见）",
+        "functional": [
+          "多流 pps 随队列数扩展（曲线入档，并行扩展比可引用）",
+          "单流无回归（钉单队列对照）",
+          "队列排水无泄漏（在飞 skb 配对 / kmemleak）"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8（rebaseline 登记）",
+          "100 次装卸零告警"
+        ]
+      }
+    },
+    {
+      "id": "T30-rx-rss",
+      "title": "RX 多队列 + RSS（TIR toeplitz hash + flow table hash 路由）",
+      "phase": "S10",
+      "milestone": null,
+      "status": "pending",
+      "prerequisites": [
+        "T29-tx-multiqueue"
+      ],
+      "estimated_loc": 300,
+      "learning": {
+        "objective": "掌握硬件 RSS 的对象链改型——TIR direct dispatch → indirect hash，flow table hash 路由",
+        "concepts": [
+          "现状 TIR：disp_type=DIRECT + inline_rqn 单队列（net.c:325-346）——RSS 改型：rx_hash_fn=TOEPLITZ + indirection table + hash key",
+          "ifc 功课：tirn hash 布局 / RQT（RQ table）对象位号——T15 TIR 位号早 8 位教训：独立推导断言二次适用",
+          "RQT 对象：indirection table 指向 N RQ；tirn→rqt 挂接；默认 round-robin 均衡",
+          "flow table 路由：catch-all FTE action 从 direct TIR 改 hash TIR（命令形态按 ifc 功课）",
+          "RSS 均衡观测：per-RQ CQE/计数分布；ethtool -x indirection 表接口可选档",
+          "对照：RPS（纯软件）作背景；aRFS 不做（范围）"
+        ],
+        "keywords": [
+          "RSS",
+          "toeplitz",
+          "RQT",
+          "TIR hash",
+          "流表路由"
+        ],
+        "mlx5_reference": [
+          {
+            "file": "en/rx.c + en/rss（按参考树实际结构核对）",
+            "focus": "rss key / indirection 表的管理形态（ethtool 联动可后置）"
+          },
+          {
+            "file": "fs_core.c（flow steering）",
+            "focus": "hash TIR 挂接的命令形态"
+          }
+        ],
+        "reflection_questions": [
+          "toeplitz 对什么五元组组合哈希？为什么不只哈希端口？（flow 亲和 vs 均衡）",
+          "indirection table 为什么要可编程？（队列下线/均衡调优）",
+          "RSS（RX 侧）与 T29 XPS（TX 侧）的对称性？"
+        ]
+      },
+      "goal": "RX N RQ + RQT + TIR toeplitz hash + flow table hash 路由；多流 RX per-queue 均衡分布入档，RX pps 并行扩展 A/B，性能任务链收官",
+      "context": "S10 收官（性能任务链终项，拍板门同 T28）。TIR/RQT 位号全部 ifc 机械推导 + fmt_equiv 断言先行（T15 位号教训二次适用）；AF_PACKET 字节比对与 J9c 每趟铁律。收官产出：全链性能终表（T18 基线 → T30 并行化）入 report.md 性能附录——可引用数字的最终汇编。",
+      "steps": [
+        "1. ifc 功课：TIR hash / RQT 位号推导 + fmt_equiv 断言",
+        "2. N RQ 实例化（复用 T26 build_skb 路径）+ RQT + TIR 改型 + FT 路由改型",
+        "3. 均衡观测：per-RQ 计数分布（多流注入）；indirection 表默认 round-robin",
+        "4. 基准：多流 RX pps vs 队列数曲线 + core 同值队列对照；全链性能终表汇编（T18→T30）",
+        "5. verify 18/18 + r0_gate 8/8 + 100 装卸收官"
+      ],
+      "exit_criteria": {
+        "compile": "make 通过；checkpatch 0/0/0；fmt_equiv 过",
+        "load": "双口正常，J9b/J9c 全过",
+        "functional": [
+          "多流 RX per-RQ 分布均衡（max/min 比阈值预登记）",
+          "RX pps 并行扩展曲线入档 + core 同值队列对照",
+          "全链性能终表（T18 基线→T30）入 report.md 性能附录"
+        ],
+        "manual_checks": [
+          "r0_gate 8/8（rebaseline 登记）",
+          "100 次装卸零告警",
+          "性能任务链收官记录入 progress.md"
         ]
       }
     }
