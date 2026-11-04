@@ -1631,7 +1631,7 @@
       "title": "数据面基准底座：四臂 pps/带宽/时延/CPU 采集（性能事实层）",
       "phase": "S7",
       "milestone": null,
-      "status": "pending",
+      "status": "completed",
       "prerequisites": [
         "T16-verify-report"
       ],
@@ -1672,7 +1672,7 @@
         ]
       },
       "goal": "scripts/gate/collect_datapath.sh 产出四臂基准数据（prism 基线 / core 钉同几何 / 线速换算 / RX 端到端时延分布），64B 与 1514B 双包长档，数值入档不设阈值",
-      "context": "T16 复盘定案：数据面性能从未被测量是判据体系最大盲区（J9b/9c 只验功能）。v1 教训（目标立在假设基线 ~8µs 上）制度化：本任务只建事实底座，阈值留给 T20 按实测分布预登记。基准三件套定义（性能计划 2026-10-09 批准）：① 自身前后对比——本任务首测即 T21+ 全部优化任务的对照基线；② core 钉同几何对照（ethtool -L/-K 后差距 = 纯每包驱动效率）；③ 线速锚（64B≈37.2Mpps / 1514B≈2.0Mpps）。RX 时延用既有 prism_sq_xmit/prism_rx_cqe tracepoint 配对，量化 10ms 看门狗地板（DESIGN §6.4 怪癖）对低负载时延的实际影响；高负载下 NAPI 连续轮询不受看门狗影响，高低负载两形态分开报告。拓扑沿用 T15 判决：accept_local 单机双口对拉（拓扑税写入口径声明）。上机惯例：sudo 归用户、/var/tmp 单文件 + mktemp 私有目录、黑匣子在案。零驱动改动，r0_gate/verify 不受影响。",
+      "context": "T16 复盘定案：数据面性能从未被测量是判据体系最大盲区（J9b/9c 只验功能）。v1 教训（目标立在假设基线 ~8µs 上）制度化：本任务只建事实底座，阈值留给 T20 按实测分布预登记。基准三件套定义（性能计划 2026-10-09 批准）：① 自身前后对比——本任务首测即 T21+ 全部优化任务的对照基线；② core 钉同几何对照（ethtool -L/-K 后差距 = 纯每包驱动效率）；③ 线速锚（64B≈37.2Mpps / 1514B≈2.0Mpps）。RX 时延用既有 prism_sq_xmit/prism_rx_cqe tracepoint 配对，量化 10ms 看门狗地板（DESIGN §6.4 怪癖）对低负载时延的实际影响；高负载下 NAPI 连续轮询不受看门狗影响，高低负载两形态分开报告。拓扑沿用 T15 判决：accept_local 单机双口对拉（拓扑税写入口径声明）。上机惯例：sudo 归用户、/var/tmp 单文件 + mktemp 私有目录、黑匣子在案。零驱动改动，r0_gate/verify 不受影响。\n\n收官更新（2026-11-05）：十趟上机判决链收官。脚本侧 trip-1a~1e 踩平 v5.15 pktgen 接口文档-源码脱网（pgctrl/线程天生绑核/dst_mac 真名/rem_device_all 走线程文件/start 同步语义后台化），trip-2 判别实验+trip-3 残留自清；驱动侧「先修后收」例外拍板后 trip-18/19/20 三门 doorbell 反证 + trip-21 标度律定案：固件在「CQE 产出−已发布 ci」距离 ≥ CQ 深度时静默粘滞停产（64→66/512→514），滞滞态对一切 doorbell 免疫——根因=负载下事件路径死火，事件模型重设计移交 T24/T25；净驱动变更=CQ 512+多页 PAS（21+/5-，零打印基线不动）。prism 臂改限速梯（零 TX 丢弃最高档=基线档：10k 请求档全投递，64B delivered 5,334pps/1514B 4,217pps）；core 钉同几何 rx 1.22M/1.31Mpps（3.28%/65.4% 线速）；RX 时延两档 n≥500 且 10ms 看门狗地板可见（D3）。D1-D3 全 PASS + r0_gate 8/8 + verify 18/18（内核 -191→-202 跨版本实证）。RX 侧 RQ16+10ms≈1.6kpps 服务天花板入档给 T22。工件 /var/tmp/datapath/（summary.txt=T20 上游）。",
       "steps": [
         "1. 脚本骨架 scripts/gate/collect_datapath.sh：三阶段（A 拓扑准备 accept_local+双口 up；B 负载生成；C 采集聚合报告），口径声明写头部（包长档/时长/流数/拓扑税/CPU 亲和）",
         "2. 负载生成器：pktgen 主档（kpktgend 绑定发送 CPU、clone 数、64B/1514 双档、时长档）+ iperf3/UDP 回退档（TCP 吞吐背景数字）",

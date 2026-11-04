@@ -38,6 +38,7 @@
 | T15-netdev-skeleton | 最小 netdev 骨架 | S5.5 | — | **completed** | 见 T15 节 | 2026-10-01 |
 | T16-verify-report | verify.sh + 对比报告 | S6 | **M2** | **completed** | 见 T16 节 | 2026-10-02 |
 | T17-architecture-summary | 架构总结文档 | S6 | — | **completed** | 见 T17 节 | 2026-10-09 |
+| T18-datapath-benchmark | 数据面基准底座（四臂 pps/时延） | S7 | — | **completed** | 见 T18 节 | 2026-11-05 |
 
 ---
 
@@ -625,6 +626,19 @@
   - **Q: mlx5_prism 的 CMDQ 延迟会比 mlx5_core 高还是低？** A: 实测**高**（事件口径 p50=255µs vs core 函数驻留 5µs），且差异主要不是实现优劣而是口径差：prism 量到"唤醒等待者"为止（含中断投递+调度），core 的调用方自己就是等待者。尾部则同源——固件处理时间（INIT_HCA ~228ms）两侧同付。真正可比的量是 P2'ev 唤醒延迟 23µs——它证明 prism 的事件路径本身没有额外惩罚。
 
 ---
+
+### T18-datapath-benchmark 【S7 性能地基】
+
+- **状态**: completed（2026-11-05，判据 D1-D3 全 PASS + r0_gate 8/8 + verify 18/18 于 5.15.0-202）
+- **开始时间**: 2026-10-09
+- **完成时间**: 2026-11-05
+- **Commit**: 见本 commit
+- **交付物**: scripts/gate/collect_datapath.sh（四臂采集：prism 限速梯 / core 钉同几何 / 线速换算 / RX 时延分布，判据 D1-D3 预登记头部）+ datapath_aggregate.py（sq_xmit↔rx_cqe FIFO 配对聚合，selftest 4/4）+ /var/tmp/datapath/（快照永久保留，summary.txt 机器可读=T20 门禁上游）+ docs/report.md 性能附录（四要素表）
+- **终值口径**: prism 基线=零 TX 丢弃最高档 10kpps（64B delivered 5,334pps / 1514B 4,217pps，各 4 万包 tx_errors=0）；core 钉同几何 rx 1.22Mpps(64B, 3.28% 线速)/1.31Mpps(1514B, 65.4%)；RX 端到端时延 100pps n=972 p50=86µs p99=9.9ms、1000pps n=3,599 p50=3.07ms p99=17.9ms（≥8ms 占 26.5%——10ms 看门狗地板清晰可见，D3）
+- **上机迭代（十趟判决链）**: 脚本侧 trip-1a~1e（v5.15 pktgen 接口：pgctrl/线程天生每核一绑/dst_mac 源码真名/rem_device_all 走线程文件/pgctrl start 同步语义需后台化）+ trip-2 判别实验（低速率 4,574 包 71 次 CQ 回卷无恙=owner 奇偶出局）+ trip-3 拓扑残留自清；驱动侧「先修后收」拍板后 trip-18/19/20 三门反证（旧 idx 重环=固件重执行污染 tx 1377>sofar 410 并致整机 D 态锁死重启、新鲜 NOP=无效、pending 重放=无效）→ trip-21 标度律定案（64→66 / 512→514：固件在「CQE 产出−已发布 ci」距离 ≥ CQ 深度时静默粘滞停产，滞滞态对一切 doorbell 免疫）+ trip-21b（多页 PAS——64 项 CQ 恰好单页是历史巧合）
+- **驱动变更（T18 例外）**: NET_LOG_CQ_SZ 6→9 + CREATE_CQ 逐页 PAS（净 diff 21+/5-，行为面零打印、68 行基线不动）；楔死根因=负载下事件路径死火（T15 µs 窗怪癖）→ ci 仅 10ms 看门狗发布——事件模型重设计移交 T24（arm 节流）/T25（CQE 聚合）；RX 侧 RQ16+10ms 批处理 ≈1.6kpps 服务天花板入档给 T22
+- **验收方式**: collect D1-D3 对号全 PASS + r0_gate 8/8 + verify 18/18 复验（内核 -191→-202 跨版本，基线可移植性顺带实证）
+- **任务总结**: 数据面从「从未被测量」到「四臂事实层+两桩机理定量入档」；pktgen 5.15 接口的文档-源码脱网（dstmac/pgctrl 同步语义）全数踩平并固化在脚本头修正史；T21+ 全部优化任务的对照基线与 T20 门禁上游（summary.txt）就位
 
 ### T17-architecture-summary
 

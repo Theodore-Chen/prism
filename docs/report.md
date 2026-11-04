@@ -59,3 +59,22 @@ P1' 事件口径（bp 档）p50=255.1us 对 core kretprobe p50=5.0us：差异首
 - `/var/tmp/verify_run.log`、黑匣子 `/var/tmp/verify_live.log`、soak `/var/tmp/verify_soak.d/`
 - 判据预登记：`scripts/gate/verify.sh` 头部 J1-J18
 
+
+## 性能附录：数据面基准（T18-datapath-benchmark，2026-11-05）
+
+- 口径声明：accept_local 单机双口对拉（拓扑税：协议栈路径计入两端）；pktgen kpktgend_23 单流 clone_skb 0（逐包真实路径）；TX=port0→RX=port1；core 臂钉同几何（combined=1 + 六 offload 全关，回读存档 `/var/tmp/datapath/core_geom_*`）；prism 臂为限速梯（全速楔死机理见下注）；线速锚 64B≈37.2Mpps / 1514B≈2.0Mpps。**数值入档不设阈值**（T20 立门禁）。
+
+| 臂 | 指标 | 数值 | 对照 | 样本/口径 |
+|----|------|------|------|----------|
+| 1 prism 基线 | 64B 零 TX 丢失 pps | **10,000 请求档全投递**（delivered 5,334pps，4 万包 tx_errors=0） | core 2,295,262pps | 梯 2k/10k/20k/35k（ladder 入 summary.txt） |
+| 1 prism 基线 | 1514B 零 TX 丢失 pps | **10,000 请求档全投递**（delivered 4,217pps，tx_errors=0） | core 1,769,912pps | 同上 |
+| 2 core 钉同几何 | 64B / 1514B pps | rx 1,221,168（3.28% 线速）/ rx 1,307,919（65.4%） | — | 两遍法 ~2s 窗口；64B 受单线程生成器天花板（自报 ~2.5Mpps） |
+| 3 线速换算 | 见 collect 臂 3 表 | prism 64B 0.014% / 1514B 0.211%（rx 口径） | core 同表 | — |
+| 4 RX 端到端时延 | 100pps 低负载 | n=972 p50=86µs p99=9,895µs max=19,811µs（≥8ms 占 1.6%） | — | sq_xmit↔rx_cqe FIFO 配对，unpaired=0 |
+| 4 RX 端到端时延 | 1000pps 低负载 | n=3,599 p50=3,073µs p99=17,862µs max=18,865µs（≥8ms 占 26.5%） | — | 同上；**10ms 看门狗地板清晰可见**（D3） |
+
+**楔死机理注记（prism 全速突发，移交 T24/T25）**：固件在「CQE 产出 − 已发布 ci」距离 ≥ CQ 深度时静默粘滞停产——标度律 64→66 / 512→514 实证；doorbell 三形态反证在案（旧 idx 重环=重执行污染 tx 1377>sofar 410；新鲜 NOP=无效；pending 重放=无效）；根因=负载下事件路径死火（T15 µs 窗怪癖）→ ci 仅靠 10ms 看门狗发布。修复=事件模型重设计=T24（arm 节流）/T25（CQE 聚合）立项范围。RX 侧另有 RQ16+10ms 批处理 ≈1.6kpps 服务天花板（2k 档 77% 投递），属 T22 环几何。
+
+**驱动变更（T18 例外，「先修后收」拍板）**：CQ 深度 64→512 + 多页 PAS（net.c trip-21/21b，行为面零打印、68 行基线不动、r0_gate 8/8 + verify 18/18 复验）。
+
+- 工件：`/var/tmp/datapath_report.txt`、快照 `/var/tmp/datapath/`（summary.txt 机器可读=T20 上游）、黑匣子 `/var/tmp/datapath_live.log`；尸检专档 `/var/tmp/t18_autopsy/`；判据预登记 `scripts/gate/collect_datapath.sh` 头部 D1-D3。

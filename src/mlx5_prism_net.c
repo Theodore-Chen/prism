@@ -66,7 +66,16 @@ MODULE_PARM_DESC(netdev_inline_all,
 #define NET_SQ_BYTES		(NET_SQ_BBS * PRISM_WQE_BB_SIZE)
 #define NET_BBS_PER_PAGE	(MLX5_PRISM_PAGE_SIZE / PRISM_WQE_BB_SIZE)
 #define NET_SQ_STOP_ROOM	(NET_BBS_PER_PAGE + 32)
-#define NET_LOG_CQ_SZ		6
+/* trip-21 (T18 burst-stall verdict, 2026-11-04): a 64-deep CQ overruns in
+ * the first ~50-100us of a line-rate burst — before the first NAPI poll can
+ * publish a consumer index. This fw then stalls the SQ silently and
+ * stickily: no overrun EQE, the dbr record stops driving fetches, and every
+ * doorbell shape (old-idx re-ring / fresh NOP / pending-WQE replay — trips
+ * 18/19/20, evidence /var/tmp/t18_autopsy) fails to revive it. 512 entries
+ * cover the burst-to-first-poll window at these rates; masks, lap parity
+ * and allocation all derive from this log, nothing else to touch.
+ */
+#define NET_LOG_CQ_SZ		9
 #define NET_CQES		BIT(NET_LOG_CQ_SZ)
 #define NET_CQ_BYTES		(NET_CQES * PRISM_CQE_SIZE)
 #define NET_LOG_RQ_SZ		4
@@ -155,10 +164,15 @@ static int net_create_mkey(struct mlx5_prism_net *net)
 
 static int net_create_cq(struct mlx5_prism_net *net)
 {
-	u8 *in = kzalloc(PRISM_CREATE_CQ_IN_LEN(1), GFP_KERNEL);
+	/* trip-21b: the CQ crossed one 4-KiB page at log 9 — every page needs
+	 * its PAS entry (the SQ's 4-page loop is the precedent; passing one
+	 * PAS for a multi-page buffer fails CREATE_CQ and wedges ndo_open)
+	 */
+	int npas = NET_CQ_BYTES / MLX5_PRISM_PAGE_SIZE;
+	u8 *in = kzalloc(PRISM_CREATE_CQ_IN_LEN(npas), GFP_KERNEL);
 	u8 out[MLX5_PRISM_CMD_HDR_SIZE] = { };
 	u8 *cqc;
-	int err;
+	int err, i;
 
 	if (!in)
 		return -ENOMEM;
@@ -172,10 +186,12 @@ static int net_create_cq(struct mlx5_prism_net *net)
 	prism_ifc_set(cqc, PRISM_CQC_BIT_UAR_PAGE, 24, net->dev->eq.uar);
 	prism_ifc_set(cqc, PRISM_CQC_BIT_LOG_PAGE_SIZE, 5, 0);
 	mlx5_prism_put_be64(cqc + PRISM_CQC_OFF_DBR_ADDR, net->cq_dbr_dma);
-	mlx5_prism_put_be64(in + PRISM_OFF_CQ_PAS, net->cq_dma);
+	for (i = 0; i < npas; i++)
+		mlx5_prism_put_be64(in + PRISM_OFF_CQ_PAS + 8 * i,
+				    net->cq_dma + i * MLX5_PRISM_PAGE_SIZE);
 
 	err = mlx5_prism_cmdq_invoke(net->dev, MLX5_PRISM_CMD_OP_CREATE_CQ, 0,
-				     in, PRISM_CREATE_CQ_IN_LEN(1),
+				     in, PRISM_CREATE_CQ_IN_LEN(npas),
 				     out, sizeof(out));
 	kfree(in);
 	if (err)
