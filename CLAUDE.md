@@ -175,6 +175,20 @@ sudo modprobe mlx5_core
 sudo ./verify.sh
 ```
 
+### 免密执行（2026-11-05 起，网卡为项目专用机）
+
+上机门禁与只读诊断统一走 `sudo -n bin/hwrun ...`（sudoers 白名单单文件授权，
+不再逐条手动 sudo）：
+
+```bash
+sudo -n bin/hwrun gate collect_datapath.sh   # 跑 gate/ 白名单脚本（含参数透传）
+sudo -n bin/hwrun dmesg -t | tail            # 只读：内核日志
+sudo -n bin/hwrun cat /sys/kernel/tracing/trace   # 只读：限 pktgen/tracefs/net 前缀
+```
+
+调用留痕 /var/tmp/hwrun.log；证据链惯例（/var/tmp 单文件、黑匣子、快照保留、
+判据预登记）全部不变。模块终态默认仍恢复 core，但机器为专用机，状态不敏感。
+
 ## 工作方式
 
 1. 读 DESIGN.md 了解完整技术设计

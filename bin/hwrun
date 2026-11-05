@@ -1,0 +1,51 @@
+#!/bin/bash
+# hwrun — prism 项目硬件门禁的白名单无密执行器。
+#
+# sudoers 单行授权（NOPASSWD 本文件）后，agent 可免密执行：
+#   hwrun gate <脚本名.sh> [args...]   只跑 scripts/gate/ 白名单内的门禁脚本
+#   hwrun dmesg [args...]              只读：内核环形缓冲
+#   hwrun cat <path>                   只读：限 /proc/net/pktgen/、tracefs、
+#                                      debugfs、/sys/class/net/ 前缀
+# 每次调用记 /var/tmp/hwrun.log（谁/何时/什么——证据链不变）。
+# 信任模型：本文件在 zqc 可写的仓库里——白名单是纪律边界而非安全边界
+# （zqc 本就有全量 sudo）；机器是项目专用机，风险面=专用 NIC + /var/tmp。
+set -u
+REPO=/home/zqc/code/prism
+LOG=/var/tmp/hwrun.log
+GATE_WHITELIST="r0_gate.sh verify.sh collect_datapath.sh collect_latency.sh collect_mlx5_baseline.sh compare_report.sh rebaseline.sh t09_verify.sh t15_verify.sh r0_trace_check.sh"
+CAT_PREFIXES="/proc/net/pktgen/ /sys/kernel/tracing/ /sys/kernel/debug/ /sys/class/net/"
+
+# fs.protected_regular=2：sticky 目录里他人属主的旧日志会拒 root 追加
+# （本项目第四次撞见）——日志失败只降级不断主流程
+echo "$(date '+%F %T') user=${SUDO_USER:-?} cmd=$*" >> "$LOG" 2>/dev/null || true
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+gate)
+	script=${1:-}
+	[ $# -gt 0 ] && shift
+	case " $GATE_WHITELIST " in
+	*" $script "*) ;;
+	*) echo "hwrun: '$script' 不在 gate 白名单（bin/hwrun 头部登记）" >&2; exit 2 ;;
+	esac
+	cd "$REPO" || exit 2
+	exec bash "scripts/gate/$script" "$@"
+	;;
+dmesg)
+	exec /usr/bin/dmesg "$@"
+	;;
+cat)
+	path=${1:?hwrun cat 需要路径}
+	ok=0
+	for p in $CAT_PREFIXES; do
+		case "$path" in "$p"*) ok=1 ;; esac
+	done
+	[ "$ok" = 1 ] || { echo "hwrun cat: 路径前缀不在允许清单（$CAT_PREFIXES）" >&2; exit 2; }
+	exec /bin/cat "$@"
+	;;
+*)
+	echo "usage: hwrun gate <script.sh> [args] | hwrun dmesg [args] | hwrun cat <path>" >&2
+	exit 2
+	;;
+esac
